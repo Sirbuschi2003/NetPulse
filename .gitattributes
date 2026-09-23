@@ -1,0 +1,2 @@
+# Immer Linux-Zeilenenden: wichtig für Dockerfile, Caddyfile und Skripte auf dem NAS/Pi
+* text=auto eol=lf
