@@ -1,0 +1,61 @@
+//! Konfiguration über Umgebungsvariablen (werden in docker-compose.yml bzw. .env gesetzt).
+
+use std::{env, str::FromStr, time::Duration};
+
+use anyhow::{anyhow, Context, Result};
+
+// Bewusst kein `Debug`: Die Struktur enthält Passwörter, die nie in Logs landen sollen.
+pub struct Config {
+    pub database_url: String,
+    pub listen_addr: String,
+    pub web_dir: String,
+    /// Cookie nur über HTTPS senden (hinter dem Caddy-Proxy immer der Fall)
+    pub cookie_secure: bool,
+    pub session_hours: i32,
+    pub discovery_interval: Duration,
+    pub monitor_interval: Duration,
+    pub metrics_retention_days: i32,
+    pub events_retention_days: i32,
+    pub audit_retention_days: i32,
+    pub initial_admin_user: Option<String>,
+    pub initial_admin_password: Option<String>,
+    pub initial_networks: Vec<String>,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            database_url: env::var("DATABASE_URL").context("Umgebungsvariable DATABASE_URL fehlt")?,
+            listen_addr: string("LISTEN_ADDR", "127.0.0.1:8080"),
+            web_dir: string("WEB_DIR", "./web"),
+            cookie_secure: !matches!(optional("COOKIE_SECURE").as_deref(), Some("false" | "0" | "no")),
+            session_hours: number("SESSION_HOURS", 12)?,
+            discovery_interval: Duration::from_secs(60 * number::<u64>("DISCOVERY_INTERVAL_MIN", 15)?.max(1)),
+            monitor_interval: Duration::from_secs(number::<u64>("MONITOR_INTERVAL_SEC", 60)?.max(10)),
+            metrics_retention_days: number("RETENTION_METRICS_DAYS", 90)?,
+            events_retention_days: number("RETENTION_EVENTS_DAYS", 180)?,
+            audit_retention_days: number("RETENTION_AUDIT_DAYS", 365)?,
+            initial_admin_user: optional("INITIAL_ADMIN_USER"),
+            initial_admin_password: optional("INITIAL_ADMIN_PASSWORD"),
+            initial_networks: optional("SCAN_NETWORKS")
+                .map(|s| s.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
+                .unwrap_or_default(),
+        })
+    }
+}
+
+fn optional(key: &str) -> Option<String> {
+    env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+fn string(key: &str, default: &str) -> String {
+    optional(key).unwrap_or_else(|| default.to_string())
+}
+
+/// Liest eine Zahl; `T` ist der gewünschte Zahlentyp (z. B. u64 oder i32).
+fn number<T: FromStr>(key: &str, default: T) -> Result<T> {
+    match optional(key) {
+        Some(v) => v.parse().map_err(|_| anyhow!("{key}: ungültiger Wert '{v}'")),
+        None => Ok(default),
+    }
+}

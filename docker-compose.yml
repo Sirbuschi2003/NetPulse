@@ -1,0 +1,81 @@
+# NetPulse – Produktivbetrieb auf NAS / Raspberry Pi / Linux-Server
+#
+# Alle Dienste nutzen das Host-Netzwerk. Nur so sieht NetPulse dein echtes LAN
+# (ARP-Tabelle, Broadcasts). Datenbank und App lauschen nur auf 127.0.0.1,
+# von außen erreichbar ist ausschließlich Caddy (HTTPS).
+#
+# Start:  docker compose up -d        (vorher .env aus .env.example anlegen)
+
+name: netpulse
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - postgres
+      - -c
+      - listen_addresses=127.0.0.1
+      - -c
+      - port=${DB_PORT:-5433}
+      - -c
+      - timescaledb.telemetry_level=off
+    environment:
+      POSTGRES_USER: netpulse
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Bitte DB_PASSWORD in .env setzen}
+      POSTGRES_DB: netpulse
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DB_PORT:-5433} -U netpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build: .
+    image: netpulse:latest
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://netpulse:${DB_PASSWORD}@127.0.0.1:${DB_PORT:-5433}/netpulse
+      LISTEN_ADDR: 127.0.0.1:${APP_PORT:-8080}
+      SCAN_NETWORKS: ${SCAN_NETWORKS:-}
+      INITIAL_ADMIN_USER: ${INITIAL_ADMIN_USER:-admin}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      DISCOVERY_INTERVAL_MIN: ${DISCOVERY_INTERVAL_MIN:-15}
+      MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-60}
+      RETENTION_METRICS_DAYS: ${RETENTION_METRICS_DAYS:-90}
+      RETENTION_EVENTS_DAYS: ${RETENTION_EVENTS_DAYS:-180}
+      RETENTION_AUDIT_DAYS: ${RETENTION_AUDIT_DAYS:-365}
+      RUST_LOG: ${RUST_LOG:-info}
+    # Minimale Rechte: nur NET_RAW für ICMP-Ping, Dateisystem schreibgeschützt
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
+    tmpfs: [/tmp]
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [app]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-https://localhost:8443}
+      UPSTREAM: 127.0.0.1:${APP_PORT:-8080}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

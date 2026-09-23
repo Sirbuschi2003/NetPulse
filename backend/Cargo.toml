@@ -1,0 +1,28 @@
+[package]
+name = "netpulse"
+version = "0.1.0"
+edition = "2021"
+description = "Agentenloses Netzwerk-Monitoring mit Weboberfläche"
+publish = false
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+dns-lookup = "2"
+futures = "0.3"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "json", "macros", "migrate"] }
+surge-ping = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,28 @@
+# Caddy: HTTPS-Reverse-Proxy vor NetPulse.
+# `tls internal` erzeugt eine eigene lokale Zertifizierungsstelle. Deren Stammzertifikat
+# kann man im Browser/Betriebssystem als vertrauenswürdig importieren (siehe README).
+{
+	admin off
+	# Port 80 nicht belegen (auf einem NAS meist schon von der Weboberfläche genutzt)
+	auto_https disable_redirects
+}
+
+{$SITE_ADDRESS} {
+	tls internal
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "geolocation=(), camera=(), microphone=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		-Server
+	}
+
+	# Interne Endpunkte nicht nach außen geben
+	respond /healthz 404
+
+	reverse_proxy {$UPSTREAM}
+}

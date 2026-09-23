@@ -1,0 +1,61 @@
+# NetPulse – Entwicklung/Test unter Windows oder macOS (Docker Desktop)
+#
+# Docker Desktop läuft in einer VM und sieht das echte LAN nur eingeschränkt:
+# Ping/TCP zu Geräten funktioniert meist, ARP/MAC-Adressen nicht.
+# Für den echten Betrieb docker-compose.yml auf einem Linux-Host verwenden.
+#
+# Start:  docker compose -f docker-compose.dev.yml up --build
+# Aufruf: https://localhost:8443
+
+name: netpulse-dev
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
+    environment:
+      POSTGRES_USER: netpulse
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev-only-password}
+      POSTGRES_DB: netpulse
+    volumes:
+      - dev-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netpulse"]
+      interval: 5s
+      retries: 20
+
+  app:
+    build: .
+    image: netpulse:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://netpulse:${DB_PASSWORD:-dev-only-password}@db:5432/netpulse
+      LISTEN_ADDR: 0.0.0.0:8080
+      SCAN_NETWORKS: ${SCAN_NETWORKS:-}
+      INITIAL_ADMIN_USER: ${INITIAL_ADMIN_USER:-admin}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      DISCOVERY_INTERVAL_MIN: ${DISCOVERY_INTERVAL_MIN:-15}
+      MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-60}
+      RUST_LOG: ${RUST_LOG:-info}
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
+    tmpfs: [/tmp]
+
+  proxy:
+    image: caddy:2
+    depends_on: [app]
+    ports:
+      - "8443:8443"
+    environment:
+      SITE_ADDRESS: https://localhost:8443
+      UPSTREAM: app:8080
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - dev-caddy-data:/data
+
+volumes:
+  dev-db-data:
+  dev-caddy-data:

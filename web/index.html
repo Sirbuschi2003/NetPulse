@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>NetPulse</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M5 18h5l3-8 5 14 3-6h6' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar" hidden>
+    <a class="brand" href="#/dashboard">NetPulse</a>
+    <nav id="nav">
+      <a href="#/dashboard">Dashboard</a>
+      <a href="#/devices">Geräte</a>
+      <a href="#/events">Ereignisse</a>
+      <a href="#/networks" class="admin-only">Netzwerke</a>
+      <a href="#/users" class="admin-only">Benutzer</a>
+      <a href="#/audit" class="admin-only">Audit-Log</a>
+    </nav>
+    <div class="user">
+      <a href="#/account" id="user-name" title="Mein Konto"></a>
+      <button id="logout" class="ghost" type="button">Abmelden</button>
+    </div>
+  </header>
+  <main id="view"></main>
+  <script src="app.js"></script>
+</body>
+</html>
