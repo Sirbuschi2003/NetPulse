@@ -23,8 +23,8 @@ pub const COMMON_PORTS: &[u16] = &[
 /// (Windows blockiert Ping z. B. standardmäßig).
 pub const LIVENESS_PORTS: &[u16] = &[443, 80, 22, 445, 3389];
 
-/// Größtes erlaubtes Netz pro Eintrag: /20 = 4094 Adressen
-pub const MIN_PREFIX: u8 = 20;
+/// Größtes erlaubtes Netz pro Eintrag: /16 = 65.534 Adressen (ein Scan dauert dann einige Minuten)
+pub const MIN_PREFIX: u8 = 16;
 
 /// Zerlegt „192.168.1.0/24“ in Netzadresse und Präfix. Host-Bits werden auf 0 gesetzt,
 /// aus „192.168.1.17/24“ wird also „192.168.1.0/24“.
@@ -39,7 +39,7 @@ pub fn parse_cidr(input: &str) -> Result<(Ipv4Addr, u8)> {
         bail!("Präfix muss zwischen /{MIN_PREFIX} und /32 liegen");
     }
     if prefix < MIN_PREFIX {
-        bail!("Netz zu groß: höchstens /{MIN_PREFIX} (4094 Adressen) pro Eintrag – bitte aufteilen");
+        bail!("Netz zu groß: höchstens /{MIN_PREFIX} (65.534 Adressen) pro Eintrag – bitte aufteilen");
     }
     let mask = u32::MAX << (32 - prefix);
     Ok((Ipv4Addr::from(u32::from(addr) & mask), prefix))
@@ -185,6 +185,8 @@ mod tests {
     #[test]
     fn zu_grosse_netze_werden_abgelehnt() {
         assert!(parse_cidr("10.0.0.0/8").is_err());
+        assert!(parse_cidr("10.0.0.0/15").is_err());
+        assert_eq!(parse_cidr("10.10.0.0/16").unwrap().1, 16);
         assert!(parse_cidr("10.0.0.0/33").is_err());
         assert!(parse_cidr("kein-netz").is_err());
     }

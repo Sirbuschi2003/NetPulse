@@ -152,7 +152,7 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 - Passwörter werden mit Argon2id gespeichert, Sitzungs-Tokens nur als SHA-256-Hash.
 - Cookies sind `HttpOnly`, `Secure` und `SameSite=Strict`; dazu kommt ein CSRF-Header und nach 5 Fehlversuchen eine Login-Sperre.
 - Strenge Content-Security-Policy, HSTS und keine externen Skripte oder CDNs.
-- Gescannt werden nur Netze, die ein Admin ausdrücklich freigegeben hat (höchstens /20 je Eintrag).
+- Gescannt werden nur Netze, die ein Admin ausdrücklich freigegeben hat (höchstens /16 je Eintrag).
 - Das Audit-Log protokolliert alle Anmeldungen und Änderungen.
 
 ## Backup

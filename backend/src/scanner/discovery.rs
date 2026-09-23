@@ -61,7 +61,7 @@ async fn discover_once(state: &AppState, pinger: &Arc<Pinger>) -> Result<Option<
     }
     tracing::info!("Discovery startet: {} Adressen in {} Netz(en)", targets.len(), networks.len());
 
-    // 1. Wer antwortet? 128 Adressen gleichzeitig prüfen
+    // 1. Wer antwortet? 256 Adressen gleichzeitig prüfen (ein /16 dauert so ca. 5–10 Minuten)
     let alive: Vec<(Ipv4Addr, Option<Duration>)> = stream::iter(targets.iter().copied())
         .map(|ip| {
             let pinger = pinger.clone();
@@ -73,7 +73,7 @@ async fn discover_once(state: &AppState, pinger: &Arc<Pinger>) -> Result<Option<
                 (ip, rtt)
             }
         })
-        .buffer_unordered(128)
+        .buffer_unordered(256)
         .filter_map(|(ip, rtt)| async move { rtt.map(|rtt| (ip, Some(rtt))) })
         .collect()
         .await;

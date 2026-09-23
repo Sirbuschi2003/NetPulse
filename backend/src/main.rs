@@ -143,8 +143,15 @@ async fn bootstrap(db: &PgPool, config: &Config) -> Result<()> {
     let (networks,): (i64,) = sqlx::query_as("SELECT count(*) FROM networks").fetch_one(db).await?;
     if networks == 0 {
         for cidr in &config.initial_networks {
-            let (addr, prefix) = scanner::net::parse_cidr(cidr)
-                .with_context(|| format!("SCAN_NETWORKS: '{cidr}'"))?;
+            // Ein ungültiger Eintrag soll den Start nicht verhindern – das Netz kann
+            // danach in der Oberfläche korrekt angelegt werden.
+            let (addr, prefix) = match scanner::net::parse_cidr(cidr) {
+                Ok(net) => net,
+                Err(e) => {
+                    tracing::warn!("SCAN_NETWORKS: '{cidr}' übersprungen – {e}");
+                    continue;
+                }
+            };
             sqlx::query("INSERT INTO networks (cidr, name) VALUES ($1::cidr, $2) ON CONFLICT DO NOTHING")
                 .bind(format!("{addr}/{prefix}"))
                 .bind("Aus Konfiguration")

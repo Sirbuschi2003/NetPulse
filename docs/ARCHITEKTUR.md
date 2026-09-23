@@ -42,7 +42,7 @@ Neue Änderungen kommen immer als **neue** Datei hinzu (`0002_…sql`); bestehen
 ## Ablauf der Datenerfassung
 
 **Discovery** (je freigegebenem Netz):
-1. ICMP-Ping an jede Adresse (128 parallel). Antwortet eine Adresse nicht, folgt ein TCP-Verbindungsversuch
+1. ICMP-Ping an jede Adresse (256 parallel). Antwortet eine Adresse nicht, folgt ein TCP-Verbindungsversuch
    auf 443/80/22/445/3389. Auch ein „Connection refused“ zählt als Lebenszeichen.
 2. Die ARP-Tabelle des Kernels liefert MAC-Adressen. Sie findet auch Geräte, die Ping und TCP blockieren.
 3. Für jedes aktive Gerät: Scan von 28 typischen Ports und Reverse-DNS-Name.

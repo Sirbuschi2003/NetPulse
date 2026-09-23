@@ -526,7 +526,7 @@ async function viewNetworks() {
         <div class="actions"><button id="scan-now" type="button">Jetzt scannen</button></div></div>
       ${lastDiscoveryLine(summary)}
       <div class="notice">Nur eigene oder ausdrücklich freigegebene Netze eintragen. Das Scannen fremder Netze
-        kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /20 (4094 Adressen).</div>
+        kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /16 (65.534 Adressen), kleinere Netze werden schneller gescannt.</div>
       <div class="grid">
         <section class="card span-2"><header><h2>Freigegebene Netze</h2></header>
           <div class="table-wrap"><table><thead><tr><th>Netz</th><th>Name</th><th>Angelegt</th><th></th></tr></thead>
