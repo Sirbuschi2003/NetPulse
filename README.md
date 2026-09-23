@@ -21,7 +21,38 @@ Hinweise zu Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md).
 
 ---
 
-## Installation auf NAS / Raspberry Pi / Linux-Server
+## Installation mit Portainer (empfohlen)
+
+GitHub baut bei jeder Änderung fertige Images für Intel/AMD und Raspberry Pi
+(`ghcr.io/sirbuschi2003/netpulse`). Es muss also nichts kompiliert werden.
+
+1. In Portainer: **Stacks → Add stack**, Name `netpulse`.
+2. Build method **Repository** wählen:
+   | Feld | Wert |
+   |---|---|
+   | Repository URL | `https://github.com/Sirbuschi2003/NetPulse` |
+   | Repository reference | `refs/heads/main` |
+   | Compose path | `deploy/portainer-stack.yml` |
+3. Unter **Environment variables** eintragen:
+   | Name | Beispiel | Hinweis |
+   |---|---|---|
+   | `DB_PASSWORD` | `a8f3…` (lang, zufällig) | nur Buchstaben und Ziffern, z. B. von `openssl rand -hex 24` |
+   | `SITE_ADDRESS` | `https://192.168.178.10:8443` | IP deines NAS/Pi und Port |
+   | `SCAN_NETWORKS` | `192.168.178.0/24` | dein Heimnetz |
+   | `INITIAL_ADMIN_PASSWORD` | mind. 12 Zeichen | nach dem ersten Login ändern |
+4. **Deploy the stack**. Nach etwa einer Minute ist NetPulse unter `SITE_ADDRESS` erreichbar
+   (Benutzer `admin`).
+
+**Updates:** Stack öffnen → **Pull and redeploy** und dabei *Re-pull image* aktivieren.
+Wer es automatisch mag, schaltet im Stack **GitOps updates** ein.
+
+**Stammzertifikat für den Browser** (gegen die Zertifikatswarnung): In Portainer den Container
+`netpulse-proxy` öffnen → **Console** → *Connect* → `cat /data/caddy/pki/authorities/local/root.crt`
+eingeben, die Ausgabe in eine Datei `netpulse-root.crt` kopieren und wie unten beschrieben importieren.
+
+---
+
+## Installation auf NAS / Raspberry Pi / Linux-Server (ohne Portainer)
 
 **Voraussetzungen:** 64-Bit-Linux mit Docker und Docker Compose
 (Raspberry Pi 4/5 mit 64-Bit-Raspberry-Pi-OS, Synology mit Container Manager, QNAP, Unraid, Ubuntu/Debian).
@@ -140,6 +171,9 @@ backend/            Rust-Quellcode
   src/auth.rs       Passwörter, Sitzungen, Rollen, Brute-Force-Schutz
 web/                Weboberfläche (index.html, app.js, style.css)
 docs/               Architektur, Datenschutz, Roadmap
+deploy/             Stack-Datei für Portainer (fertige Images)
+proxy/              Caddy-Image mit eingebauter Konfiguration
+.github/workflows/  Automatische Tests und Image-Builds
 Dockerfile          Multi-Arch-Build (amd64 + arm64)
 docker-compose.yml  Produktivbetrieb (Host-Netzwerk)
 docker-compose.dev.yml  Test unter Windows/macOS
