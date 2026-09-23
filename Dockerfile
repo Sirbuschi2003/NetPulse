@@ -25,9 +25,10 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
 
 COPY backend/ ./
-# Cache-Mounts: Abhängigkeiten werden beim nächsten Build nicht neu kompiliert
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+# Cache-Mounts: Abhängigkeiten werden beim nächsten Build nicht neu kompiliert.
+# sharing=locked: amd64- und arm64-Build laufen parallel und dürfen nicht gleichzeitig schreiben.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
     target="$(cat /rust-target)"; \
     cargo build --release --target "$target"; \
