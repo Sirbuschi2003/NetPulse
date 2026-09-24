@@ -314,7 +314,7 @@ async fn poll_one(state: &AppState, t: Target, cached: Option<Cached>, limit: Du
 /// Die zugeordneten bzw. automatischen HTTP-Zugangsdaten durchprobieren und die passende merken
 async fn find_credential(state: &AppState, device_id: i64, ip: Ipv4Addr, c: &mut Cached, limit: Duration) -> anyhow::Result<Value> {
     let creds = load_credentials(state, device_id).await?;
-    for cred in creds.into_iter().filter(|c| c.kind == "http") {
+    for cred in creds.into_iter().filter(|cr| cr.kind == "http" && (cr.linked || c.info.generation >= 2)) {
         if let Ok(Ok(data)) = tokio::time::timeout(limit, shelly::status(ip, &c.info, Some(&cred))).await {
             c.cred = Some(cred);
             return Ok(data);

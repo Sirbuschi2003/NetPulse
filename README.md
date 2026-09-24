@@ -180,9 +180,10 @@ NetPulse unter einer eigenen Adresse mit **gültigem Zertifikat** erreichbar sei
 
 1. **Vorher Zwei-Faktor-Anmeldung einschalten:** *Mein Konto → Zwei-Faktor-Anmeldung → Einrichten* (für alle Konten).
    Ohne 2FA NetPulse nicht ins Internet stellen.
-2. **Eingang für den Proxy freigeben:** im Portainer-Stack die Variable `PROXY_LISTEN=http://:18081` setzen
-   und `PUBLIC_URL=https://monitoring.example.de` (für Links in Nachrichten). Stack aktualisieren.
-   Port 18081 nur im LAN erreichbar lassen (nicht am Router freigeben) – ins Internet geht nur NPM.
+2. **Eingang für den Proxy freigeben:** im Portainer-Stack `PROXY_LISTEN=http://<LAN-IP des Hosts>:18081` setzen
+   (z. B. `http://192.168.178.10:18081`) und `PUBLIC_URL=https://monitoring.example.de` (für Links in Nachrichten).
+   Port 18081 ist unverschlüsseltes HTTP: **nie am Router freigeben** – ins Internet geht nur NPM (Port 443).
+   Ebenso Syslog (5514) und Traps (1162) nie am Router freigeben.
 3. **In NPM einen Proxy Host anlegen:**
    - Domain: `monitoring.example.de`, Scheme `http`, Forward Hostname/IP: IP des NAS, Port `18081`
    - **Websockets Support** an, **Block Common Exploits** an
@@ -210,6 +211,7 @@ sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (
 | `SYSLOG_PORT` | 5514 | Syslog-Empfang (UDP), 0 = aus |
 | `TRAP_PORT` | 1162 | SNMP-Trap-Empfang (UDP), 0 = aus |
 | `TRAP_COMMUNITY` | – | nur Traps mit dieser Community annehmen (mehrere mit Komma) |
+| `SYSLOG_ALLOW` | Scan-Netze | von welchen Netzen Syslog/Traps angenommen werden (CIDR, Komma) oder `any` |
 | `RETENTION_SYSLOG_DAYS` | 30 | Aufbewahrung der Protokollmeldungen |
 | `TZ` | Europe/Berlin | Zeitzone für die Uhrzeiten im Such-Zeitplan |
 | `MONITOR_INTERVAL_SEC` | 60 | Abstand der Erreichbarkeitsprüfungen in Sekunden |

@@ -25,9 +25,12 @@ pub struct LoginRequest {
     code: Option<String>,
 }
 
-pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) -> ApiResult<Response> {
-    let username = req.username.trim().to_lowercase();
-    if st.login_limiter.is_locked(&username) {
+pub async fn login(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<LoginRequest>) -> ApiResult<Response> {
+    let username: String = req.username.trim().to_lowercase().chars().take(64).collect();
+    let ip = auth::client_ip(&headers).unwrap_or_else(|| "unbekannt".into());
+    // Versuch zählen, bevor geprüft wird (auch parallele Anfragen)
+    if !st.login_limiter.try_attempt(&username, &ip) {
+        audit::log(&st.db, None, Some(&username), "login_blocked", json!({ "ip": ip })).await;
         return Err(ApiError::TooManyRequests);
     }
 
@@ -43,8 +46,7 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) ->
 
     // `let … else`: Wenn das Muster nicht passt, wird der else-Zweig ausgeführt
     let Some((id, name, role, _)) = user.filter(|_| valid) else {
-        st.login_limiter.record_failure(&username);
-        audit::log(&st.db, None, Some(&username), "login_failed", json!({})).await;
+        audit::log(&st.db, None, Some(&username), "login_failed", json!({ "ip": ip })).await;
         return Err(ApiError::InvalidCredentials);
     };
 
@@ -56,6 +58,8 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) ->
             .await?;
     if totp_enabled {
         let Some(code) = req.code.as_deref().filter(|c| !c.trim().is_empty()) else {
+            // Passwort stimmt – dieser Schritt zählt nicht als Fehlversuch
+            st.login_limiter.success(&username, &ip);
             return Ok(Json(json!({ "totp_required": true })).into_response());
         };
         let secret: String = totp_secret
@@ -63,20 +67,27 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) ->
             .and_then(|s| st.vault.open_value(s).ok())
             .ok_or_else(|| ApiError::BadRequest("Zwei-Faktor-Geheimnis nicht lesbar – Admin muss 2FA zurücksetzen".into()))?;
         let Some(step) = crate::totp::verify(&secret, code, chrono::Utc::now().timestamp(), last_step) else {
-            st.login_limiter.record_failure(&username);
-            audit::log(&st.db, Some(id), Some(&name), "login_failed", json!({ "reason": "totp" })).await;
+            audit::log(&st.db, Some(id), Some(&name), "login_failed", json!({ "reason": "totp", "ip": ip })).await;
             return Err(ApiError::BadRequest("Code aus der Authenticator-App ist falsch oder abgelaufen".into()));
         };
-        sqlx::query("UPDATE users SET totp_last_step = $2 WHERE id = $1").bind(id).bind(step).execute(&st.db).await?;
+        // Nur einmal gültig – auch bei gleichzeitigen Anfragen (bedingtes Update)
+        let used = sqlx::query("UPDATE users SET totp_last_step = $2 WHERE id = $1 AND (totp_last_step IS NULL OR totp_last_step < $2)")
+            .bind(id)
+            .bind(step)
+            .execute(&st.db)
+            .await?;
+        if used.rows_affected() == 0 {
+            return Err(ApiError::BadRequest("Code aus der Authenticator-App ist falsch oder abgelaufen".into()));
+        }
     }
 
-    st.login_limiter.reset(&username);
-    let token = auth::create_session(&st.db, id, st.config.session_hours).await?;
+    st.login_limiter.success(&username, &ip);
+    let token = auth::create_session(&st.db, id, st.config.session_hours, &headers).await?;
     sqlx::query("UPDATE users SET last_login = now() WHERE id = $1")
         .bind(id)
         .execute(&st.db)
         .await?;
-    audit::log(&st.db, Some(id), Some(&name), "login", json!({})).await;
+    audit::log(&st.db, Some(id), Some(&name), "login", json!({ "ip": auth::client_ip(&headers) })).await;
 
     let max_age = i64::from(st.config.session_hours) * 3600;
     let cookie = auth::session_cookie(&token, max_age, st.config.cookie_secure);
@@ -168,7 +179,7 @@ pub struct TotpCode {
     code: String,
 }
 
-pub async fn totp_enable(State(st): State<AppState>, user: CurrentUser, Json(req): Json<TotpCode>) -> ApiResult<Json<Value>> {
+pub async fn totp_enable(State(st): State<AppState>, user: CurrentUser, headers: HeaderMap, Json(req): Json<TotpCode>) -> ApiResult<Json<Value>> {
     let (sealed,): (Option<String>,) = sqlx::query_as("SELECT totp_secret FROM users WHERE id = $1").bind(user.id).fetch_one(&st.db).await?;
     let secret: String = sealed
         .as_deref()
@@ -177,6 +188,9 @@ pub async fn totp_enable(State(st): State<AppState>, user: CurrentUser, Json(req
     let step = crate::totp::verify(&secret, &req.code, chrono::Utc::now().timestamp(), None)
         .ok_or_else(|| ApiError::BadRequest("Code stimmt nicht – Uhrzeit am Handy prüfen und den aktuellen Code eingeben".into()))?;
     sqlx::query("UPDATE users SET totp_enabled = true, totp_last_step = $2 WHERE id = $1").bind(user.id).bind(step).execute(&st.db).await?;
+    // Ab jetzt gilt 2FA: alle anderen (evtl. fremden) Sitzungen abmelden
+    let current = auth::session_token(&headers).map(|t| auth::token_hash(&t)).unwrap_or_default();
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2").bind(user.id).bind(current).execute(&st.db).await?;
     audit::by(&st.db, &user, "totp_enabled", json!({})).await;
     Ok(Json(json!({ "enabled": true })))
 }
@@ -184,13 +198,24 @@ pub async fn totp_enable(State(st): State<AppState>, user: CurrentUser, Json(req
 #[derive(Deserialize)]
 pub struct TotpDisable {
     password: String,
+    code: String,
 }
 
-pub async fn totp_disable(State(st): State<AppState>, user: CurrentUser, Json(req): Json<TotpDisable>) -> ApiResult<Json<Value>> {
-    let (hash,): (String,) = sqlx::query_as("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&st.db).await?;
+pub async fn totp_disable(State(st): State<AppState>, user: CurrentUser, headers: HeaderMap, Json(req): Json<TotpDisable>) -> ApiResult<Json<Value>> {
+    let ip = auth::client_ip(&headers).unwrap_or_else(|| "unbekannt".into());
+    if !st.login_limiter.try_attempt(&user.username, &ip) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let (hash, sealed, last_step): (String, Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT password_hash, totp_secret, totp_last_step FROM users WHERE id = $1").bind(user.id).fetch_one(&st.db).await?;
     if !auth::verify_password(req.password, hash).await {
         return Err(ApiError::BadRequest("Passwort ist falsch".into()));
     }
+    let secret: Option<String> = sealed.as_deref().and_then(|s| st.vault.open_value(s).ok());
+    if !secret.is_some_and(|s| crate::totp::verify(&s, &req.code, chrono::Utc::now().timestamp(), last_step).is_some()) {
+        return Err(ApiError::BadRequest("Code aus der Authenticator-App ist falsch".into()));
+    }
+    st.login_limiter.success(&user.username, &ip);
     sqlx::query("UPDATE users SET totp_enabled = false, totp_secret = NULL, totp_last_step = NULL WHERE id = $1")
         .bind(user.id)
         .execute(&st.db)
@@ -293,4 +318,51 @@ pub async fn push_test(State(st): State<AppState>, user: CurrentUser) -> ApiResu
     };
     let (ok, failed) = crate::push::send(&st, Some(user.id), &message).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
     Ok(Json(json!({ "sent": ok, "failed": failed })))
+}
+
+// ---------------------------------------------------------------------------
+// Angemeldete Sitzungen
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+pub struct SessionRow {
+    id: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    user_agent: Option<String>,
+    ip: Option<String>,
+    current: bool,
+}
+
+pub async fn sessions(State(st): State<AppState>, user: CurrentUser, headers: HeaderMap) -> ApiResult<Json<Vec<SessionRow>>> {
+    let hash = auth::session_token(&headers).map(|t| auth::token_hash(&t)).unwrap_or_default();
+    let rows = sqlx::query_as::<_, SessionRow>(
+        "SELECT id, created_at, last_seen, expires_at, user_agent, ip, token_hash = $2 AS current
+           FROM sessions WHERE user_id = $1 AND expires_at > now()
+          ORDER BY (token_hash = $2) DESC, COALESCE(last_seen, created_at) DESC",
+    )
+    .bind(user.id)
+    .bind(hash)
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(rows))
+}
+
+/// Eine eigene Sitzung beenden (das Gerät ist sofort abgemeldet)
+pub async fn end_session(State(st): State<AppState>, user: CurrentUser, axum::extract::Path(id): axum::extract::Path<i64>) -> ApiResult<Json<Value>> {
+    let done = sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2").bind(id).bind(user.id).execute(&st.db).await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    audit::by(&st.db, &user, "session_end", json!({ "session": id })).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Alle anderen Sitzungen beenden
+pub async fn end_other_sessions(State(st): State<AppState>, user: CurrentUser, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let hash = auth::session_token(&headers).map(|t| auth::token_hash(&t)).unwrap_or_default();
+    let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2").bind(user.id).bind(hash).execute(&st.db).await?;
+    audit::by(&st.db, &user, "session_end_others", json!({ "count": done.rows_affected() })).await;
+    Ok(Json(json!({ "ended": done.rows_affected() })))
 }

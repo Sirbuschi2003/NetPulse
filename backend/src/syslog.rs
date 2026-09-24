@@ -32,15 +32,66 @@ pub struct LogMsg {
 
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
+/// Von wem werden Meldungen angenommen? `SYSLOG_ALLOW`: Liste von Netzen (CIDR) oder `any`;
+/// Standard: nur aus den freigegebenen Scan-Netzen (Liste wird jede Minute neu geladen)
+#[derive(Clone, Default)]
+struct Allow {
+    any: bool,
+    nets: std::sync::Arc<std::sync::RwLock<Vec<(u32, u32)>>>,
+}
+
+impl Allow {
+    fn permits(&self, ip: IpAddr) -> bool {
+        if self.any || ip.is_loopback() {
+            return true;
+        }
+        let IpAddr::V4(v4) = ip else { return false };
+        let n = u32::from(v4);
+        self.nets.read().unwrap().iter().any(|(net, mask)| n & mask == *net)
+    }
+}
+
+fn parse_net(cidr: &str) -> Option<(u32, u32)> {
+    let (addr, prefix) = crate::scanner::net::parse_cidr(cidr.trim()).ok()?;
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix)) };
+    Some((u32::from(addr) & mask, mask))
+}
+
+async fn allow_list(state: AppState) -> Allow {
+    let fixed = std::env::var("SYSLOG_ALLOW").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let allow = Allow { any: fixed.as_deref() == Some("any"), ..Default::default() };
+    if allow.any {
+        return allow;
+    }
+    if let Some(list) = fixed {
+        *allow.nets.write().unwrap() = list.split(',').filter_map(parse_net).collect();
+        return allow;
+    }
+    let nets = allow.nets.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(rows) = sqlx::query_as::<_, (String,)>("SELECT cidr::text FROM networks WHERE enabled").fetch_all(&state.db).await {
+                *nets.write().unwrap() = rows.iter().filter_map(|(c,)| parse_net(c)).collect();
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+    allow
+}
+
 pub fn start(state: &AppState) {
-    let (tx, rx) = mpsc::channel::<LogMsg>(20_000);
+    let (tx, rx) = mpsc::channel::<LogMsg>(2_000);
     tokio::spawn(writer(state.clone(), rx));
-    if state.config.syslog_port > 0 {
-        tokio::spawn(syslog_listener(state.config.syslog_port, tx.clone()));
-    }
-    if state.config.trap_port > 0 {
-        tokio::spawn(trap_listener(state.clone(), state.config.trap_port, tx));
-    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let allow = allow_list(state.clone()).await;
+        if state.config.syslog_port > 0 {
+            tokio::spawn(syslog_listener(state.config.syslog_port, tx.clone(), allow.clone()));
+        }
+        if state.config.trap_port > 0 {
+            tokio::spawn(trap_listener(state.clone(), state.config.trap_port, tx, allow));
+        }
+    });
 }
 
 fn queue(tx: &mpsc::Sender<LogMsg>, msg: LogMsg) {
@@ -56,7 +107,7 @@ fn queue(tx: &mpsc::Sender<LogMsg>, msg: LogMsg) {
 // Syslog
 // ---------------------------------------------------------------------------
 
-async fn syslog_listener(port: u16, tx: mpsc::Sender<LogMsg>) {
+async fn syslog_listener(port: u16, tx: mpsc::Sender<LogMsg>, allow: Allow) {
     let socket = match UdpSocket::bind(("0.0.0.0", port)).await {
         Ok(s) => s,
         Err(e) => {
@@ -68,6 +119,9 @@ async fn syslog_listener(port: u16, tx: mpsc::Sender<LogMsg>) {
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else { continue };
+        if !allow.permits(from.ip()) {
+            continue;
+        }
         let text = String::from_utf8_lossy(&buf[..n]);
         let (facility, severity, host, app, message) = parse_syslog(&text);
         queue(&tx, LogMsg { time: Utc::now(), source: from.ip(), facility, severity, host, app, message });
@@ -116,7 +170,7 @@ pub fn parse_syslog(raw: &str) -> (i16, i16, Option<String>, Option<String>, Str
                 }
             }
         }
-        return (facility, severity, host.and_then(dash), app.and_then(dash), msg.trim_start_matches('\u{feff}').trim().to_string());
+        return clip(facility, severity, host.and_then(dash), app.and_then(dash), msg.trim_start_matches('\u{feff}').trim().to_string());
     }
 
     // RFC 3164: „Mmm dd hh:mm:ss HOST TAG[PID]: Text“ (Zeitstempel und Host optional)
@@ -147,14 +201,20 @@ pub fn parse_syslog(raw: &str) -> (i16, i16, Option<String>, Option<String>, Str
             msg = after[second.len()..].trim_start();
         }
     }
-    (facility, severity, host, app, msg.trim().to_string())
+    clip(facility, severity, host, app, msg.trim().to_string())
+}
+
+/// Längen begrenzen (Schutz vor riesigen Paketen)
+fn clip(facility: i16, severity: i16, host: Option<String>, app: Option<String>, msg: String) -> (i16, i16, Option<String>, Option<String>, String) {
+    let cut = |s: String, n: usize| s.chars().take(n).collect::<String>();
+    (facility, severity, host.map(|h| cut(h, 64)), app.map(|a| cut(a, 64)), cut(msg, 2000))
 }
 
 // ---------------------------------------------------------------------------
 // SNMP-Traps
 // ---------------------------------------------------------------------------
 
-async fn trap_listener(state: AppState, port: u16, tx: mpsc::Sender<LogMsg>) {
+async fn trap_listener(state: AppState, port: u16, tx: mpsc::Sender<LogMsg>, allow: Allow) {
     let socket = match UdpSocket::bind(("0.0.0.0", port)).await {
         Ok(s) => s,
         Err(e) => {
@@ -166,6 +226,9 @@ async fn trap_listener(state: AppState, port: u16, tx: mpsc::Sender<LogMsg>) {
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else { continue };
+        if !allow.permits(from.ip()) {
+            continue;
+        }
         match parse_trap(&buf[..n]) {
             Some(trap) => {
                 let communities = &state.config.trap_communities;
@@ -237,7 +300,11 @@ fn uint(v: &[u8]) -> u64 {
     v.iter().take(8).fold(0u64, |n, b| (n << 8) | u64::from(*b))
 }
 
+/// OID aus BER; höchstens 128 Teile (SNMP-Grenze) – längere gelten als ungültig
 fn oid(v: &[u8]) -> Vec<u64> {
+    if v.len() > 256 {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut acc: u64 = 0;
     for (i, b) in v.iter().enumerate() {
@@ -289,7 +356,7 @@ type VarBind<'a> = (Vec<u64>, u8, &'a [u8]);
 fn varbinds(data: &[u8]) -> Option<Vec<VarBind<'_>>> {
     let mut list = Ber::new(data);
     let mut out = Vec::new();
-    while !list.done() {
+    while !list.done() && out.len() < 64 {
         let (_, vb) = list.tlv()?;
         let mut vb = Ber::new(vb);
         let (_, name) = vb.tlv()?;
@@ -367,6 +434,10 @@ async fn describe_trap(state: &AppState, trap: &Trap, from: SocketAddr) -> LogMs
     let trap_name = name_of(&trap.trap_oid);
     let details: Vec<String> = trap.varbinds.iter().take(20).map(|(o, v)| format!("{}={v}", name_of(o))).collect();
     let mut message = if details.is_empty() { trap_name.clone() } else { format!("{trap_name}: {}", details.join(", ")) };
+    // v1-Traps nennen eine eigene Agent-Adresse – fälschbar, deshalb nur als Hinweis, nicht als Absender
+    if let Some(agent) = trap.agent.filter(|a| !a.is_unspecified() && IpAddr::V4(*a) != from.ip()) {
+        message.push_str(&format!(" (meldet Agent-Adresse {agent})"));
+    }
     message.truncate(message.char_indices().nth(2000).map_or(message.len(), |(i, _)| i));
     let lower = trap_name.to_lowercase();
     let severity = if lower.contains("linkdown") || lower.contains("authenticationfailure") || lower.contains("fail") {
@@ -378,7 +449,7 @@ async fn describe_trap(state: &AppState, trap: &Trap, from: SocketAddr) -> LogMs
     };
     LogMsg {
         time: Utc::now(),
-        source: trap.agent.filter(|a| !a.is_unspecified()).map_or(from.ip(), IpAddr::V4),
+        source: from.ip(),
         facility: -1,
         severity,
         host: None,

@@ -35,16 +35,21 @@ impl Vapid {
         let path = dir.join("vapid.key");
         let key = match fs::read_to_string(&path) {
             Ok(hex_key) => SigningKey::from_slice(&hex::decode(hex_key.trim())?).context("vapid.key ist beschädigt")?,
-            Err(_) => {
+            // Nur wenn die Datei fehlt – andere Lesefehler dürfen den Schlüssel nicht überschreiben
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                use std::io::Write;
                 let key = SigningKey::random(&mut OsRng);
-                fs::write(&path, hex::encode(key.to_bytes()))?;
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
                 }
+                options.open(&path)?.write_all(hex::encode(key.to_bytes()).as_bytes())?;
                 key
             }
+            Err(e) => return Err(e).context("vapid.key nicht lesbar"),
         };
         let public_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
         Ok(Self { key, public_b64, subject })

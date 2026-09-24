@@ -401,7 +401,7 @@ pub async fn reset_ssh_key(
     AdminUser(user): AdminUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Value>> {
-    sqlx::query("UPDATE devices SET ssh_host_key = NULL, inventory_error = NULL WHERE id = $1")
+    sqlx::query("UPDATE devices SET ssh_host_key = NULL, tls_pin = NULL, inventory_error = NULL WHERE id = $1")
         .bind(id)
         .execute(&st.db)
         .await?;

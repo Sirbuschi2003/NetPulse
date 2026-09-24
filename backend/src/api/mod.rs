@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(session::me))
         .route("/me/password", post(session::change_password))
         .route("/me/totp", get(session::totp_status))
+        .route("/me/sessions", get(session::sessions))
+        .route("/me/sessions/others", delete(session::end_other_sessions))
+        .route("/me/sessions/{id}", delete(session::end_session))
         .route("/me/totp/setup", post(session::totp_setup))
         .route("/me/totp/enable", post(session::totp_enable))
         .route("/me/totp/disable", post(session::totp_disable))
@@ -50,7 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/snmp", get(devices::snmp_explorer))
         .route("/events", get(devices::events))
         .route("/topology", get(public::topology))
-        .route("/public/status/{token}", get(public::public_status))
+        .route("/public/status", get(public::public_status))
         .route("/settings/status-page", get(public::get_config).put(public::set_config))
         .route("/checks", get(checks::list).post(checks::create))
         .route("/checks/{id}", axum::routing::patch(checks::update).delete(checks::remove))
@@ -86,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .route("/users", get(admin::list_users).post(admin::add_user))
         .route("/users/{id}", delete(admin::delete_user))
         .route("/users/{id}/totp", delete(admin::reset_totp))
+        .route("/users/{id}/sessions", delete(admin::end_user_sessions))
         .route("/audit", get(admin::audit_log))
         .route("/logs", get(admin::system_log))
         .route("/system", get(admin::system))
@@ -101,6 +105,17 @@ pub fn router(state: AppState) -> Router {
         // so ist nach einem Update sofort die neue Oberfläche aktiv (sonst meist nur „304 Not Modified“)
         .fallback_service(ServeDir::new(&state.config.web_dir))
         .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        // Sicherheits-Header auch dann, wenn jemand die App ohne den Caddy-Proxy erreicht
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; \
+                 worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
+        .layer(SetResponseHeaderLayer::if_not_present(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))
+        .layer(SetResponseHeaderLayer::if_not_present(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer")))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

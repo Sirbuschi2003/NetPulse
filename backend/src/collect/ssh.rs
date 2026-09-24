@@ -445,7 +445,7 @@ fn parse_windows(output: &str) -> Result<Value> {
     // PowerShell schreibt über SSH manchmal Fortschrittsdaten („#< CLIXML“) davor – nur das JSON nehmen
     let start = output.find('{').ok_or_else(|| anyhow!("Keine Antwort von PowerShell – ist es ein Windows-Gerät?"))?;
     let end = output.rfind('}').ok_or_else(|| anyhow!("Unvollständige Antwort von PowerShell"))?;
-    let raw: Value = serde_json::from_str(&output[start..=end])?;
+    let raw: Value = serde_json::from_str(output.get(start..=end).ok_or_else(|| anyhow!("Unvollständige Antwort von PowerShell"))?)?;
     let mut data = raw.as_object().cloned().unwrap_or_default();
     data.insert("platform".into(), json!("windows"));
 

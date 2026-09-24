@@ -83,8 +83,10 @@ pub async fn run(state: AppState, mut requests: UnboundedReceiver<i64>) {
             .for_each_concurrent(8, |id| {
                 let state = state.clone();
                 async move {
-                    if let Err(e) = poll_device(&state, id).await {
-                        tracing::warn!("Inventar für Gerät {id} fehlgeschlagen: {e:#}");
+                    match tokio::spawn(async move { poll_device(&state, id).await }).await {
+                        Ok(Err(e)) => tracing::warn!("Inventar für Gerät {id} fehlgeschlagen: {e:#}"),
+                        Err(e) => tracing::error!("Inventar für Gerät {id} abgebrochen: {e}"),
+                        Ok(Ok(())) => {}
                     }
                 }
             })
@@ -133,6 +135,7 @@ struct DeviceRow {
     wan_interface: Option<String>,
     wan_interface_manual: bool,
     integration: Option<String>,
+    tls_pin: Option<String>,
 }
 
 pub(crate) async fn load_credentials(state: &AppState, device_id: i64) -> Result<Vec<Credential>> {
@@ -190,7 +193,7 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     let row: Option<DeviceRow> = sqlx::query_as(
         "SELECT host(ip) AS ip, open_ports, ssh_host_key, inventory, inventory_error,
                 COALESCE(name, reported_name, hostname, host(ip)) AS label, device_type, wan_interface, wan_interface_manual,
-                integration
+                integration, tls_pin
            FROM devices WHERE id = $1",
     )
     .bind(device_id)
@@ -207,6 +210,7 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
         wan_interface,
         wan_interface_manual,
         integration,
+        tls_pin,
     }) = row
     else {
         return Ok(());
@@ -308,7 +312,12 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
                         if info.auth { "aktiv" } else { "aus" }
                     ),
                 );
-                let http_creds: Vec<&Credential> = credentials.iter().filter(|c| c.kind == "http").collect();
+                // Gen1 überträgt das Passwort per Basic-Auth unverschlüsselt → nur fest zugeordnete Zugangsdaten
+                let http_creds: Vec<&Credential> =
+                    credentials.iter().filter(|c| c.kind == "http" && (c.linked || info.generation >= 2)).collect();
+                if info.generation == 1 && info.auth && http_creds.is_empty() && credentials.iter().any(|c| c.kind == "http") {
+                    trace.add(None, "Shelly Gen1 überträgt Passwörter unverschlüsselt – automatische HTTP-Zugangsdaten werden hier nicht gesendet, bitte gezielt zuordnen");
+                }
                 let result = if info.auth && http_creds.is_empty() {
                     Err(anyhow::anyhow!(
                         "Passwortschutz aktiv, aber keine HTTP-Zugangsdaten vorhanden – unter Zugangsdaten „HTTP / Web-Anmeldung“ anlegen"
@@ -355,8 +364,14 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
             continue;
         }
         let how = if cred.username.as_deref().is_some_and(|u| !u.trim().is_empty()) { "lokales Konto" } else { "API-Schlüssel" };
-        match unifi::collect(addr, cred).await {
-            Ok(data) => {
+        match unifi::collect(addr, cred, tls_pin.as_deref()).await {
+            Ok((data, pin)) => {
+                if tls_pin.is_none() {
+                    if let Some(pin) = pin {
+                        sqlx::query("UPDATE devices SET tls_pin = $2 WHERE id = $1").bind(device_id).bind(pin).execute(&state.db).await?;
+                        trace.add(Some(true), "Zertifikat des Controllers gemerkt – eine spätere Änderung wird als möglicher Angriff gemeldet");
+                    }
+                }
                 trace.add(
                     Some(true),
                     format!(

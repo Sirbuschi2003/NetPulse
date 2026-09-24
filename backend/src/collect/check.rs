@@ -56,10 +56,11 @@ struct Target {
     open_ports: Vec<i32>,
     ssh_host_key: Option<String>,
     integration: Option<String>,
+    tls_pin: Option<String>,
 }
 
 const TARGET_SELECT: &str = "SELECT id, host(ip) AS ip, COALESCE(name, reported_name, hostname, host(ip)) AS label,
-                                    open_ports, ssh_host_key, integration FROM devices";
+                                    open_ports, ssh_host_key, integration, tls_pin FROM devices";
 
 /// Eine Zugangsangabe gegen ein Gerät prüfen; liefert eine verständliche Meldung
 async fn check(cred: &Credential, t: &Target) -> Result<String> {
@@ -100,7 +101,7 @@ async fn check(cred: &Credential, t: &Target) -> Result<String> {
             Ok(format!("Shelly ok – {}{power}", data["name"].as_str().or(info.model.as_deref()).unwrap_or("Shelly")))
         }
         "unifi" => {
-            let data = super::unifi::collect(ip, cred).await?;
+            let (data, _) = super::unifi::collect(ip, cred, t.tls_pin.as_deref()).await?;
             Ok(format!(
                 "UniFi ok – Version {}, {} Geräte ({} online), {} Clients",
                 data["version"].as_str().unwrap_or("?"),

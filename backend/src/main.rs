@@ -225,9 +225,8 @@ async fn bootstrap(db: &PgPool, config: &Config) -> Result<()> {
             .execute(db)
             .await?;
         if generated {
-            tracing::warn!(
-                "Erster Admin angelegt – Benutzer: '{username}', Passwort: '{password}'. Bitte sofort ändern!"
-            );
+            // Bewusst nur auf die Konsole (Container-Log), nicht ins System-Log der Oberfläche
+            eprintln!("Erster Admin angelegt – Benutzer: '{username}', Passwort: '{password}'. Bitte sofort ändern!");
         } else {
             tracing::info!("Erster Admin '{username}' angelegt");
         }

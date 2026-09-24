@@ -164,7 +164,7 @@ pub async fn add_user(
     let user = sqlx::query_as::<_, UserRow>(
         "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3)
          ON CONFLICT (username) DO NOTHING
-         RETURNING id, username, role, created_at, last_login",
+         RETURNING id, username, role, created_at, last_login, totp_enabled",
     )
     .bind(&username)
     .bind(hash)
@@ -315,6 +315,8 @@ pub async fn reset_totp(State(st): State<AppState>, AdminUser(admin): AdminUser,
     .fetch_optional(&st.db)
     .await?;
     let (username,) = target.ok_or(ApiError::NotFound)?;
+    // Handy verloren: auch alle Sitzungen dieses Benutzers beenden
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(&st.db).await?;
     audit::by(&st.db, &admin, "totp_reset", json!({ "username": username })).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -540,4 +542,11 @@ pub async fn remote_logs(State(st): State<AppState>, _admin: AdminUser, Query(q)
         "syslog_port": st.config.syslog_port,
         "trap_port": st.config.trap_port,
     })))
+}
+
+/// Alle Sitzungen eines Benutzers beenden (z. B. Handy verloren)
+pub async fn end_user_sessions(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(&st.db).await?;
+    audit::by(&st.db, &admin, "sessions_revoked", json!({ "user_id": id, "count": done.rows_affected() })).await;
+    Ok(Json(json!({ "ended": done.rows_affected() })))
 }

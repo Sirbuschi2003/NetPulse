@@ -9,8 +9,8 @@
 //!    Ist 2FA aktiv, meldet der Controller „2FA-Code nötig“ – dann Weg 1 nutzen.
 //!
 //! Ports: UniFi OS Server 11443, UniFi OS-Konsolen 443, ältere Network Application 8443.
-//! Der Controller hat meist ein selbst signiertes Zertifikat; es wird deshalb nicht geprüft
-//! (nur im lokalen Netz verwenden, Zugangsdaten nur fest zugeordneten Geräten).
+//! Der Controller hat meist ein selbst signiertes Zertifikat. Es wird beim ersten Kontakt gemerkt
+//! (Fingerabdruck, wie beim SSH-Host-Schlüssel); ändert es sich, wird nichts gesendet.
 
 use std::{net::Ipv4Addr, time::Duration};
 
@@ -24,9 +24,60 @@ use super::Credential;
 const DEFAULT_PORTS: &[u16] = &[11443, 443, 8443];
 const MAX_CLIENTS: usize = 2000;
 
-fn client() -> Result<Client> {
+/// Nimmt nur das gemerkte Zertifikat an (oder beim ersten Kontakt jedes) und merkt sich den Fingerabdruck
+#[derive(Debug)]
+struct Pin {
+    expected: Option<String>,
+    seen: std::sync::Mutex<Option<String>>,
+    provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for Pin {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use sha2::Digest;
+        let fingerprint = hex::encode(sha2::Sha256::digest(end_entity.as_ref()));
+        *self.seen.lock().unwrap() = Some(fingerprint.clone());
+        match &self.expected {
+            Some(pin) if *pin != fingerprint => Err(rustls::Error::General("NetPulse-Pin: Zertifikat geändert".into())),
+            _ => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+        }
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+fn client(pin: std::sync::Arc<Pin>) -> Result<Client> {
+    let tls = rustls::ClientConfig::builder_with_provider(pin.provider.clone())
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(pin)
+        .with_no_client_auth();
     Ok(Client::builder()
-        .danger_accept_invalid_certs(true)
+        .use_preconfigured_tls(tls)
         .cookie_store(true)
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
@@ -41,10 +92,16 @@ fn ports(cred: &Credential) -> Vec<u16> {
     }
 }
 
-/// Liest Sites, Geräte (mit aktueller Auslastung) und Clients des Controllers
-pub async fn collect(ip: Ipv4Addr, cred: &Credential) -> Result<Value> {
+/// Liest Sites, Geräte (mit aktueller Auslastung) und Clients des Controllers.
+/// `pinned`: gemerkter Zertifikats-Fingerabdruck; zurück kommt der gesehene (zum Merken beim ersten Mal).
+pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> Result<(Value, Option<String>)> {
     let secret = cred.secret.password.clone().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("API-Schlüssel bzw. Passwort fehlt"))?;
-    let http = client()?;
+    let pin = std::sync::Arc::new(Pin {
+        expected: pinned.map(str::to_string),
+        seen: std::sync::Mutex::default(),
+        provider: std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+    });
+    let http = client(pin.clone())?;
     let username = cred.username.clone().filter(|u| !u.trim().is_empty());
     let mut last_error = anyhow!("Controller nicht erreichbar");
     for port in ports(cred) {
@@ -56,7 +113,14 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential) -> Result<Value> {
         match result {
             Ok(mut data) => {
                 data["port"] = json!(port);
-                return Ok(data);
+                let seen = pin.seen.lock().unwrap().clone();
+                return Ok((data, seen));
+            }
+            Err(e) if format!("{e:?}").contains("NetPulse-Pin") => {
+                bail!(
+                    "Das Zertifikat des Controllers hat sich geändert – Zugangsdaten wurden NICHT gesendet (möglicher Angriff). \
+                     Wurde der Controller neu installiert, beim Gerät unter „Einstellungen“ den gespeicherten Schlüssel zurücksetzen."
+                );
             }
             Err(e) => {
                 let unreachable = e.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout());

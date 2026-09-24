@@ -405,7 +405,19 @@ async fn syslog_match(state: &AppState, rule: &Rule) -> Result<()> {
     .await?;
     let newest = hits.iter().map(|h| h.5).max().unwrap_or(since).max(since);
     syslog_cursor().lock().unwrap().insert(rule.id, newest);
-    for (device_id, label, count, sample, severity, _) in hits {
+    // Schutz vor Benachrichtigungs-Flut (z. B. gefälschte Absender): höchstens 5 Einzelmeldungen je Durchlauf
+    let extra = hits.len().saturating_sub(5);
+    if extra > 0 {
+        let total: i64 = hits.iter().skip(5).map(|h| h.2).sum();
+        let n = Notification::new(
+            format!("Protokoll: {extra} weitere Absender"),
+            format!("{total} weitere passende Meldungen von {extra} weiteren Absendern – Details unter Protokolle"),
+            Severity::Warning,
+            state.config.public_url.as_ref().map(|u| format!("{u}/#/syslog")),
+        );
+        dispatch(state, rule, n).await;
+    }
+    for (device_id, label, count, sample, severity, _) in hits.into_iter().take(5) {
         let message = if count == 1 { sample.clone() } else { format!("{count} Meldungen, zuletzt: {sample}") };
         sqlx::query("INSERT INTO alerts (rule_id, device_id, message, resolved_at) VALUES ($1, $2, $3, now())")
             .bind(rule.id)

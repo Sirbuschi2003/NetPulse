@@ -13,6 +13,7 @@ services:
     image: timescale/timescaledb:latest-pg17
     container_name: netpulse-db
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     network_mode: host
     command:
       - postgres
@@ -38,6 +39,7 @@ services:
     image: ghcr.io/sirbuschi2003/netpulse:${NETPULSE_VERSION:-latest}
     container_name: netpulse-app
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     network_mode: host
     depends_on:
       db:
@@ -55,6 +57,8 @@ services:
       SYSLOG_PORT: ${SYSLOG_PORT:-5514}
       TRAP_PORT: ${TRAP_PORT:-1162}
       TRAP_COMMUNITY: ${TRAP_COMMUNITY:-}
+      # Von wem Syslog/Traps angenommen werden: Netze (CIDR, Komma) oder "any"; leer = nur aus den Scan-Netzen
+      SYSLOG_ALLOW: ${SYSLOG_ALLOW:-}
       RETENTION_SYSLOG_DAYS: ${RETENTION_SYSLOG_DAYS:-30}
       MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-60}
       RETENTION_METRICS_DAYS: ${RETENTION_METRICS_DAYS:-90}
@@ -76,18 +80,22 @@ services:
     image: ghcr.io/sirbuschi2003/netpulse-proxy:${NETPULSE_VERSION:-latest}
     container_name: netpulse-proxy
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     network_mode: host
     depends_on: [app]
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?Bitte SITE_ADDRESS setzen, z. B. https://192.168.178.10:8443}
       UPSTREAM: 127.0.0.1:${APP_PORT:-18080}
-      # Eingang für Nginx Proxy Manager o. Ä. (z. B. http://:18081), Standard nur lokal
+      # Eingang für Nginx Proxy Manager o. Ä. – am besten mit LAN-Adresse, z. B. http://192.168.178.10:18081
+      # (unverschlüsseltes HTTP: Port nie am Router freigeben). Standard: nur lokal
       PROXY_LISTEN: ${PROXY_LISTEN:-http://127.0.0.1:18081}
     volumes:
       - caddy-data:/data
       - caddy-config:/config
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs: [/tmp]
 
 volumes:
   db-data:

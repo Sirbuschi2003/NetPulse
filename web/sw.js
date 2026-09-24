@@ -31,7 +31,9 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = new URL(event.notification.data && event.notification.data.url ? event.notification.data.url : '/', self.location.origin).href;
+  let target = new URL(event.notification.data && event.notification.data.url ? event.notification.data.url : '/', self.location.origin);
+  if (target.origin !== self.location.origin) target = new URL('/', self.location.origin); // nie fremde Seiten öffnen
+  const url = target.href;
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const w of windows) {

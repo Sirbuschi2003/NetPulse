@@ -589,3 +589,44 @@ tr.sev-row-warn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 .sys-live strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
 .sys-live .meter span { transition: width 0.8s; }
 @media (max-width: 720px) { .sys-live { grid-template-columns: 1fr 1fr; } }
+
+/* ---------- Statusseite (öffentlich) ---------- */
+.status-hero { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--bg)), color-mix(in srgb, var(--accent-2) 18%, var(--bg)));
+  border-bottom: 1px solid var(--border); padding: 34px 0 26px; }
+.status-hero .status-wrap { padding-top: 0; padding-bottom: 0; }
+.status-brand { display: flex; align-items: center; gap: 14px; }
+.status-brand h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+.status-brand p { margin: 2px 0 0; color: var(--text-2); }
+.status-wrap { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+.status-overall { display: flex; align-items: center; gap: 14px; margin-top: 22px; padding: 16px 20px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
+.status-overall .i { width: 30px; height: 30px; flex: none; }
+.status-overall strong { font-size: 17px; }
+.status-overall.ok { border-color: color-mix(in srgb, var(--up) 45%, transparent); } .status-overall.ok .i { color: var(--up); }
+.status-overall.degraded { border-color: color-mix(in srgb, var(--warn) 45%, transparent); } .status-overall.degraded .i { color: var(--warn); }
+.status-overall.down { border-color: color-mix(in srgb, var(--down) 55%, transparent); background: color-mix(in srgb, var(--down) 8%, var(--surface)); }
+.status-overall.down .i { color: var(--down); }
+.status-group { margin-bottom: 22px; }
+.status-group h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px 4px; }
+.status-item { padding: 16px 4px; border-bottom: 1px solid var(--border); }
+.status-item:last-child { border-bottom: 0; }
+.status-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.status-name { font-size: 15.5px; }
+.status-label { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--surface-3); }
+.status-label.ok { color: var(--up); background: var(--up-soft); } .status-label.degraded { color: var(--warn); background: var(--warn-soft); }
+.status-label.down { color: var(--down); background: var(--down-soft); }
+.status-uptime { margin-left: auto; font-variant-numeric: tabular-nums; }
+.days-legend { display: flex; justify-content: space-between; margin-top: 4px; }
+.st-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
+.st-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface-2); }
+.st-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+.st-panel-head strong { color: var(--text); font-variant-numeric: tabular-nums; }
+svg.st-chart { width: 100%; height: 90px; display: block; }
+svg.st-chart .line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+svg.st-chart .grid-line { stroke: var(--border); stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
+.st-axis { display: flex; justify-content: space-between; margin-top: 2px; }
+/* ---------- Statusseite-Editor ---------- */
+.sp-list { display: flex; flex-direction: column; gap: 10px; }
+.sp-item { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface-2); }
+.sp-fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto; gap: 10px; align-items: end; margin-top: 6px; }
+@media (max-width: 900px) { .sp-fields { grid-template-columns: 1fr 1fr; } }

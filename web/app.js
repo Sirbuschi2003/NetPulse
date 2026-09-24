@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.2#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.0#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -864,6 +864,7 @@ function lastDiscoveryLine(summary) {
 }
 
 async function viewDashboard() {
+  const nav = state.nav;
   let layout = await api('/dashboard');
   let ctx = null;
   let editing = false;
@@ -877,6 +878,7 @@ async function viewDashboard() {
   };
 
   const render = async () => {
+    if (state.nav !== nav) return;
     const cards = await Promise.all(layout.map(async (widget, i) => {
       const def = WIDGETS[widget.type];
       if (!def) return '';
@@ -905,6 +907,7 @@ async function viewDashboard() {
          <button id="cancel-dash" class="ghost" type="button">Abbrechen</button>`
       : `<button id="edit-dash" class="ghost" type="button">${icon('layout-grid')}Anpassen</button>`;
 
+    if (state.nav !== nav) return; // inzwischen andere Seite geöffnet
     view().innerHTML = `
       <div class="page-head"><div>${lastDiscoveryLine(ctx.summary)}</div><div class="actions">${actions}</div></div>
       ${scanBanner(ctx.summary.scan)}
@@ -1048,6 +1051,8 @@ function autoRefresh(fn, seconds = 30) {
 
 async function route() {
   if (!state.user) return;
+  // Jede Navigation bekommt eine Nummer – noch laufende Ladevorgänge der alten Seite schreiben dann nichts mehr
+  state.nav = (state.nav || 0) + 1;
   clearInterval(state.refreshTimer);
   state.liveStops.forEach((stop) => stop());
   state.liveStops = [];

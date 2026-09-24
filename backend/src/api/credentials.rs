@@ -57,6 +57,13 @@ fn validate(kind: &str, auto: bool) -> ApiResult<()> {
     if !KINDS.contains(&kind) {
         return Err(ApiError::BadRequest("Unbekannte Zugangsart".into()));
     }
+    if auto && kind == "snmp_v2c" {
+        return Err(ApiError::BadRequest(
+            "SNMP v2c sendet die Community unverschlüsselt – nicht automatisch an alle Geräte. Bitte SNMP v3 verwenden \
+             oder die Geräte über „Geräte zuordnen“ gezielt auswählen."
+                .into(),
+        ));
+    }
     if auto && kind == "unifi" {
         return Err(ApiError::BadRequest(
             "UniFi-Zugangsdaten werden nur dem Controller fest zugeordnet und nie automatisch ausprobiert.".into(),

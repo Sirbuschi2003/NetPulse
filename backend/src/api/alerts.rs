@@ -104,6 +104,19 @@ pub async fn update_channel(
         .await?
         .ok_or(ApiError::NotFound)?;
     let mut config: Map<String, Value> = st.vault.open_value(&sealed)?;
+    // Wird die Zieladresse geändert, dürfen gespeicherte Geheimnisse nicht still an den neuen Server gehen
+    let target_changed = ["server", "host"].iter().any(|k| {
+        req.config.get(*k).is_some_and(|v| v.as_str() != Some(MASK) && Some(v) != config.get(*k))
+    });
+    if target_changed {
+        let secret_kept = notify::SECRET_FIELDS.iter().any(|k| {
+            config.get(*k).and_then(Value::as_str).is_some_and(|v| !v.is_empty())
+                && req.config.get(*k).is_none_or(|v| v.as_str() == Some(MASK))
+        });
+        if secret_kept {
+            return Err(ApiError::BadRequest("Server geändert – bitte Passwort/Token ebenfalls neu eingeben".into()));
+        }
+    }
     for (key, value) in req.config {
         // Maskierte Werte bedeuten „unverändert lassen“
         if value.as_str() != Some(MASK) {

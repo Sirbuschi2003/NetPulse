@@ -522,10 +522,13 @@ async fn dns(check: &Check, timeout: Duration) -> Result<Outcome> {
             let id: u16 = rand_id();
             socket.send_to(&dns_query(id, name, qtype), addr).await?;
             let mut buf = [0u8; 1500];
-            let (n, _) = match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
+            let (n, from) = match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
                 Ok(r) => r?,
                 Err(_) => return Ok(Outcome::fail(format!("DNS-Server {addr} antwortet nicht"), None)),
             };
+            if from.ip() != addr.ip() {
+                return Ok(Outcome::fail("DNS-Antwort von fremder Adresse verworfen", None));
+            }
             let (rcode, addrs) = dns_parse(&buf[..n], id).ok_or_else(|| anyhow!("ungültige DNS-Antwort"))?;
             match rcode {
                 0 => addrs,

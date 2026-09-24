@@ -20,6 +20,10 @@ Nutzt du NetPulse ausschließlich für dein eigenes Heimnetz, greift in der Rege
 | Online-/Offline-Zeiten eines Arbeitsplatzrechners | **ja**: lässt Rückschlüsse auf Anwesenheit zu | `device_metrics`, `events` |
 | Benutzernamen und Anmeldezeiten der NetPulse-Nutzer | ja | `users`, `audit_log` |
 | Inventar aus SNMP/SSH: Rechnername, Seriennummer, Auslastung eines Arbeitsplatzrechners | ja, wenn einer Person zuordenbar | `devices.inventory`, `device_stats` |
+| Empfangene Syslog-Meldungen und SNMP-Traps: können Benutzernamen, IP-Adressen, besuchte Namen (DNS) enthalten | **ja** | `syslog_messages` (Standard 30 Tage, `RETENTION_SYSLOG_DAYS`) |
+| Angemeldete Sitzungen der NetPulse-Nutzer: Browser/Gerät, IP-Adresse, letzte Aktivität | ja | `sessions` (bis Ablauf/Abmeldung) |
+| Push-Anmeldungen der NetPulse-App: Gerätebezeichnung, Push-Adresse des Browser-Herstellers | ja | `push_subscriptions` |
+| Clients aus dem UniFi-Controller: Name, MAC, IP, verbunden seit | ja, wenn einer Person zuordenbar | `devices.inventory` des Controllers |
 
 ### Rechtsgrundlage und Pflichten (DSGVO)
 
@@ -55,10 +59,12 @@ Arbeitsplatzrechnern erfüllen das in der Regel.
 | Maßnahme | Umsetzung |
 |---|---|
 | Verschlüsselung im Transport | HTTPS (TLS 1.2/1.3), HSTS |
-| Zugriffskontrolle | Login, Rollen, Argon2id, Sitzungsablauf, Brute-Force-Sperre |
+| Zugriffskontrolle | Login, Rollen, Argon2id, Zwei-Faktor-Anmeldung (TOTP), Sitzungsablauf, Sitzungsübersicht mit Abmelden, Brute-Force-Sperre je Benutzer+IP |
 | Schutz von Zugangsdaten | AES-256-GCM-Verschlüsselung, Schlüssel getrennt von der Datenbank, keine Anzeige in der Oberfläche |
 | Protokollierung | Audit-Log für Anmeldungen und Änderungen |
-| Härtung | nicht-root, schreibgeschütztes Dateisystem, minimale Capabilities, DB nur lokal |
+| Härtung | nicht-root, schreibgeschütztes Dateisystem, minimale Capabilities, no-new-privileges, DB nur lokal |
+| Protokoll-Empfang | Syslog/Traps nur aus freigegebenen Netzen (`SYSLOG_ALLOW`), Größen- und Mengenbegrenzung |
+| Öffentliche Statusseite | nur ausdrücklich freigegebene Einträge mit selbst gewählten Namen, keine IP-Adressen, geheimer Link im Fragment |
 | Web-Sicherheit | CSP, CSRF-Schutz, SameSite-Cookies, konsequentes Escaping |
 | Verfügbarkeit | Docker-Restart-Policy, Backup per `pg_dump` (siehe README) |
 
@@ -79,3 +85,13 @@ In der Firma sollte die Freigabe der Netze schriftlich mit der IT-Leitung abgest
 - **BSI IT-Grundschutz:** Baustein OPS.1.1.1 („Allgemeiner IT-Betrieb“) und DER.1 („Detektion von sicherheitsrelevanten Ereignissen“).
 - **Cyber Resilience Act (EU):** Relevant, falls NetPulse später **vertrieben** wird (Pflichten zu
   Schwachstellenmanagement, Sicherheitsupdates und SBOM ab Ende 2027). Für den internen Einsatz nicht einschlägig.
+
+## Dienste von Drittanbietern (nur wenn eingerichtet)
+
+- **Push-Nachrichten der NetPulse-App** laufen über den Push-Dienst des Browser-Herstellers (Google, Apple, Mozilla,
+  Microsoft – teils USA). Der Inhalt ist Ende-zu-Ende verschlüsselt (RFC 8291); der Dienst sieht nur Zeitpunkt und Größe.
+- **Benachrichtigungskanäle** wie Telegram, Discord, Microsoft Teams oder ntfy.sh übertragen den Alarmtext an den jeweiligen
+  Anbieter (teils USA). Für personenbezogene Inhalte in der Firma besser E-Mail über den eigenen Server, Gotify oder einen
+  eigenen ntfy-Server nutzen.
+- **Öffentliche Statusseite:** Wer den Link kennt, sieht die freigegebenen Einträge. Keine personenbezogenen Namen als
+  Anzeigenamen verwenden (z. B. „PC Buchhaltung“ statt „PC Müller“). Der Link lässt sich jederzeit erneuern.

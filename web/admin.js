@@ -718,7 +718,8 @@ async function viewUsers() {
             <td>${u.role === 'admin' ? '<span class="badge accent">Administrator</span>' : '<span class="badge plain">Nur lesen</span>'}</td>
             <td>${u.totp_enabled ? `<span class="badge st-up">aktiv</span>${u.id !== state.user.id ? ` <button class="ghost sm" data-totp="${u.id}" data-name="${esc(u.username)}" type="button" title="Zwei-Faktor zurücksetzen (z. B. Handy verloren)">${icon('refresh', 'i-sm')}</button>` : ''}` : '<span class="badge warn">aus</span>'}</td>
             <td class="small">${esc(fmtTime(u.created_at))}</td><td class="small">${esc(fmtTime(u.last_login))}</td>
-            <td>${u.id === state.user.id ? '<span class="muted small">(du)</span>' : `<button class="ghost sm" data-del="${u.id}" data-name="${esc(u.username)}" type="button">${icon('trash', 'i-sm')}</button>`}</td></tr>`).join('')}
+            <td class="actions">${u.id === state.user.id ? '<span class="muted small">(du)</span>' : `<button class="ghost sm" data-kick="${u.id}" data-name="${esc(u.username)}" type="button" title="Überall abmelden">${icon('logout', 'i-sm')}</button>
+              <button class="ghost sm" data-del="${u.id}" data-name="${esc(u.username)}" type="button">${icon('trash', 'i-sm')}</button>`}</td></tr>`).join('')}
           </tbody></table></section>
         <section class="card span-1"><header><h2>${icon('plus')}Benutzer anlegen</h2></header>
           <form class="form" id="user-form">
@@ -736,6 +737,10 @@ async function viewUsers() {
         await render();
       }, 'Benutzer angelegt');
     });
+    $$('[data-kick]').forEach((btn) => btn.addEventListener('click', () => {
+      if (!confirm(`„${btn.dataset.name}“ auf allen Geräten abmelden?`)) return;
+      attempt(async () => { const r = await api(`/users/${btn.dataset.kick}/sessions`, { method: 'DELETE' }); toast(`${r.ended} Sitzung(en) beendet`); });
+    }));
     $$('[data-totp]').forEach((btn) => btn.addEventListener('click', () => {
       if (!confirm(`Zwei-Faktor-Anmeldung von „${btn.dataset.name}“ zurücksetzen? Die Anmeldung geht danach nur mit Passwort, bis 2FA neu eingerichtet ist.`)) return;
       attempt(async () => { await api(`/users/${btn.dataset.totp}/totp`, { method: 'DELETE' }); await render(); }, 'Zwei-Faktor-Anmeldung zurückgesetzt');
@@ -756,7 +761,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
-  smtp_update: 'E-Mail-Server geändert', status_page: 'Statusseite geändert', maintenance_add: 'Wartung angelegt', maintenance_update: 'Wartung geändert', maintenance_delete: 'Wartung gelöscht', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
+  smtp_update: 'E-Mail-Server geändert', session_end: 'Sitzung beendet', session_end_others: 'Andere Sitzungen beendet', sessions_revoked: 'Benutzer überall abgemeldet', login_blocked: 'Anmeldung gesperrt', status_page: 'Statusseite geändert', maintenance_add: 'Wartung angelegt', maintenance_update: 'Wartung geändert', maintenance_delete: 'Wartung gelöscht', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -849,11 +854,12 @@ async function renderTotp() {
   const { enabled } = await api('/me/totp');
   if (enabled) {
     box.innerHTML = `<p><span class="badge st-up">aktiv</span> Bei der Anmeldung wird zusätzlich der Code aus der Authenticator-App abgefragt.</p>
-      <form class="form" id="totp-off"><label>Zum Ausschalten Passwort eingeben<input name="password" type="password" required autocomplete="current-password"></label>
+      <form class="form" id="totp-off"><label>Zum Ausschalten: Passwort<input name="password" type="password" required autocomplete="current-password"></label>
+      <label>und aktueller Code aus der App<input name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="7" placeholder="123 456"></label>
       <button type="submit" class="ghost">Ausschalten</button></form>`;
     $('#totp-off').addEventListener('submit', (ev) => {
       ev.preventDefault();
-      attempt(async () => { await api('/me/totp/disable', { method: 'POST', body: { password: ev.target.elements.password.value } }); await renderTotp(); },
+      attempt(async () => { await api('/me/totp/disable', { method: 'POST', body: { password: ev.target.elements.password.value, code: ev.target.elements.code.value } }); await renderTotp(); },
         'Zwei-Faktor-Anmeldung ausgeschaltet');
     });
     return;
@@ -873,6 +879,36 @@ async function renderTotp() {
       attempt(async () => { await api('/me/totp/enable', { method: 'POST', body: { code: ev.target.elements.code.value } }); await renderTotp(); },
         'Zwei-Faktor-Anmeldung ist aktiv');
     });
+  }));
+}
+
+// ----- Sitzungen -----
+function describeAgent(ua) {
+  if (!ua) return 'Unbekanntes Gerät';
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Gerät';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /curl|python/i.test(ua) ? 'Skript' : 'Browser';
+  return `${os} · ${browser}`;
+}
+
+async function renderSessions() {
+  const box = $('#sess-box');
+  const list = await api('/me/sessions');
+  box.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Gerät</th><th>Adresse</th><th>Angemeldet</th><th>Zuletzt aktiv</th><th></th></tr></thead>
+    <tbody>${list.map((x) => `<tr><td>${icon(/iPhone|Android|iPad/.test(x.user_agent || '') ? 'device-mobile' : 'device-desktop', 'i-sm')}
+        ${esc(describeAgent(x.user_agent))} ${x.current ? '<span class="badge accent">dieses Gerät</span>' : ''}</td>
+      <td class="mono small">${esc(x.ip || '–')}</td><td class="small">${esc(fmtTime(x.created_at))}</td>
+      <td class="small">${esc(fmtAgo(x.last_seen || x.created_at))}</td>
+      <td class="actions"><button type="button" class="ghost sm" data-end="${x.id}" data-current="${x.current}">${icon('logout', 'i-sm')}Abmelden</button></td></tr>`).join('')}</tbody></table></div>
+    <p class="muted small">Unbekanntes Gerät dabei? Abmelden und sofort das Passwort ändern. Abgemeldete Geräte verlieren den Zugriff sofort.</p>`;
+  $$('[data-end]', box).forEach((b) => b.addEventListener('click', () => {
+    const current = b.dataset.current === 'true';
+    if (current && !confirm('Dieses Gerät abmelden?')) return;
+    attempt(async () => {
+      await api(`/me/sessions/${b.dataset.end}`, { method: 'DELETE' });
+      if (current) { showLogin(); return; }
+      await renderSessions();
+    }, 'Sitzung beendet');
   }));
 }
 
@@ -927,7 +963,7 @@ async function renderPush() {
     ${!isStandalone() ? `<button type="button" class="ghost" id="install-now"${hint.ok ? '' : ' disabled'}>${icon('device-mobile')}Installieren</button>` : ''}</div>`;
   box.innerHTML = `${install}${status}
     <p class="muted small">Damit Alarme als Push kommen: unter <b>Benachrichtigungen</b> einen Kanal „NetPulse-App“ anlegen und in den Alarmregeln auswählen.</p>
-    ${devices.length ? `<h3 class="sub">Angemeldete Geräte</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
+    ${devices.length ? `<h3 class="sub">Geräte mit Push-Nachrichten</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
       <span>${esc(d.device || 'Gerät')}${sub && d.endpoint === sub.endpoint ? ' <span class="badge accent">dieses</span>' : ''}</span></span>
       <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ''}
       <button class="ghost sm" type="button" data-unsub="${d.id}" title="Abmelden">${icon('x', 'i-sm')}</button></span></li>`).join('')}</ul>` : ''}`;
@@ -976,10 +1012,17 @@ async function viewAccount() {
           <p class="hint">Alle anderen Sitzungen werden dabei abgemeldet.</p>
         </form></section>
       <section class="card span-1"><header><h2>${icon('shield-lock')}Zwei-Faktor-Anmeldung</h2></header><div id="totp-box"><div class="empty">Lade …</div></div></section>
-      <section class="card span-2"><header><h2>${icon('device-mobile')}NetPulse-App &amp; Push-Nachrichten</h2></header><div id="push-box"><div class="empty">Lade …</div></div></section>
+      <section class="card span-3"><header><h2>${icon('shield-lock')}Angemeldete Geräte (Sitzungen)</h2>
+        <button type="button" class="ghost sm" id="sess-others">${icon('logout', 'i-sm')}Alle anderen abmelden</button></header><div id="sess-box"><div class="empty">Lade …</div></div></section>
+      <section class="card span-3"><header><h2>${icon('device-mobile')}NetPulse-App &amp; Push-Nachrichten</h2></header><div id="push-box"><div class="empty">Lade …</div></div></section>
     </div>`;
   renderTotp();
+  renderSessions();
   renderPush();
+  $('#sess-others').addEventListener('click', () => {
+    if (!confirm('Alle anderen Geräte abmelden? Dort muss man sich danach neu anmelden.')) return;
+    attempt(async () => { const r = await api('/me/sessions/others', { method: 'DELETE' }); toast(`${r.ended} Sitzung(en) beendet`); await renderSessions(); });
+  });
   $('#pw-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
@@ -1080,47 +1123,84 @@ async function viewMaintenance() {
 
 async function viewStatusPage() {
   const [cfg, devices, checks] = await Promise.all([api('/settings/status-page'), api('/devices'), api('/checks')]);
-  const chosen = (kind, id) => cfg.items.find((i) => i.kind === kind && i.id === id);
+  let items = cfg.items.map((i) => ({ ...i }));
   const link = `${location.origin}/status.html#${cfg.token}`;
-  const row = (kind, x, label) => {
-    const c = chosen(kind, x.id);
-    return `<div class="sp-row"><label class="inline"><input type="checkbox" data-kind="${kind}" value="${x.id}"${c ? ' checked' : ''}>
-      <span class="ellipsis">${esc(label)}</span></label>
-      <input class="sp-label" data-label="${kind}-${x.id}" value="${esc((c && c.label) || '')}" placeholder="Anzeigename (optional)"></div>`;
+  const source = (i) => (i.kind === 'device' ? devices.find((d) => d.id === i.id) : checks.find((c) => c.id === i.id));
+  const sourceLabel = (i) => {
+    const x = source(i);
+    if (!x) return '(gelöscht)';
+    return i.kind === 'device' ? `${deviceLabel(x)} – ${x.ip}` : `${x.name} – ${x.target}`;
   };
+
   view().innerHTML = `
-    <div class="notice info">${icon('world')}<span>Eine schlichte Seite ohne Anmeldung, z. B. für Familie oder Kollegen. Sie zeigt nur die hier gewählten
-      Einträge mit Anzeigename, Status und Verfügbarkeit – keine IP-Adressen. Erreichbar über den geheimen Link unten.</span></div>
+    <div class="notice info">${icon('world')}<span>Eine Seite ohne Anmeldung, z. B. für Familie oder Kollegen. Sie zeigt <b>nur</b> die unten gewählten Einträge
+      mit dem Anzeigenamen, den du vergibst, ihren Status und die Verfügbarkeit – keine IP-Adressen, keine internen Namen, keine Bedienmöglichkeit.
+      Details (Antwortzeit, Netzwerk-/Internetverkehr) nur dort, wo du sie einschaltest.</span></div>
     <div class="grid">
       <section class="card span-1"><header><h2>${icon('settings')}Einstellungen</h2></header><form class="form" id="sp-form">
         <label class="inline"><input type="checkbox" name="enabled"${cfg.enabled ? ' checked' : ''}> Statusseite eingeschaltet</label>
         <label>Titel<input name="title" maxlength="80" value="${esc(cfg.title)}"></label>
         <label>Beschreibung (optional)<textarea name="description" maxlength="500" rows="3">${esc(cfg.description || '')}</textarea></label>
-        <label>Link<input readonly value="${esc(link)}" id="sp-link"></label>
-        <div class="actions"><button type="button" class="ghost" id="sp-copy">${icon('check')}Link kopieren</button>
-          <a class="btn ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('external-link')}Öffnen</a>
-          <label class="inline"><input type="checkbox" name="new_token"> neuen Link erzeugen</label></div>
+        <label>Geheimer Link<input readonly value="${esc(link)}" id="sp-link"></label>
+        <div class="actions"><button type="button" class="ghost" id="sp-copy">${icon('check')}Kopieren</button>
+          <a class="btn ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('external-link')}Öffnen</a></div>
+        <label class="inline"><input type="checkbox" name="new_token"> Neuen Link erzeugen (der alte funktioniert dann nicht mehr)</label>
         <button type="submit">${icon('check')}Speichern</button></form></section>
-      <section class="card span-2"><header><h2>${icon('list-details')}Angezeigte Einträge</h2></header>
-        <input type="search" id="sp-filter" placeholder="Filtern …">
-        <div class="form-row"><div><h3 class="sub">Dienste</h3><div class="pick-list tall">${checks.map((c) => row('check', c, c.name)).join('') || '<span class="muted small">keine</span>'}</div></div>
-          <div><h3 class="sub">Geräte</h3><div class="pick-list tall">${devices.map((d) => row('device', d, `${deviceLabel(d)} – ${d.ip}`)).join('')}</div></div></div></section>
+      <section class="card span-2"><header><h2>${icon('list-details')}Angezeigte Einträge</h2><span class="muted small">Reihenfolge = Reihenfolge auf der Seite</span></header>
+        <div id="sp-items"></div>
+        <h3 class="sub">Hinzufügen</h3>
+        <div class="form-row"><select id="sp-add" aria-label="Eintrag hinzufügen"><option value="">Gerät oder Dienst wählen …</option>
+          <optgroup label="Dienste">${checks.map((c) => `<option value="check:${c.id}">${esc(c.name)}</option>`).join('')}</optgroup>
+          <optgroup label="Geräte">${devices.map((d) => `<option value="device:${d.id}">${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}</optgroup></select>
+          <button type="button" class="ghost" id="sp-add-btn">${icon('plus')}Hinzufügen</button></div></section>
     </div>`;
+
+  const renderItems = () => {
+    $('#sp-items').innerHTML = items.length ? `<div class="sp-list">${items.map((i, n) => `<div class="sp-item" data-n="${n}">
+        <div class="sp-src muted small">${icon(i.kind === 'device' ? 'devices' : 'world-www', 'i-sm')} ${esc(sourceLabel(i))}</div>
+        <div class="sp-fields">
+          <label>Anzeigename<input data-f="label" maxlength="80" value="${esc(i.label || '')}" placeholder="z. B. Internet, Heizung, Webseite" required></label>
+          <label>Abschnitt<input data-f="group" maxlength="60" value="${esc(i.group || '')}" placeholder="z. B. Netzwerk"></label>
+          <label class="inline"><input type="checkbox" data-f="details"${i.details ? ' checked' : ''}> Details (Verlauf)</label>
+          <div class="actions"><button type="button" class="ghost sm" data-act="up" title="Nach oben">↑</button>
+            <button type="button" class="ghost sm" data-act="down" title="Nach unten">↓</button>
+            <button type="button" class="ghost sm" data-act="del" title="Entfernen">${icon('x', 'i-sm')}</button></div></div></div>`).join('')}</div>`
+      : empty('Noch keine Einträge – unten Gerät oder Dienst hinzufügen.', 'list-details');
+    $$('.sp-item').forEach((row) => {
+      const n = Number(row.dataset.n);
+      $$('[data-f]', row).forEach((el) => el.addEventListener('input', () => {
+        items[n][el.dataset.f] = el.type === 'checkbox' ? el.checked : el.value;
+      }));
+      $$('[data-act]', row).forEach((b) => b.addEventListener('click', () => {
+        if (b.dataset.act === 'del') items.splice(n, 1);
+        if (b.dataset.act === 'up' && n > 0) [items[n - 1], items[n]] = [items[n], items[n - 1]];
+        if (b.dataset.act === 'down' && n < items.length - 1) [items[n + 1], items[n]] = [items[n], items[n + 1]];
+        renderItems();
+      }));
+    });
+  };
+  renderItems();
+
+  $('#sp-add-btn').addEventListener('click', () => {
+    const v = $('#sp-add').value;
+    if (!v) return;
+    const [kind, id] = v.split(':');
+    if (items.some((i) => i.kind === kind && i.id === Number(id))) { toast('Ist schon auf der Seite'); return; }
+    const x = source({ kind, id: Number(id) });
+    // Vorschlag für den Anzeigenamen – bitte anpassen, er ist öffentlich sichtbar
+    items.push({ kind, id: Number(id), label: kind === 'check' ? x.name : typeInfo(x.device_type).label, group: '', details: false });
+    renderItems();
+  });
   $('#sp-copy').addEventListener('click', () => {
     navigator.clipboard.writeText($('#sp-link').value).then(() => toast('Link kopiert'), () => { $('#sp-link').select(); });
-  });
-  $('#sp-filter').addEventListener('input', (ev) => {
-    const q = ev.target.value.toLowerCase();
-    $$('.sp-row').forEach((r) => { r.hidden = q && !r.textContent.toLowerCase().includes(q); });
   });
   $('#sp-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const e = ev.target.elements;
-    const items = $$('.sp-row input[type=checkbox]:checked').map((c) => ({
-      kind: c.dataset.kind, id: Number(c.value), label: $(`[data-label="${c.dataset.kind}-${c.value}"]`).value.trim() || null,
-    }));
+    if (items.some((i) => !String(i.label || '').trim())) { toast('Bitte jedem Eintrag einen Anzeigenamen geben', true); return; }
     attempt(async () => {
-      await api('/settings/status-page', { method: 'PUT', body: { enabled: e.enabled.checked, title: e.title.value, description: e.description.value, items, new_token: e.new_token.checked } });
+      await api('/settings/status-page', { method: 'PUT', body: { enabled: e.enabled.checked, title: e.title.value, description: e.description.value,
+        items: items.map((i) => ({ kind: i.kind, id: i.id, label: i.label, group: i.group || null, details: !!i.details })), new_token: e.new_token.checked } });
       await viewStatusPage();
     }, 'Statusseite gespeichert');
   });

@@ -175,6 +175,7 @@ pub const SECRET_FIELDS: &[&str] = &["password", "token", "bot_token", "webhook_
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("NetPulse")
         .build()
         .expect("HTTP-Client")
@@ -197,7 +198,42 @@ async fn check(response: reqwest::Response) -> Result<()> {
     bail!("Dienst antwortete mit {status}: {body}")
 }
 
+/// URLs in Fehlermeldungen kürzen – sie können Tokens enthalten (Telegram-Bot, Webhooks)
+pub fn redact(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let trimmed = word.trim_start_matches(['(', '"', '\'']);
+            match trimmed.find("://") {
+                Some(i) if trimmed[..i].chars().all(|c| c.is_ascii_alphabetic()) => {
+                    let rest = &trimmed[i + 3..];
+                    let host = rest.split(['/', '?', '#', ' ', ')', '"']).next().unwrap_or_default();
+                    let host = host.rsplit('@').next().unwrap_or(host);
+                    let tail = if word.ends_with(char::is_whitespace) { " " } else { "" };
+                    format!("{}://{host}/…{tail}", &trimmed[..i])
+                }
+                _ => word.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Markdown-Steuerzeichen entschärfen (Discord/Teams) – Gerätenamen kommen aus dem Netz
+fn md(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\[]()*_`~>#|<".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub async fn send(kind: &str, config: &Value, n: &Notification) -> Result<()> {
+    send_inner(kind, config, n).await.map_err(|e| anyhow!(redact(&format!("{e:#}"))))
+}
+
+async fn send_inner(kind: &str, config: &Value, n: &Notification) -> Result<()> {
     let title = format!("{} {}", n.severity.emoji(), n.title);
     let text_with_link = match &n.link {
         Some(link) => format!("{}\n\n{link}", n.message),
@@ -250,7 +286,7 @@ pub async fn send(kind: &str, config: &Value, n: &Notification) -> Result<()> {
             check(response).await
         }
         "discord" => {
-            let mut embed = json!({ "title": title, "description": n.message, "color": n.severity.color() });
+            let mut embed = json!({ "title": md(&title), "description": md(&n.message), "color": n.severity.color() });
             if let Some(link) = &n.link {
                 embed["url"] = json!(link);
             }
@@ -263,8 +299,8 @@ pub async fn send(kind: &str, config: &Value, n: &Notification) -> Result<()> {
         }
         "teams" => {
             let mut body = vec![
-                json!({ "type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": true }),
-                json!({ "type": "TextBlock", "text": n.message, "wrap": true }),
+                json!({ "type": "TextBlock", "text": md(&title), "weight": "Bolder", "size": "Medium", "wrap": true }),
+                json!({ "type": "TextBlock", "text": md(&n.message), "wrap": true }),
             ];
             let mut actions = vec![];
             if let Some(link) = &n.link {
@@ -342,6 +378,15 @@ async fn send_email(config: &Value, n: &Notification) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geheimnisse_aus_fehlern() {
+        let e = "error sending request for url (https://api.telegram.org/bot123:SECRET/sendMessage): timeout";
+        let r = redact(e);
+        assert!(!r.contains("SECRET"), "{r}");
+        assert!(r.contains("api.telegram.org"));
+        assert_eq!(md("[Klick](https://x)"), "\\[Klick\\]\\(https://x\\)");
+    }
 
     #[test]
     fn vorlage() {

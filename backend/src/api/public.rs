@@ -5,7 +5,8 @@
 //! keine IP-Adressen oder sonstigen Details.
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
+    http::HeaderMap,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -23,9 +24,15 @@ pub struct StatusItem {
     /// `device` oder `check`
     kind: String,
     id: i64,
-    /// Eigener Anzeigename (sonst Name des Geräts/Dienstes)
+    /// Anzeigename auf der Statusseite (sonst ein neutraler Name wie „Router“ – nie der interne Hostname)
     #[serde(default)]
     label: Option<String>,
+    /// Abschnitt, z. B. „Internet“ oder „Smart Home“
+    #[serde(default)]
+    group: Option<String>,
+    /// 24-h-Verlauf zeigen (Antwortzeit, Datenverkehr)
+    #[serde(default)]
+    details: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -87,6 +94,7 @@ pub async fn set_config(State(st): State<AppState>, AdminUser(user): AdminUser, 
         .into_iter()
         .map(|mut i| {
             i.label = i.label.map(|l| l.trim().chars().take(80).collect::<String>()).filter(|l| !l.is_empty());
+            i.group = i.group.map(|g| g.trim().chars().take(60).collect::<String>()).filter(|g| !g.is_empty());
             i
         })
         .collect();
@@ -94,67 +102,148 @@ pub async fn set_config(State(st): State<AppState>, AdminUser(user): AdminUser, 
         page.token = auth::random_token(24);
     }
     save(&st, &page).await?;
+    *cache().lock().unwrap() = None;
     audit::by(&st.db, &user, "status_page", json!({ "enabled": page.enabled, "items": page.items.len() })).await;
     Ok(Json(page))
 }
 
-/// Öffentlich: Status der freigegebenen Einträge
-pub async fn public_status(State(st): State<AppState>, Path(token): Path<String>) -> ApiResult<Json<Value>> {
+fn cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, Value)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, Value)>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Vergleich in konstanter Zeit (verrät nicht, wie viele Zeichen stimmen)
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Neutraler Name, falls kein Anzeigename gesetzt ist – interne Hostnamen bleiben intern
+fn generic_name(kind: &str, device_type: &str) -> &'static str {
+    match (kind, device_type) {
+        ("check", _) => "Dienst",
+        (_, "router") => "Router",
+        (_, "firewall") => "Firewall",
+        (_, "switch") => "Switch",
+        (_, "access_point") => "WLAN",
+        (_, "nas") => "Speicher (NAS)",
+        (_, "server" | "hypervisor" | "linux" | "windows") => "Server",
+        (_, "printer") => "Drucker",
+        (_, "camera") => "Kamera",
+        _ => "Gerät",
+    }
+}
+
+/// Öffentlich (ohne Anmeldung): Status der freigegebenen Einträge.
+/// Der geheime Schlüssel kommt im Header `X-Status-Token` (nicht in der Adresse → nicht in Proxy-Logs).
+pub async fn public_status(State(st): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let token = headers.get("x-status-token").and_then(|v| v.to_str().ok()).unwrap_or_default();
     let page = load(&st).await;
-    // Vergleich in konstanter Zeit ist hier nicht nötig (Token ist lang und zufällig), aber keine Hinweise geben
-    if !page.enabled || token.len() < 20 || token != page.token {
+    if !page.enabled || token.len() < 20 || !same(token, &page.token) {
         return Err(ApiError::NotFound);
     }
+    // 30 s zwischenspeichern: schützt die Datenbank vor vielen Aufrufen
+    if let Some((at, value)) = cache().lock().unwrap().as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(30) {
+            return Ok(Json(value.clone()));
+        }
+    }
     let mut items = Vec::new();
-    for item in &page.items {
-        type Row = (String, String, Option<f64>, Option<Vec<Option<f64>>>);
+    for (index, item) in page.items.iter().enumerate() {
+        type Row = (String, String, Option<f64>, Option<Vec<Option<f64>>>, bool, Option<f64>);
         let row: Option<Row> = if item.kind == "device" {
             sqlx::query_as(
-                "SELECT COALESCE(d.name, d.reported_name, d.hostname, 'Gerät'),
+                "SELECT COALESCE(d.device_type, 'unknown'),
                         CASE WHEN NOT d.monitored THEN 'unknown' ELSE d.status END,
                         (SELECT round(100.0 * avg(CASE WHEN up THEN 1 ELSE 0 END), 2)::float8 FROM device_metrics
                           WHERE device_id = d.id AND time > now() - interval '30 days'),
                         (SELECT array_agg(a ORDER BY day) FROM (
                            SELECT g.day, (SELECT round(100.0 * avg(CASE WHEN up THEN 1 ELSE 0 END), 2)::float8 FROM device_metrics m
                                             WHERE m.device_id = d.id AND m.time >= g.day AND m.time < g.day + interval '1 day') AS a
-                             FROM generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') AS g(day)) x)
+                             FROM generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') AS g(day)) x),
+                        d.wan_interface IS NOT NULL, d.last_rtt_ms::float8
                    FROM devices d WHERE d.id = $1",
             )
         } else {
             sqlx::query_as(
-                "SELECT c.name, CASE WHEN NOT c.enabled THEN 'unknown' ELSE c.status END,
+                "SELECT 'check', CASE WHEN NOT c.enabled THEN 'unknown' ELSE c.status END,
                         (SELECT round(100.0 * avg(CASE WHEN ok THEN 1 ELSE 0 END), 2)::float8 FROM check_results
                           WHERE check_id = c.id AND time > now() - interval '30 days'),
                         (SELECT array_agg(a ORDER BY day) FROM (
                            SELECT g.day, (SELECT round(100.0 * avg(CASE WHEN ok THEN 1 ELSE 0 END), 2)::float8 FROM check_results r
                                             WHERE r.check_id = c.id AND r.time >= g.day AND r.time < g.day + interval '1 day') AS a
-                             FROM generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') AS g(day)) x)
+                             FROM generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') AS g(day)) x),
+                        false, c.last_ms::float8
                    FROM checks c WHERE c.id = $1",
             )
         }
         .bind(item.id)
         .fetch_optional(&st.db)
         .await?;
-        if let Some((name, status, uptime, days)) = row {
-            let status = match status.as_str() {
-                "up" => "ok",
-                "warn" => "degraded",
-                "down" => "down",
-                _ => "unknown",
-            };
-            items.push(json!({ "name": item.label.clone().unwrap_or(name), "status": status, "uptime_30d": uptime, "days": days }));
+        let Some((device_type, status, uptime, days, wan, latency)) = row else { continue };
+        let status = match status.as_str() {
+            "up" => "ok",
+            "warn" => "degraded",
+            "down" => "down",
+            _ => "unknown",
+        };
+        let name = item.label.clone().unwrap_or_else(|| format!("{} {}", generic_name(&item.kind, &device_type), index + 1));
+        let mut entry = json!({
+            "name": name,
+            "group": item.group,
+            "kind": item.kind,
+            "status": status,
+            "uptime_30d": uptime,
+            "days": days,
+            "latency_ms": latency,
+        });
+        if item.details {
+            // 24 h in Halbstunden-Schritten: Antwortzeit + Datenverkehr (beim Router = Internet)
+            type Point = (chrono::DateTime<chrono::Utc>, Option<f64>, Option<f64>, Option<f64>);
+            let points: Vec<Point> = if item.kind == "device" {
+                sqlx::query_as(
+                    "SELECT g.t,
+                            (SELECT avg(rtt_ms)::float8 FROM device_metrics m WHERE m.device_id = $1 AND m.time >= g.t AND m.time < g.t + interval '30 minutes'),
+                            (SELECT avg(rx_bps) FROM device_stats s WHERE s.device_id = $1 AND s.time >= g.t AND s.time < g.t + interval '30 minutes'),
+                            (SELECT avg(tx_bps) FROM device_stats s WHERE s.device_id = $1 AND s.time >= g.t AND s.time < g.t + interval '30 minutes')
+                       FROM generate_series(date_trunc('hour', now()) - interval '23 hours 30 minutes', date_trunc('hour', now()) + interval '30 minutes', interval '30 minutes') AS g(t)
+                      ORDER BY g.t",
+                )
+            } else {
+                sqlx::query_as(
+                    "SELECT g.t,
+                            (SELECT avg(ms)::float8 FROM check_results r WHERE r.check_id = $1 AND r.time >= g.t AND r.time < g.t + interval '30 minutes'),
+                            NULL::float8, NULL::float8
+                       FROM generate_series(date_trunc('hour', now()) - interval '23 hours 30 minutes', date_trunc('hour', now()) + interval '30 minutes', interval '30 minutes') AS g(t)
+                      ORDER BY g.t",
+                )
+            }
+            .bind(item.id)
+            .fetch_all(&st.db)
+            .await?;
+            let latest = |pick: fn(&Point) -> Option<f64>| points.iter().rev().find_map(pick);
+            entry["details"] = json!({
+                "traffic_label": if wan { "Internet" } else { "Netzwerk" },
+                "rtt": points.iter().map(|p| p.1.map(|v| (v * 10.0).round() / 10.0)).collect::<Vec<_>>(),
+                "rx": points.iter().map(|p| p.2.map(f64::round)).collect::<Vec<_>>(),
+                "tx": points.iter().map(|p| p.3.map(f64::round)).collect::<Vec<_>>(),
+                "rx_now": latest(|p| p.2),
+                "tx_now": latest(|p| p.3),
+            });
         }
+        items.push(entry);
     }
     let down = items.iter().filter(|i| i["status"] == "down").count();
     let degraded = items.iter().filter(|i| i["status"] == "degraded").count();
     let overall = if down > 0 { "down" } else if degraded > 0 { "degraded" } else { "ok" };
-    Ok(Json(json!({
+    let value = json!({
         "title": page.title,
         "description": page.description,
         "overall": overall,
         "items": items,
         "updated": chrono::Utc::now(),
-    })))
+    });
+    *cache().lock().unwrap() = Some((std::time::Instant::now(), value.clone()));
+    Ok(Json(value))
 }
 
 // ---------------------------------------------------------------------------

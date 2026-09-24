@@ -65,6 +65,7 @@ fn dotted(parts: &[u64]) -> String {
 /// Liefert zu jeder OID den Namen des längsten bekannten Präfixes plus Rest,
 /// z. B. 1.3.6.1.2.1.31.1.1.1.6.3 → „ifHCInOctets.3“.
 pub async fn names_for(db: &PgPool, oids: &[Vec<u64>]) -> sqlx::Result<HashMap<Vec<u64>, String>> {
+    let oids: Vec<&Vec<u64>> = oids.iter().filter(|o| o.len() <= 128).take(100).collect();
     let mut prefixes: Vec<String> = oids.iter().flat_map(|o| (1..=o.len()).map(|n| dotted(&o[..n]))).collect();
     prefixes.sort();
     prefixes.dedup();
@@ -81,7 +82,7 @@ pub async fn names_for(db: &PgPool, oids: &[Vec<u64>]) -> sqlx::Result<HashMap<V
                 known.get(&dotted(&oid[..n])).map(|name| {
                     let rest = &oid[n..];
                     let name = if rest.is_empty() { name.clone() } else { format!("{name}.{}", dotted(rest)) };
-                    (oid.clone(), name)
+                    ((*oid).clone(), name)
                 })
             })
         })
