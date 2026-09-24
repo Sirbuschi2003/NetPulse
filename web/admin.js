@@ -167,9 +167,11 @@ async function viewEvents() {
 // ---------------------------------------------------------------------------
 
 async function viewNetworks() {
+  // Nur die Netzliste wird laufend aktualisiert – die Formulare darunter bleiben beim Tippen unberührt
+  view().innerHTML = '<div id="net-area"></div><div class="grid" id="sched-area"></div>';
   const render = async () => {
     const [networks, scan] = await Promise.all([api('/networks'), api('/scan/status')]);
-    view().innerHTML = `
+    $('#net-area').innerHTML = `
       <div class="notice">${icon('shield-lock')}<span>Nur eigene oder ausdrücklich freigegebene Netze eintragen – das Scannen fremder
         Netze kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /16; kleinere Netze (z. B. /24) sind deutlich schneller.</span></div>
       ${scanBanner(scan)}
@@ -215,7 +217,75 @@ async function viewNetworks() {
     }));
   };
   await render();
+  await renderSchedule();
   autoRefresh(render, 5);
+}
+
+const SCHEDULE_MODES = {
+  daily: 'Täglich zu festen Uhrzeiten',
+  interval: 'Regelmäßig im festen Abstand',
+  manual: 'Nur manuell („Alle scannen“ bzw. neues Netz)',
+};
+
+/** Zeitplan der Geräte-Suche und Takt der Echtzeit-Abfrage */
+async function renderSchedule() {
+  const [disc, liveCfg] = await Promise.all([api('/settings/discovery'), api('/settings/live')]);
+  const sch = disc.schedule;
+  const nextLine = (d) => {
+    const parts = [];
+    parts.push(d.next_run ? `Nächste Suche: <b>${esc(fmtTime(d.next_run))}</b>` : 'Keine automatische Suche geplant');
+    parts.push(d.last_run ? `letzte vollständige Suche ${esc(fmtAgo(d.last_run))}` : 'noch keine vollständige Suche');
+    return `${parts.join(' · ')} <span class="muted">(Zeitzone ${esc(d.timezone)})</span>`;
+  };
+  $('#sched-area').innerHTML = `
+    <section class="card span-2"><header><h2>${icon('calendar-time')}Zeitplan für die Geräte-Suche</h2></header>
+      <form class="form" id="sched-form">
+        <label>Automatisch nach neuen Geräten suchen<select name="mode">
+          ${Object.entries(SCHEDULE_MODES).map(([k, label]) => `<option value="${k}"${k === sch.mode ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label data-mode="daily">Uhrzeiten (mehrere mit Komma trennen)<input name="times" value="${esc(sch.times.join(', '))}" placeholder="03:00, 13:30"></label>
+        <label data-mode="interval">Abstand in Minuten (5 bis 10080)<input name="interval_min" type="number" min="5" max="10080" value="${sch.interval_min}"></label>
+        <label class="inline"><input type="checkbox" name="on_start"${sch.on_start ? ' checked' : ''}> Zusätzlich bei jedem Start des Containers suchen</label>
+        <p class="hint" id="sched-next">${nextLine(disc)}</p>
+        <p class="hint">Die Suche (Ping-Sweep, Ports, Namen) belastet das Netz kurz. Die Überwachung bekannter Geräte läuft davon unabhängig ständig weiter.
+          Ein verpasster Termin (Gerät war aus) wird beim nächsten Start einmal nachgeholt.</p>
+        <div class="actions"><button type="submit">${icon('check')}Zeitplan speichern</button></div>
+      </form></section>
+    <section class="card span-1"><header><h2>${icon('bolt')}Echtzeit-Abfrage</h2></header>
+      <form class="form" id="live-form">
+        <label class="inline"><input type="checkbox" name="enabled"${liveCfg.enabled ? ' checked' : ''}> Shelly-Geräte live abfragen</label>
+        <label>Takt in Sekunden (2 bis 300)<input name="interval_s" type="number" min="2" max="300" value="${liveCfg.interval_s}"></label>
+        <p class="hint">Pro Gerät eine kleine Anfrage; die Werte gehen sofort an alle offenen Browser.
+          In die Datenbank wird höchstens ein Messwert pro Minute geschrieben.</p>
+        <div class="actions"><button type="submit">${icon('check')}Speichern</button></div>
+      </form></section>`;
+  const form = $('#sched-form');
+  const syncMode = () => $$('[data-mode]', form).forEach((el) => { el.hidden = el.dataset.mode !== form.elements.mode.value; });
+  form.elements.mode.addEventListener('change', syncMode);
+  syncMode();
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = form.elements;
+    attempt(async () => {
+      const result = await api('/settings/discovery', {
+        method: 'PUT',
+        body: {
+          mode: e.mode.value,
+          interval_min: Number(e.interval_min.value) || 60,
+          times: e.times.value.split(/[,;\s]+/).filter(Boolean),
+          on_start: e.on_start.checked,
+        },
+      });
+      $('#sched-next').innerHTML = nextLine(result);
+      e.times.value = result.schedule.times.join(', ');
+    }, 'Zeitplan gespeichert');
+  });
+  const liveForm = $('#live-form');
+  liveForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = liveForm.elements;
+    attempt(() => api('/settings/live', { method: 'PUT', body: { enabled: e.enabled.checked, interval_s: Number(e.interval_s.value) || 5 } }),
+      'Echtzeit-Abfrage gespeichert');
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +643,7 @@ const AUDIT_LABEL = {
   scan_trigger: 'Scan gestartet', user_add: 'Benutzer angelegt', user_delete: 'Benutzer gelöscht',
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
+  discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -584,6 +655,57 @@ async function viewAudit() {
         <td>${e.action === 'login_failed' ? `<span class="badge warn">${esc(AUDIT_LABEL[e.action])}</span>` : esc(AUDIT_LABEL[e.action] || e.action)}</td>
         <td class="mono small">${Object.keys(e.detail || {}).length ? esc(JSON.stringify(e.detail)) : ''}</td></tr>`).join('')
         || `<tr><td colspan="4">${empty('Keine Einträge.')}</td></tr>`}</tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// System-Log
+// ---------------------------------------------------------------------------
+
+const LOG_LEVELS = { debug: 'Alles (inkl. Details)', info: 'Info und wichtiger', warn: 'Warnungen und Fehler', error: 'Nur Fehler' };
+
+async function viewLogs() {
+  const filters = { level: 'info', q: '' };
+  let lines = [];
+  view().innerHTML = `
+    <div class="page-head"><div class="actions">
+        <select id="log-level" aria-label="Stufe">${Object.entries(LOG_LEVELS).map(([k, l]) => `<option value="${k}"${k === filters.level ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+        <input id="log-q" type="search" placeholder="Suchen: IP, Gerätename, „Shelly“ …" aria-label="Suchen">
+        <label class="inline"><input type="checkbox" id="log-auto" checked> live</label></div>
+      <div class="actions"><span class="muted small" id="log-count"></span>
+        <button type="button" class="ghost" id="log-save">${icon('cloud-download')}Als Datei speichern</button></div></div>
+    <div class="notice info">${icon('file-text')}<span>Die letzten 5.000 Meldungen seit dem Start des Containers (nur im Speicher).
+      Tipp: Für ein einzelnes Gerät zeigt der Tab „Diagnose“ auf der Geräteseite jeden Abfrageschritt.</span></div>
+    <div class="card"><div class="log" id="log-body"><div class="empty">Lade …</div></div></div>`;
+
+  const shortTarget = (t) => t.replace(/^netpulse::/, '');
+  const render = async () => {
+    lines = await api(`/logs?level=${encodeURIComponent(filters.level)}&q=${encodeURIComponent(filters.q)}&limit=1000`);
+    $('#log-count').textContent = `${lines.length} Einträge`;
+    $('#log-body').innerHTML = lines.length ? lines.map((l) => `<div class="log-line lvl-${esc(l.level)}">
+        <span class="mono muted">${esc(new Date(l.time).toLocaleString('de-DE'))}</span>
+        <span class="lvl">${esc(l.level.toUpperCase())}</span>
+        <span class="mono muted small ellipsis" title="${esc(l.target)}">${esc(shortTarget(l.target))}</span>
+        <span class="msg">${esc(l.message)}</span></div>`).join('') : empty('Keine passenden Meldungen.', 'file-text');
+  };
+  let debounce = null;
+  $('#log-level').addEventListener('change', (ev) => { filters.level = ev.target.value; render(); });
+  $('#log-q').addEventListener('input', (ev) => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { filters.q = ev.target.value.trim(); render(); }, 300);
+  });
+  const auto = () => { if ($('#log-auto').checked) autoRefresh(render, 3); else clearInterval(state.refreshTimer); };
+  $('#log-auto').addEventListener('change', auto);
+  $('#log-save').addEventListener('click', () => {
+    const text = lines.slice().reverse().map((l) => `${l.time} ${l.level.toUpperCase().padEnd(5)} ${l.target}: ${l.message}`).join('\n');
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `netpulse-log-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  await render();
+  auto();
 }
 
 async function viewAccount() {

@@ -27,7 +27,11 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
 - **Herstellerprofile:** UniFi (WLANs, Clients je WLAN, Kanalauslastung), Synology (Festplatten, Temperaturen, RAID),
   MikroTik, APC, pf-Firewalls, Sensoren (ENTITY-SENSOR-MIB).
 - **Shelly** (Gen1–Gen4): Name, Schaltzustand, Leistung, Energie, Temperatur, Updates; eine Zugangsangabe für alle Shellys.
-  Dashboard-Widget **„Stromverbrauch“**.
+- **Echtzeit:** Shellys werden alle 5 s abgefragt (einstellbar), die Werte gehen per Server-Sent Events sofort an den Browser –
+  Dashboard-Widgets **„Stromverbrauch live“** (mit Verlauf) und **„Smart Home live“** (Kacheln mit Schaltzustand),
+  Live-Tab je Gerät, Statuswechsel und **Alarme erscheinen sofort als Hinweis** in der Oberfläche.
+- **Such-Zeitplan:** neue Geräte täglich zu festen Uhrzeiten, im festen Abstand oder nur manuell suchen – kein Scan bei jedem Neustart.
+- **Fehlersuche:** Tab **„Diagnose“** je Gerät (jeder Abfrageschritt: SNMP, SSH, Shelly – mit Ursache) und Seite **„System-Log“**.
 - **Gerätenamen** aus mDNS/Bonjour, NetBIOS, SNMP, SSH und DNS.
 - **SNMP-Explorer** mit Namen aus ~4.800 MIBs (knapp 960.000 benannte Werte).
 - **Alarme** mit Entwarnung: Gerät offline, neues Gerät im Netz, MAC-/SSH-Schlüssel geändert, Speicher voll,
@@ -165,7 +169,8 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 | `SITE_ADDRESS` | `https://localhost:8443` | Adresse der Weboberfläche |
 | `SCAN_NETWORKS` | – | Netze beim ersten Start, z. B. `192.168.178.0/24,10.0.10.0/24` |
 | `INITIAL_ADMIN_USER` / `_PASSWORD` | `admin` / zufällig | Erstes Admin-Konto |
-| `DISCOVERY_INTERVAL_MIN` | 15 | Abstand der Netz-Scans in Minuten |
+| `DISCOVERY_INTERVAL_MIN` | 15 | Vorgabe für den Modus „regelmäßig“; der Such-Zeitplan selbst wird unter **Netzwerke** eingestellt (Standard: täglich 03:00, kein Scan beim Neustart) |
+| `TZ` | Europe/Berlin | Zeitzone für die Uhrzeiten im Such-Zeitplan |
 | `MONITOR_INTERVAL_SEC` | 60 | Abstand der Erreichbarkeitsprüfungen in Sekunden |
 | `RETENTION_METRICS_DAYS` | 90 | Aufbewahrung der Messwerte |
 | `RETENTION_EVENTS_DAYS` | 180 | Aufbewahrung der Ereignisse |

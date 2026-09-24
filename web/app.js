@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.4.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.5.0#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -337,6 +337,126 @@ function sparkline(points, height = 44) {
     <path class="spark-area c0" d="${area}"/><path class="line c0" d="${line('rx')}"/><path class="line c1" d="${line('tx')}"/></svg>`;
 }
 
+// ---------------------------------------------------------------------------
+// Live-Stream: eine dauerhafte Verbindung (Server-Sent Events) für alle Seiten
+// ---------------------------------------------------------------------------
+
+const HISTORY_POINTS = 120;
+const live = { es: null, devices: new Map(), total: null, history: [], perDevice: new Map(), listeners: new Set() };
+
+function pushPoint(list, value) {
+  list.push(value);
+  if (list.length > HISTORY_POINTS) list.shift();
+}
+
+function setLiveDot(on) {
+  const dot = $('#live-dot');
+  if (!dot) return;
+  dot.classList.toggle('on', on);
+  dot.title = on ? 'Live-Verbindung aktiv' : 'Live-Verbindung getrennt – verbinde neu …';
+}
+
+function connectStream() {
+  if (live.es || typeof EventSource === 'undefined') return;
+  const es = new EventSource('/api/stream');
+  live.es = es;
+  es.onopen = () => setLiveDot(true);
+  // Der Browser baut die Verbindung selbstständig neu auf
+  es.onerror = () => setLiveDot(false);
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    setLiveDot(true);
+    if (msg.type === 'shelly') {
+      if (msg.full) live.devices.clear();
+      (msg.devices || []).forEach((d) => live.devices.set(d.id, d));
+      live.total = msg.total_power_w;
+      if (msg.total_power_w != null && !(msg.full && live.history.length)) pushPoint(live.history, msg.total_power_w);
+      live.devices.forEach((d) => {
+        if (!d.ok || d.power_w == null) return;
+        if (!live.perDevice.has(d.id)) live.perDevice.set(d.id, []);
+        pushPoint(live.perDevice.get(d.id), d.power_w);
+      });
+    } else if (msg.type === 'alert') {
+      alertPopup(msg);
+      refreshShell();
+    } else if (msg.type === 'status' && msg.devices.length <= 3) {
+      msg.devices.forEach((d) => toast(`${d.label} ist ${d.status === 'up' ? 'wieder erreichbar' : 'nicht erreichbar'}`, d.status !== 'up'));
+    }
+    live.listeners.forEach((fn) => { try { fn(msg); } catch (e) { console.error(e); } });
+  };
+}
+
+const SEVERITY = {
+  critical: { label: 'Kritisch', icon: 'alert-triangle' },
+  warning: { label: 'Warnung', icon: 'alert-triangle' },
+  info: { label: 'Hinweis', icon: 'info-circle' },
+  resolved: { label: 'Behoben', icon: 'circle-check' },
+};
+
+/** Alarm als Hinweis oben rechts; kritische bleiben stehen, bis man sie schließt */
+function alertPopup(a) {
+  let stack = $('#alert-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'alert-stack';
+    stack.setAttribute('aria-live', 'assertive');
+    document.body.append(stack);
+  }
+  const sev = SEVERITY[a.severity] || SEVERITY.info;
+  const el = document.createElement('div');
+  el.className = `alert-pop sev-${a.severity}`;
+  el.setAttribute('role', 'alert');
+  el.innerHTML = `${icon(sev.icon)}<div class="alert-pop-body">
+      <div class="alert-pop-head"><strong>${esc(a.title)}</strong><span class="badge plain">${esc(sev.label)}</span></div>
+      <div>${esc(a.message)}</div>
+      <div class="muted small">Regel „${esc(a.rule)}“ · ${esc(new Date().toLocaleTimeString('de-DE'))} · <a href="#/alerts">Alle Alarme</a></div></div>
+    <button type="button" class="icon-btn" title="Schließen">${icon('x', 'i-sm')}</button>`;
+  const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 250); };
+  $('button', el).addEventListener('click', close);
+  $('a', el).addEventListener('click', close);
+  stack.prepend(el);
+  while (stack.children.length > 5) stack.lastElementChild.remove();
+  if (a.severity !== 'critical') setTimeout(close, 15000);
+  // Tab im Hintergrund: Titel blinkt, bis man zurückkommt
+  if (document.hidden) {
+    const original = document.title;
+    const blink = setInterval(() => { document.title = document.title === original ? `⚠ ${a.title}` : original; }, 1000);
+    document.addEventListener('visibilitychange', () => { clearInterval(blink); document.title = original; }, { once: true });
+  }
+}
+
+function disconnectStream() {
+  if (live.es) live.es.close();
+  live.es = null;
+  live.devices.clear();
+  setLiveDot(false);
+}
+
+/** Auf Live-Meldungen reagieren, solange die aktuelle Seite offen ist */
+function onLive(fn) {
+  live.listeners.add(fn);
+  state.liveStops.push(() => live.listeners.delete(fn));
+}
+
+/** Verlauf eines Einzelwerts (z. B. Watt) als Fläche + Linie */
+function valueSpark(values, height = 56) {
+  if (!values || values.length < 3) return `<svg class="spark tall" viewBox="0 0 240 ${height}"></svg>`;
+  const W = 240;
+  // Anfangs weniger Punkte: Breite wächst mit, bis der Verlauf voll ist
+  const slots = Math.max(values.length, 24);
+  const max = Math.max(1, ...values) * 1.15;
+  const x = (i) => ((i + slots - values.length) / (slots - 1)) * W;
+  const y = (v) => height - 2 - (v / max) * (height - 4);
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = `${line} L${W},${height} L${x(0).toFixed(1)},${height} Z`;
+  return `<svg class="spark tall" viewBox="0 0 ${W} ${height}" preserveAspectRatio="none">
+    <path class="spark-area c2" d="${area}"/><path class="line c2" d="${line}"/></svg>`;
+}
+
+const CHANNEL_ICON = { cover: 'arrows-exchange', light: 'bulb', em: 'gauge', em1: 'gauge', pm1: 'gauge' };
+const CHANNEL_LABEL = { switch: 'Schalter', light: 'Licht', cover: 'Rollladen', em: 'Energiezähler', em1: 'Energiezähler', pm1: 'Strommesser' };
+
 const linkLabel = (mbps) => (mbps ? (mbps >= 1000 ? `${mbps / 1000} Gbit/s` : `${Math.round(mbps)} Mbit/s`) : '');
 
 // ---------------------------------------------------------------------------
@@ -346,7 +466,8 @@ const linkLabel = (mbps) => (mbps ? (mbps >= 1000 ? `${mbps / 1000} Gbit/s` : `$
 const WIDGETS = {
   summary: { title: 'Übersicht', icon: 'gauge', render: wSummary },
   internet: { title: 'Internet', icon: 'world-www', render: wInternet },
-  power: { title: 'Stromverbrauch', icon: 'bolt', render: wPower },
+  power: { title: 'Stromverbrauch live', icon: 'bolt', render: wPower },
+  smarthome: { title: 'Smart Home live', icon: 'plug', render: wSmartHome },
   alerts: { title: 'Offene Alarme', icon: 'bell', render: wAlerts },
   down: { title: 'Nicht erreichbar', icon: 'alert-triangle', render: wDown },
   types: { title: 'Gerätetypen', icon: 'category', render: wTypes },
@@ -398,15 +519,102 @@ function wInternet({ summary }, widget) {
 
 const fmtWatt = (w) => (w == null ? '–' : w >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${Math.round(w)} W`);
 
-/** Aktuelle Leistung aller Geräte mit Strommessung (z. B. Shelly) */
+/** Liste der aktuellen Verbraucher: live, sonst der letzte gespeicherte Stand */
+function powerList(summary) {
+  const fromLive = [...live.devices.values()].filter((d) => d.ok && d.power_w != null)
+    .map((d) => ({ id: d.id, label: d.label, power_w: d.power_w }));
+  const list = fromLive.length ? fromLive : [...((summary && summary.power) || [])];
+  return list.sort((a, b) => b.power_w - a.power_w);
+}
+
+function powerBars(list) {
+  const max = (list[0] && list[0].power_w) || 1;
+  return list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${esc(p.label)}</a>
+    <span class="bar" data-w="${pct(p.power_w, max)}"></span><span class="muted num">${esc(fmtWatt(p.power_w))}</span>`).join('');
+}
+
+/** Gesamtleistung aller Geräte mit Strommessung (z. B. Shelly) – live mit Verlauf */
 function wPower({ summary }) {
-  const list = [...(summary.power || [])].sort((a, b) => b.power_w - a.power_w);
+  const list = powerList(summary);
   if (!list.length) return empty('Keine Geräte mit Strommessung. Shelly-Steckdosen und -Zähler werden automatisch erkannt.', 'bolt');
-  const total = list.reduce((sum, p) => sum + p.power_w, 0);
-  const max = list[0].power_w || 1;
-  return `<div class="inet-values"><div><span class="inet-dir">${icon('bolt', 'i-sm')} Gesamt</span><strong>${esc(fmtWatt(total))}</strong></div></div>
-    <div class="bars">${list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${esc(p.label)}</a>
-      <span class="bar" data-w="${pct(p.power_w, max)}"></span><span class="muted">${esc(fmtWatt(p.power_w))}</span>`).join('')}</div>`;
+  const total = live.total ?? list.reduce((sum, p) => sum + p.power_w, 0);
+  return `<div class="power-live" data-live-power>
+    <div class="power-head"><span class="power-total" data-total data-value="${total}">${esc(fmtWatt(total))}</span>
+      <span class="live-tag">LIVE</span></div>
+    <div data-spark>${valueSpark(live.history)}</div>
+    <div class="bars" data-bars>${powerBars(list)}</div></div>`;
+}
+
+function shellyTile(d) {
+  const channels = d.channels || [];
+  const on = channels.some((c) => c.on === true || c.state === 'opening' || c.state === 'closing');
+  let main = '–';
+  if (!d.ok) main = 'offline';
+  else if (d.power_w != null) main = fmtWatt(d.power_w);
+  else if (d.temp_c != null) main = `${d.temp_c} °C`;
+  else if (channels.length) main = on ? 'an' : 'aus';
+  const extra = d.ok
+    ? [d.temp_c != null && d.power_w != null ? `${d.temp_c} °C` : null, d.humidity_pct != null ? `${d.humidity_pct} % rF` : null,
+      d.battery_pct != null ? `Akku ${d.battery_pct} %` : null].filter(Boolean).join(' · ')
+    : (d.error || '');
+  const firstKind = (channels[0] || {}).kind;
+  return `<a class="sh-tile${!d.ok ? ' off' : on ? ' on' : ''}" href="#/device/${d.id}" data-sh="${d.id}" title="${esc(d.label)}${d.model ? ` · ${esc(d.model)}` : ''}">
+    <span class="sh-top">${icon(CHANNEL_ICON[firstKind] || 'plug', 'i-sm')}<span class="ellipsis">${esc(d.label)}</span></span>
+    <span class="sh-val">${esc(main)}</span>
+    <span class="sh-chans">${channels.map((c) => `<i class="sh-ch${c.on === true ? ' on' : ''}" title="${esc(CHANNEL_LABEL[c.kind] || c.kind)} ${Number(c.id) + 1}${c.position != null ? ` · ${c.position} %` : ''}"></i>`).join('')}</span>
+    <span class="sh-extra ellipsis">${esc(extra)}</span></a>`;
+}
+
+function shellyGrid() {
+  const list = [...live.devices.values()].sort((a, b) => (Number(b.ok) - Number(a.ok)) || String(a.label).localeCompare(String(b.label), 'de'));
+  return `<div class="sh-grid">${list.map(shellyTile).join('')}</div>`;
+}
+
+/** Kacheln aller Smart-Home-Geräte (Shelly) mit Schaltzustand und Leistung – live */
+function wSmartHome() {
+  const body = live.devices.size ? shellyGrid()
+    : empty('Warte auf Live-Daten … Shelly-Geräte werden automatisch erkannt und alle paar Sekunden abgefragt.', 'plug');
+  return `<div data-live-smarthome>${body}</div>`;
+}
+
+/** Live-Widgets (Strom, Smart Home) an den Stream hängen */
+function mountStreamWidgets(root) {
+  $$('[data-live-power]', root).forEach((el) => {
+    const bars = $('[data-bars]', el);
+    bars.dataset.ids = powerList(state.summary).slice(0, 8).map((p) => p.id).join(',');
+    onLive((msg) => {
+      if (msg.type !== 'shelly') return;
+      const list = powerList(null);
+      tweenNumber($('[data-total]', el), live.total, fmtWatt);
+      $('[data-spark]', el).innerHTML = valueSpark(live.history);
+      const ids = list.slice(0, 8).map((p) => p.id).join(',');
+      if (bars.dataset.ids === ids) {
+        // Gleiche Reihenfolge: Balken nur verschieben (weiche Animation)
+        const max = (list[0] && list[0].power_w) || 1;
+        $$('.bar', bars).forEach((bar, i) => { bar.style.width = `${pct(list[i].power_w, max)}%`; });
+        $$('.num', bars).forEach((num, i) => { num.textContent = fmtWatt(list[i].power_w); });
+      } else {
+        bars.innerHTML = powerBars(list);
+        bars.dataset.ids = ids;
+        applyWidths(bars);
+      }
+    });
+  });
+  $$('[data-live-smarthome]', root).forEach((el) => {
+    onLive((msg) => {
+      if (msg.type !== 'shelly') return;
+      const changed = msg.devices || [];
+      const missing = changed.some((d) => !$(`[data-sh="${d.id}"]`, el));
+      if (msg.full || missing || !$('.sh-grid', el)) {
+        if (live.devices.size) el.innerHTML = shellyGrid();
+        return;
+      }
+      changed.forEach((d) => {
+        $(`[data-sh="${d.id}"]`, el).outerHTML = shellyTile(d);
+        $(`[data-sh="${d.id}"]`, el).classList.add('flash');
+      });
+    });
+  });
 }
 
 /** Live-Aktualisierung aller Internet-Widgets auf der Seite */
@@ -580,6 +788,7 @@ async function viewDashboard() {
     state.liveStops.forEach((stop) => stop());
     state.liveStops = [];
     mountInternetWidgets(view(), liveHistories);
+    mountStreamWidgets(view());
   };
 
   const move = (from, to) => {
@@ -636,6 +845,7 @@ async function viewDashboard() {
 
 function showLogin() {
   state.user = null;
+  disconnectStream();
   clearInterval(state.refreshTimer);
   clearInterval(state.globalTimer);
   state.liveStops.forEach((stop) => stop());
@@ -673,6 +883,7 @@ const ROUTES = {
   channels: { title: 'Benachrichtigungen', view: () => viewChannels(), admin: true },
   users: { title: 'Benutzer', view: () => viewUsers(), admin: true },
   audit: { title: 'Audit-Log', view: () => viewAudit(), admin: true },
+  logs: { title: 'System-Log', view: () => viewLogs(), admin: true },
   account: { title: 'Mein Konto', view: () => viewAccount() },
 };
 
@@ -739,6 +950,7 @@ function startApp() {
   document.body.classList.toggle('is-admin', isAdmin());
   $('#user-name').textContent = state.user.username;
   refreshShell();
+  connectStream();
   clearInterval(state.globalTimer);
   state.globalTimer = setInterval(refreshShell, 10000);
   if (!location.hash || location.hash === '#/') location.hash = '#/dashboard';

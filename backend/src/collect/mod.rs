@@ -5,6 +5,7 @@
 //! (SNMP immer, SSH nur mit Schlüssel und nur bei offenem Port) und bei Erfolg fest zugeordnet.
 
 pub mod check;
+pub mod fast;
 pub mod live;
 pub mod shelly;
 pub mod snmp;
@@ -41,8 +42,10 @@ pub struct Secret {
     pub priv_password: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Credential {
     pub id: i64,
+    pub name: String,
     pub kind: String,
     pub username: Option<String>,
     pub port: Option<i32>,
@@ -109,6 +112,7 @@ async fn due_devices(state: &AppState) -> sqlx::Result<Vec<i64>> {
 #[derive(sqlx::FromRow)]
 struct CredentialRow {
     id: i64,
+    name: String,
     kind: String,
     username: Option<String>,
     port: Option<i32>,
@@ -132,11 +136,11 @@ struct DeviceRow {
 
 pub(crate) async fn load_credentials(state: &AppState, device_id: i64) -> Result<Vec<Credential>> {
     let rows: Vec<CredentialRow> = sqlx::query_as(
-        "SELECT c.id, c.kind, c.username, c.port, c.secret,
+        "SELECT c.id, c.name, c.kind, c.username, c.port, c.secret,
                 EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = $1 AND dc.credential_id = c.id) AS linked
            FROM credentials c
           WHERE c.auto OR c.id IN (SELECT credential_id FROM device_credentials WHERE device_id = $1)
-          ORDER BY 6 DESC, c.id",
+          ORDER BY linked DESC, c.id",
     )
     .bind(device_id)
     .fetch_all(&state.db)
@@ -146,6 +150,7 @@ pub(crate) async fn load_credentials(state: &AppState, device_id: i64) -> Result
         match state.vault.open_value::<Secret>(&row.secret) {
             Ok(secret) => creds.push(Credential {
                 id: row.id,
+                name: row.name,
                 kind: row.kind,
                 username: row.username,
                 port: row.port,
@@ -156,6 +161,26 @@ pub(crate) async fn load_credentials(state: &AppState, device_id: i64) -> Result
         }
     }
     Ok(creds)
+}
+
+/// Schrittweises Protokoll einer Abfrage (Reiter „Diagnose“ und System-Log)
+struct Trace {
+    label: String,
+    steps: Vec<Value>,
+}
+
+impl Trace {
+    fn add(&mut self, ok: Option<bool>, text: impl Into<String>) {
+        let text = text.into();
+        match ok {
+            Some(false) => tracing::warn!(target: "netpulse::inventar", "{}: {text}", self.label),
+            _ => tracing::debug!(target: "netpulse::inventar", "{}: {text}", self.label),
+        }
+        self.steps.push(json!({ "time": chrono::Utc::now(), "ok": ok, "text": text }));
+    }
+    fn to_json(&self) -> Value {
+        json!({ "time": chrono::Utc::now(), "steps": self.steps })
+    }
 }
 
 /// Fragt ein Gerät ab und speichert Inventar, Messwerte und abgeleitete Angaben.
@@ -190,17 +215,32 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     let has_linked = credentials.iter().any(|c| c.linked);
     let mut errors: Vec<String> = Vec::new();
     let mut inventory = Map::new();
+    let mut trace = Trace { label: format!("{label} ({ip})"), steps: vec![] };
+    let linked_count = credentials.iter().filter(|c| c.linked).count();
+    trace.add(
+        None,
+        format!(
+            "Abfrage gestartet – {linked_count} zugeordnete, {} automatische Zugangsdaten{}",
+            credentials.len() - linked_count,
+            integration.as_deref().map(|i| format!(", Geräte-Schnittstelle: {i}")).unwrap_or_default()
+        ),
+    );
 
     // SNMP: zugeordnete zuerst, dann automatische
     for cred in credentials.iter().filter(|c| c.is_snmp()) {
         match snmp::collect(addr, cred).await {
             Ok(data) => {
+                trace.add(Some(true), format!("SNMP mit „{}“: Daten gelesen", cred.name));
                 inventory.insert("snmp".into(), data);
                 link(state, device_id, cred).await?;
                 break;
             }
-            Err(e) if cred.linked => errors.push(format!("SNMP: {e:#}")),
-            Err(_) => {} // automatischer Versuch – Fehlschlag ist normal
+            Err(e) if cred.linked => {
+                trace.add(Some(false), format!("SNMP mit „{}“: {e:#}", cred.name));
+                errors.push(format!("SNMP: {e:#}"));
+            }
+            // automatischer Versuch – Fehlschlag ist normal
+            Err(e) => trace.add(None, format!("SNMP mit „{}“ (automatisch) passt nicht: {e:#}", cred.name)),
         }
     }
 
@@ -208,10 +248,15 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     for cred in credentials.iter().filter(|c| c.kind.starts_with("ssh")) {
         let port = cred.port.unwrap_or(22);
         if !cred.linked && (cred.kind != "ssh_key" || !open_ports.contains(&port)) {
+            trace.add(None, format!("SSH mit „{}“ übersprungen (automatisch nur mit Schlüssel und offenem Port {port})", cred.name));
             continue;
         }
         match ssh::collect(addr, cred, host_key.as_deref()).await {
             Ok(result) => {
+                trace.add(
+                    Some(true),
+                    format!("SSH mit „{}“: Daten gelesen ({})", cred.name, result.data["os"].as_str().unwrap_or("System")),
+                );
                 if host_key.is_none() {
                     sqlx::query("UPDATE devices SET ssh_host_key = $2 WHERE id = $1")
                         .bind(device_id)
@@ -231,37 +276,72 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
                 if !previous_error.as_deref().unwrap_or_default().contains("Host-Schlüssel") {
                     scanner::add_event(&state.db, device_id, "ssh_key_changed", &message).await?;
                 }
+                trace.add(Some(false), "SSH: Host-Schlüssel hat sich geändert – Abfrage gestoppt");
                 errors.push("SSH: Host-Schlüssel hat sich geändert".into());
                 break;
             }
-            Err(ssh::SshError::Failed(e)) if cred.linked => errors.push(format!("SSH: {e}")),
-            Err(ssh::SshError::Failed(_)) => {}
+            Err(ssh::SshError::Failed(e)) if cred.linked => {
+                trace.add(Some(false), format!("SSH mit „{}“: {e}", cred.name));
+                errors.push(format!("SSH: {e}"));
+            }
+            Err(ssh::SshError::Failed(e)) => trace.add(None, format!("SSH mit „{}“ (automatisch) passt nicht: {e}", cred.name)),
         }
     }
 
     // Shelly: Daten über die lokale HTTP-API; Passwort nur, falls am Gerät eines gesetzt ist.
     // HTTP-Zugangsdaten gehen ausschließlich an Geräte, die sich vorher als Shelly ausgewiesen haben.
     if integration.as_deref() == Some("shelly") {
-        if let Some(info) = shelly::probe(addr).await {
-            let http_creds: Vec<&Credential> = credentials.iter().filter(|c| c.kind == "http").collect();
-            let result = if info.auth && !http_creds.is_empty() {
-                let mut last = Err(anyhow::anyhow!("Anmeldung fehlgeschlagen"));
-                for cred in http_creds {
-                    last = shelly::collect(addr, &info, Some(cred)).await;
-                    if last.is_ok() {
-                        link(state, device_id, cred).await?;
-                        break;
+        match shelly::probe(addr).await {
+            None => {
+                trace.add(Some(false), "Shelly antwortet nicht auf http://…/shelly (Gerät aus, WLAN schwach oder Webserver blockiert?)");
+                errors.push("Shelly: keine Antwort auf /shelly".into());
+            }
+            Some(info) => {
+                trace.add(
+                    Some(true),
+                    format!(
+                        "Shelly Gen{} erkannt ({}), Passwortschutz {}",
+                        info.generation,
+                        info.model.as_deref().unwrap_or("Modell unbekannt"),
+                        if info.auth { "aktiv" } else { "aus" }
+                    ),
+                );
+                let http_creds: Vec<&Credential> = credentials.iter().filter(|c| c.kind == "http").collect();
+                let result = if info.auth && http_creds.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "Passwortschutz aktiv, aber keine HTTP-Zugangsdaten vorhanden – unter Zugangsdaten „HTTP / Web-Anmeldung“ anlegen"
+                    ))
+                } else if info.auth {
+                    let mut last = Err(anyhow::anyhow!("Anmeldung fehlgeschlagen"));
+                    for cred in http_creds {
+                        last = shelly::collect(addr, &info, Some(cred)).await;
+                        match &last {
+                            Ok(_) => {
+                                trace.add(Some(true), format!("Anmeldung mit „{}“ erfolgreich", cred.name));
+                                link(state, device_id, cred).await?;
+                                break;
+                            }
+                            Err(e) => trace.add(Some(false), format!("Anmeldung mit „{}“: {e:#}", cred.name)),
+                        }
+                    }
+                    last
+                } else {
+                    shelly::collect(addr, &info, None).await
+                };
+                match result {
+                    Ok(data) => {
+                        let channels = data["channels"].as_array().map_or(0, Vec::len);
+                        let power = data["power_w"].as_f64().map(|w| format!(", {w} W")).unwrap_or_default();
+                        trace.add(Some(true), format!("Shelly-Daten gelesen: {channels} Kanäle{power}"));
+                        inventory.insert("shelly".into(), data);
+                    }
+                    Err(e) => {
+                        if !info.auth || trace.steps.last().is_none_or(|s| s["ok"] != false) {
+                            trace.add(Some(false), format!("Shelly: {e:#}"));
+                        }
+                        errors.push(format!("Shelly: {e:#}"));
                     }
                 }
-                last
-            } else {
-                shelly::collect(addr, &info, None).await
-            };
-            match result {
-                Ok(data) => {
-                    inventory.insert("shelly".into(), data);
-                }
-                Err(e) => errors.push(format!("Shelly: {e:#}")),
             }
         }
     }
@@ -270,11 +350,22 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
         // Nur bei fest zugeordneten Zugangsdaten ist ein Fehlschlag eine Meldung wert;
         // dass automatische Versuche nicht passen, ist der Normalfall.
         let error = if has_linked || integration.is_some() { errors.join(" · ") } else { String::new() };
-        sqlx::query("UPDATE devices SET inventory_at = now(), inventory_error = NULLIF($2, '') WHERE id = $1")
-            .bind(device_id)
-            .bind(error)
-            .execute(&state.db)
-            .await?;
+        trace.add(
+            (!error.is_empty()).then_some(false),
+            if credentials.is_empty() && integration.is_none() {
+                "Keine Daten: dem Gerät sind keine Zugangsdaten zugeordnet".to_string()
+            } else {
+                "Keine Daten erhalten".to_string()
+            },
+        );
+        sqlx::query(
+            "UPDATE devices SET inventory_at = now(), inventory_error = NULLIF($2, ''), inventory_log = $3 WHERE id = $1",
+        )
+        .bind(device_id)
+        .bind(error)
+        .bind(trace.to_json())
+        .execute(&state.db)
+        .await?;
         return Ok(());
     }
 
@@ -295,7 +386,7 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
              inventory = $2, inventory_at = now(), inventory_error = NULLIF($3, ''),
              os = COALESCE($4, os), model = COALESCE($5, model),
              hostname = COALESCE(hostname, $6), vendor = COALESCE($7, vendor),
-             wan_interface = $8, reported_name = COALESCE($9, reported_name)
+             wan_interface = $8, reported_name = COALESCE($9, reported_name), inventory_log = $10
          WHERE id = $1",
     )
     .bind(device_id)
@@ -307,6 +398,11 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     .bind(derived.vendor)
     .bind(&wan)
     .bind(derived.reported_name)
+    .bind({
+        let sources: Vec<&str> = ["snmp", "ssh", "shelly"].into_iter().filter(|k| inventory.get(*k).is_some()).collect();
+        trace.add(Some(true), format!("Gespeichert ({})", sources.join(" + ").to_uppercase()));
+        trace.to_json()
+    })
     .execute(&state.db)
     .await?;
 

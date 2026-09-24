@@ -235,3 +235,72 @@ pub async fn audit_log(
     .await?;
     Ok(Json(entries))
 }
+
+// ---------------------------------------------------------------------------
+// Zeitplan der Geräte-Suche
+// ---------------------------------------------------------------------------
+
+async fn discovery_view(st: &AppState) -> Value {
+    use scanner::schedule;
+    let plan = schedule::load(&st.db, &st.config).await;
+    let last = schedule::last_full_scan(&st.db).await;
+    let tz = schedule::timezone();
+    let next = schedule::next_due(&plan, last, Utc::now(), tz);
+    json!({ "schedule": plan, "last_run": last, "next_run": next, "timezone": tz.name() })
+}
+
+pub async fn get_discovery(State(st): State<AppState>, _admin: AdminUser) -> Json<Value> {
+    Json(discovery_view(&st).await)
+}
+
+pub async fn set_discovery(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Json(mut plan): Json<scanner::schedule::Schedule>,
+) -> ApiResult<Json<Value>> {
+    plan.times = plan.times.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+    plan.times.sort();
+    plan.times.dedup();
+    plan.validate().map_err(ApiError::BadRequest)?;
+    scanner::schedule::save(&st.db, &plan).await?;
+    audit::by(&st.db, &user, "discovery_schedule", json!(plan)).await;
+    Ok(Json(discovery_view(&st).await))
+}
+
+// ---------------------------------------------------------------------------
+// System-Log (die letzten Meldungen aus dem Speicher)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    level: Option<String>,
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+pub async fn system_log(_admin: AdminUser, Query(q): Query<LogQuery>) -> Json<Vec<crate::logbuf::LogLine>> {
+    Json(crate::logbuf::recent(
+        q.level.as_deref().unwrap_or("info"),
+        q.q.as_deref().unwrap_or("").trim(),
+        q.limit.unwrap_or(500).clamp(1, 5000),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Echtzeit-Abfrage
+// ---------------------------------------------------------------------------
+
+pub async fn get_live(State(st): State<AppState>, _user: CurrentUser) -> Json<crate::collect::fast::LiveSettings> {
+    Json(crate::collect::fast::load_settings(&st.db).await)
+}
+
+pub async fn set_live(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Json(settings): Json<crate::collect::fast::LiveSettings>,
+) -> ApiResult<Json<crate::collect::fast::LiveSettings>> {
+    settings.validate().map_err(ApiError::BadRequest)?;
+    crate::collect::fast::save_settings(&st.db, &settings).await?;
+    audit::by(&st.db, &user, "live_settings", json!(settings)).await;
+    Ok(Json(settings))
+}

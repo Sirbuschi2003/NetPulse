@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod monitor;
 pub mod names;
 pub mod net;
+pub mod schedule;
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

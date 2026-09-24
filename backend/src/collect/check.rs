@@ -104,13 +104,13 @@ async fn check(cred: &Credential, t: &Target) -> Result<String> {
 }
 
 async fn load_credential(state: &AppState, credential_id: i64) -> Result<Credential> {
-    let (kind, username, port, sealed): (String, Option<String>, Option<i32>, String) =
-        sqlx::query_as("SELECT kind, username, port, secret FROM credentials WHERE id = $1")
+    let (name, kind, username, port, sealed): (String, String, Option<String>, Option<i32>, String) =
+        sqlx::query_as("SELECT name, kind, username, port, secret FROM credentials WHERE id = $1")
             .bind(credential_id)
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| anyhow!("Zugangsdaten nicht gefunden"))?;
-    Ok(Credential { id: credential_id, kind, username, port, secret: state.vault.open_value(&sealed)?, linked: true })
+    Ok(Credential { id: credential_id, name, kind, username, port, secret: state.vault.open_value(&sealed)?, linked: true })
 }
 
 /// Einzeltest gegen ein Gerät (ohne Zuordnung)

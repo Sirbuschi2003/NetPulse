@@ -44,12 +44,24 @@ Neue Änderungen kommen immer als **neue** Datei hinzu (`0002_…sql`); bestehen
 
 ## Ablauf der Datenerfassung
 
-**Discovery** (je freigegebenem Netz):
+**Discovery** (je freigegebenem Netz, nach Zeitplan: täglich zu festen Uhrzeiten, im Abstand oder manuell;
+Einstellung `discovery_schedule`, letzter Lauf `last_full_scan` in der Tabelle `settings`. Ein Neustart löst keinen
+Scan aus – außer es wurde noch nie gescannt, ein Termin wurde verpasst oder „beim Start suchen“ ist aktiv):
 1. ICMP-Ping an jede Adresse (256 parallel). Antwortet eine Adresse nicht, folgt ein TCP-Verbindungsversuch
    auf 443/80/22/445/3389. Auch ein „Connection refused“ zählt als Lebenszeichen.
 2. Die ARP-Tabelle des Kernels liefert MAC-Adressen. Sie findet auch Geräte, die Ping und TCP blockieren.
 3. Für jedes aktive Gerät: Scan von 28 typischen Ports und Reverse-DNS-Name.
 4. Speichern. Neue Geräte und geänderte MAC-Adressen werden als Ereignis erfasst (Hinweis auf ARP-Spoofing).
+
+**Echtzeit-Spur** (`collect/fast.rs`, Standard alle 5 s): eine einzige kleine Anfrage je Shelly
+(`/rpc/Shelly.GetStatus` bzw. `/status`) über einen gemeinsamen HTTP-Client mit Keep-Alive; Geräteinfo und passende
+Zugangsdaten bleiben im Speicher. Die Werte gehen über einen Broadcast-Kanal an `GET /api/stream` (Server-Sent Events)
+und damit sofort an alle offenen Browser. In `device_stats` wird höchstens ein Wert pro Minute geschrieben.
+Über denselben Stream kommen Statuswechsel (Monitor) und neue Alarme (Popup in der Oberfläche).
+
+**Diagnose:** Jede tiefe Abfrage schreibt ein Schritt-Protokoll nach `devices.inventory_log`
+(Tab „Diagnose“, `GET/POST /api/devices/{id}/diagnose`). Die letzten 5.000 Log-Zeilen liegen zusätzlich im
+Speicher (`logbuf.rs`, Seite „System-Log“, `GET /api/logs`).
 
 **Monitor** (jede Minute, alle überwachten Geräte):
 Ping, bei Misserfolg TCP auf bekannte offene Ports. Das Ergebnis wird als Messwert gespeichert.

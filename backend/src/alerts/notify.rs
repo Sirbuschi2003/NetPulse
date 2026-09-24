@@ -26,7 +26,7 @@ impl Severity {
             Severity::Resolved => "🟢",
         }
     }
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Severity::Critical => "critical",
             Severity::Warning => "warning",

@@ -19,6 +19,7 @@ mod classify;
 mod collect;
 mod config;
 mod error;
+mod logbuf;
 mod mib;
 mod oui;
 mod scanner;
@@ -29,7 +30,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::mpsc;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 use crate::{config::Config, scanner::ScanRequest, vault::Vault};
 
@@ -50,15 +51,22 @@ pub struct AppState {
     /// Laufende Suchläufe für Zugangsdaten
     pub cred_jobs: Arc<collect::check::Jobs>,
     pub login_limiter: Arc<auth::LoginLimiter>,
+    /// Live-Meldungen an die Browser (Server-Sent Events)
+    pub hub: Arc<collect::fast::Hub>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=warn")),
-        )
+    // Log: auf die Konsole (Container-Log) und zusätzlich in den Speicher für die Seite „System-Log“.
+    // Ein gemeinsamer Filter; die einzelnen Abfrageschritte („debug“) landen nur im Speicher.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=warn"))
+        .add_directive("netpulse::inventar=debug".parse().expect("Log-Filter"));
+    let console_only_info = tracing_subscriber::filter::filter_fn(|meta| meta.target() != "netpulse::inventar" || *meta.level() <= tracing::Level::INFO);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_filter(console_only_info))
+        .with(logbuf::BufferLayer)
         .init();
 
     let config = Arc::new(Config::from_env()?);
@@ -84,6 +92,7 @@ async fn main() -> Result<()> {
         live: Arc::new(collect::live::LiveCache::default()),
         cred_jobs: Arc::new(collect::check::Jobs::default()),
         login_limiter: Arc::new(auth::LoginLimiter::default()),
+        hub: Arc::new(collect::fast::Hub::default()),
     };
 
     // Hintergrund-Tasks: laufen parallel zum Webserver
@@ -91,6 +100,7 @@ async fn main() -> Result<()> {
     tokio::spawn(scanner::discovery::run(state.clone(), pinger.clone(), scan_rx));
     tokio::spawn(scanner::monitor::run(state.clone(), pinger));
     tokio::spawn(collect::run(state.clone(), poll_rx));
+    tokio::spawn(collect::fast::run(state.clone()));
     tokio::spawn(alerts::run(state.clone()));
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));

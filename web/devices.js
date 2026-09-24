@@ -51,16 +51,16 @@ async function viewDevices(_arg, params) {
 
   const card = (d) => `
     <a class="dev-card${d.monitored ? '' : ' off'}" href="#/device/${d.id}">
-      <div class="top">${devIcon(d)}<div class="ellipsis"><div class="name">${esc(deviceLabel(d))}</div>
+      <div class="top">${devIcon(d)}<div class="ellipsis"><div class="name">${esc(deviceLabel(d))}${inventoryWarn(d)}</div>
         <div class="sub mono">${esc(d.ip)}</div></div></div>
       <div class="sub">${esc([d.vendor, d.os || d.model].filter(Boolean).join(' · ') || typeInfo(d.device_type).label)}</div>
-      <div class="meta">${statusBadge(d)}<span>${esc(fmtMs(d.last_rtt_ms))}</span>
+      <div class="meta">${statusBadge(d)}${liveWatt(d)}<span>${esc(fmtMs(d.last_rtt_ms))}</span>
         <span>${d.has_credentials ? icon('key', 'i-sm') : ''} ${(d.open_ports || []).length === 1 ? '1 Dienst' : `${(d.open_ports || []).length} Dienste`}</span></div>
     </a>`;
 
   const row = (d) => `
     <tr class="clickable${d.monitored ? '' : ' unmonitored'}" data-id="${d.id}">
-      <td><div class="cell-dev">${devIcon(d, 'sm')}<div class="ellipsis"><div>${esc(deviceLabel(d))}</div>
+      <td><div class="cell-dev">${devIcon(d, 'sm')}<div class="ellipsis"><div>${esc(deviceLabel(d))}${inventoryWarn(d)} ${liveWatt(d)}</div>
         ${(d.reported_name || d.hostname) && deviceLabel(d) !== (d.reported_name || d.hostname) ? `<div class="muted small">${esc(d.reported_name || d.hostname)}</div>` : ''}</div></div></td>
       <td>${statusBadge(d)}</td>
       <td class="mono">${esc(d.ip)}</td>
@@ -96,6 +96,29 @@ async function viewDevices(_arg, params) {
   });
   render();
   autoRefresh(async () => { devices = await api('/devices'); render(); });
+  // Leistung der Shellys laufend nachführen, ohne die Liste neu aufzubauen
+  onLive((msg) => {
+    if (msg.type !== 'shelly') return;
+    (msg.devices || []).forEach((d) => {
+      $$(`[data-watt="${d.id}"]`).forEach((el) => {
+        el.textContent = d.ok && d.power_w != null ? fmtWatt(d.power_w) : '';
+        el.classList.add('flash');
+        setTimeout(() => el.classList.remove('flash'), 700);
+      });
+    });
+  });
+}
+
+/** Warnsymbol, wenn die tiefe Abfrage zuletzt fehlschlug (Details im Tab „Diagnose“) */
+function inventoryWarn(d) {
+  return d.inventory_error ? ` <span class="warn-ic" title="${esc(d.inventory_error)}">${icon('alert-triangle', 'i-sm')}</span>` : '';
+}
+
+/** Aktuelle Leistung aus dem Live-Stream (nur Geräte mit Strommessung) */
+function liveWatt(d) {
+  if (d.integration !== 'shelly') return '';
+  const l = live.devices.get(d.id);
+  return `<span class="live-watt" data-watt="${d.id}">${l && l.ok && l.power_w != null ? esc(fmtWatt(l.power_w)) : ''}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,17 +134,20 @@ async function viewDevice(id) {
   const tabs = () => {
     const inv = data.inventory || {};
     const list = [['overview', 'Übersicht']];
-    // Live-Datenraten gibt es für Geräte mit SNMP- oder SSH-Zugang (Netzwerk-Schnittstellen)
-    if (data.device.has_credentials && (inv.snmp || inv.ssh || !inv.shelly)) list.push(['live', 'Live']);
+    // Live: Shelly über den Echtzeit-Stream, sonst Datenraten per SNMP/SSH (Netzwerk-Schnittstellen)
+    if (isShelly()) list.push(['live', 'Live']);
+    else if (data.device.has_credentials && (inv.snmp || inv.ssh)) list.push(['live', 'Live']);
     if (inv.ssh || inv.snmp || inv.shelly) list.push(['system', 'System']);
     if ((inv.ssh && inv.ssh.interfaces && inv.ssh.interfaces.length) || (inv.snmp && inv.snmp.interfaces)) list.push(['interfaces', 'Schnittstellen']);
     if ((inv.ssh && inv.ssh.disks && inv.ssh.disks.length) || (inv.snmp && inv.snmp.storage && inv.snmp.storage.length)) list.push(['storage', 'Speicher']);
     list.push(['history', 'Verlauf']);
     list.push(['events', 'Ereignisse']);
     if (isAdmin() && inv.snmp) list.push(['explorer', 'SNMP-Explorer']);
+    list.push(['diagnose', 'Diagnose']);
     if (isAdmin()) list.push(['settings', 'Einstellungen']);
     return list;
   };
+  const isShelly = () => data.device.integration === 'shelly' || !!(data.inventory || {}).shelly;
 
   const render = () => {
     state.liveStops.forEach((stop) => stop());
@@ -149,19 +175,21 @@ async function viewDevice(id) {
       setTimeout(reload, 8000);
     }, 'Abfrage gestartet – Ergebnisse erscheinen in wenigen Sekunden'));
     const body = $('#tab-body');
-    const renderers = { overview: tabOverview, live: tabLive, system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
+    const renderers = { overview: tabOverview, live: isShelly() ? tabShellyLive : tabLive, diagnose: tabDiagnose, system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
     body.innerHTML = (renderers[tab] || tabOverview)();
     applyWidths(body);
     if (tab === 'settings') bindSettings();
-    if (tab === 'live') bindLive();
+    if (tab === 'live') { if (isShelly()) bindShellyLive(); else bindLive(); }
+    if (tab === 'diagnose') bindDiagnose();
     if (tab === 'interfaces') bindInterfaces();
     if (tab === 'explorer') bindExplorer();
     $('#range')?.addEventListener('change', (ev) => { hours = Number(ev.target.value); reload(); });
+    $('#goto-diagnose')?.addEventListener('click', (ev) => { ev.preventDefault(); tab = 'diagnose'; render(); });
   };
 
   const reload = async () => {
     data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
-    if (!['settings', 'live', 'explorer'].includes(tab)) render();
+    if (!['settings', 'live', 'explorer', 'diagnose'].includes(tab)) render();
   };
 
   /** Schnittstelle als Internet-Anschluss markieren (leer = automatisch erkennen) */
@@ -320,10 +348,11 @@ async function viewDevice(id) {
   function inventoryStatus() {
     const d = data.device;
     if (d.inventory_error) {
-      return `<div class="notice">${icon('alert-triangle')}<span>Tiefe Abfrage: ${esc(d.inventory_error)}</span></div>`;
+      return `<div class="notice">${icon('alert-triangle')}<span>Tiefe Abfrage: ${esc(d.inventory_error)}
+        <br><a href="#" id="goto-diagnose">Schritt für Schritt im Tab „Diagnose“ ansehen</a></span></div>`;
     }
     if (d.inventory_at && data.inventory) {
-      const via = [data.inventory.ssh && 'SSH', data.inventory.snmp && 'SNMP'].filter(Boolean).join(' + ');
+      const via = [data.inventory.ssh && 'SSH', data.inventory.snmp && 'SNMP', data.inventory.shelly && 'Shelly-API'].filter(Boolean).join(' + ');
       return `<p class="muted small">${icon('circle-check', 'i-sm')} Inventar per ${esc(via)} · ${esc(fmtAgo(d.inventory_at))}</p>`;
     }
     if (!d.has_credentials) {
@@ -331,6 +360,95 @@ async function viewDevice(id) {
         ${isAdmin() ? '„Einstellungen“' : 'Einstellungen'} SNMP- oder SSH-Zugangsdaten zuordnen.</span></div>`;
     }
     return '';
+  }
+
+  // ----- Shelly live -----
+  function shellyChannels(l) {
+    const channels = (l && l.channels) || [];
+    if (!channels.length) return '<p class="muted">Keine Kanäle</p>';
+    return `<div class="ch-grid">${channels.map((c) => {
+      const on = c.on === true || c.state === 'opening' || c.state === 'closing';
+      const state = c.on === true ? 'an' : c.on === false ? 'aus' : (c.state || '');
+      return `<div class="ch-tile${on ? ' on' : ''}">
+        <span class="sh-top">${icon(CHANNEL_ICON[c.kind] || 'bolt', 'i-sm')}${esc(CHANNEL_LABEL[c.kind] || c.kind)} ${Number(c.id) + 1}</span>
+        <strong>${c.power_w != null ? esc(fmtWatt(c.power_w)) : esc(state || '–')}</strong>
+        <span class="muted small">${[c.power_w != null ? state : null, c.position != null ? `Position ${c.position} %` : null,
+          c.brightness != null ? `Helligkeit ${c.brightness} %` : null, c.voltage != null ? `${Math.round(c.voltage)} V` : null,
+          c.current != null ? `${c.current} A` : null, c.energy_kwh != null ? `${c.energy_kwh} kWh` : null].filter(Boolean).map(esc).join(' · ')}</span>
+        ${c.position != null ? `<div class="progress"><span data-w="${c.position}"></span></div>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+
+  function tabShellyLive() {
+    const l = live.devices.get(Number(id));
+    return `<div class="live-head"><span class="live-pulse" id="sh-state">${l ? (l.ok ? 'Live – aktualisiert sich automatisch' : esc(l.error || 'keine Antwort')) : 'Warte auf Live-Daten …'}</span></div>
+      <div class="grid">
+        <section class="card span-1"><header><h2>${icon('bolt')}Leistung</h2><span class="live-tag">LIVE</span></header>
+          <div class="power-total big" id="sh-watt" data-value="${(l && l.power_w) || 0}">${esc(l && l.power_w != null ? fmtWatt(l.power_w) : '–')}</div>
+          <div id="sh-spark">${valueSpark(live.perDevice.get(Number(id)) || [])}</div>
+          <p class="muted small" id="sh-extra"></p></section>
+        <section class="card span-2"><header><h2>${icon('plug')}Kanäle</h2></header><div id="sh-channels">${shellyChannels(l)}</div></section>
+      </div>`;
+  }
+
+  function bindShellyLive() {
+    const update = () => {
+      const l = live.devices.get(Number(id));
+      if (!l) return;
+      $('#sh-state').textContent = l.ok ? `Live – zuletzt ${new Date(l.time).toLocaleTimeString('de-DE')}` : (l.error || 'keine Antwort');
+      $('#sh-state').classList.toggle('stale', !l.ok);
+      tweenNumber($('#sh-watt'), l.ok ? l.power_w : null, fmtWatt);
+      $('#sh-spark').innerHTML = valueSpark(live.perDevice.get(Number(id)) || []);
+      $('#sh-extra').textContent = [l.temp_c != null ? `Temperatur ${l.temp_c} °C` : null, l.humidity_pct != null ? `Luftfeuchte ${l.humidity_pct} %` : null,
+        l.battery_pct != null ? `Akku ${l.battery_pct} %` : null, l.rssi != null ? `WLAN ${l.rssi} dBm` : null].filter(Boolean).join(' · ');
+      $('#sh-channels').innerHTML = shellyChannels(l);
+      applyWidths($('#sh-channels'));
+    };
+    update();
+    onLive((msg) => { if (msg.type === 'shelly' && (msg.full || (msg.devices || []).some((d) => d.id === Number(id)))) update(); });
+  }
+
+  // ----- Diagnose -----
+  function tabDiagnose() {
+    return `<section class="card"><header><h2>${icon('stethoscope')}Protokoll der letzten Abfrage</h2>
+        ${isAdmin() ? `<button type="button" id="diag-run">${icon('player-play')}Jetzt abfragen und protokollieren</button>` : ''}</header>
+      <p class="muted small">Zeigt Schritt für Schritt, welche Abfragen (SNMP, SSH, Shelly-API) versucht wurden und woran es gescheitert ist.
+        Passwörter erscheinen hier nie.</p>
+      <div id="diag-body"><div class="empty">Lade …</div></div></section>`;
+  }
+
+  function diagnoseSteps(result) {
+    if (!result.log || !(result.log.steps || []).length) {
+      return empty('Noch kein Protokoll – das Gerät wurde seit dem Update nicht tief abgefragt. „Jetzt abfragen“ startet eine Abfrage.', 'stethoscope');
+    }
+    const t0 = new Date(result.log.steps[0].time).getTime();
+    return `<p class="muted small">Abfrage vom ${esc(fmtTime(result.log.time))}</p>
+      <ol class="diag">${result.log.steps.map((st) => {
+        const cls = st.ok === true ? 'ok' : st.ok === false ? 'err' : 'info';
+        const ic = st.ok === true ? 'circle-check' : st.ok === false ? 'circle-x' : 'info-circle';
+        const ms = new Date(st.time).getTime() - t0;
+        return `<li class="${cls}">${icon(ic, 'i-sm')}<span>${esc(st.text)}</span><span class="muted small mono">+${(ms / 1000).toFixed(1)} s</span></li>`;
+      }).join('')}</ol>
+      ${result.error ? `<div class="notice">${icon('alert-triangle')}<span>${esc(result.error)}</span></div>` : ''}`;
+  }
+
+  function bindDiagnose() {
+    const body = $('#diag-body');
+    api(`/devices/${id}/diagnose`).then((r) => { body.innerHTML = diagnoseSteps(r); }).catch((e) => { body.innerHTML = `<p class="error">${esc(e.message)}</p>`; });
+    $('#diag-run')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      body.innerHTML = `<div class="empty"><span class="live-pulse">Frage das Gerät ab … (bis zu 30 s)</span></div>`;
+      try {
+        const r = await api(`/devices/${id}/diagnose`, { method: 'POST' });
+        body.innerHTML = diagnoseSteps(r);
+        data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
+      } catch (e) {
+        body.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
   }
 
   // ----- System -----

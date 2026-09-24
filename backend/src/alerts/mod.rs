@@ -245,6 +245,15 @@ async fn open_alert(state: &AppState, rule: &Rule, device_id: Option<i64>, messa
 
 /// An alle Kanäle der Regel senden. Fehler werden geloggt, stoppen aber nichts.
 async fn dispatch(state: &AppState, rule: &Rule, notification: Notification) {
+    // Sofort als Hinweis in allen offenen Browsern anzeigen (unabhängig von den Kanälen)
+    state.hub.publish(&serde_json::json!({
+        "type": "alert",
+        "title": notification.title,
+        "message": notification.message,
+        "severity": notification.severity.name(),
+        "rule": rule.name,
+        "device_id": rule.device_id,
+    }));
     let channels: Vec<(i64, String, String, String)> = match sqlx::query_as(
         "SELECT id, name, kind, config FROM notification_channels WHERE enabled AND id = ANY($1)",
     )

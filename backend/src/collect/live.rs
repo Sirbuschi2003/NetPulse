@@ -176,7 +176,7 @@ const POSIX_COUNTERS: &str = "if [ -r /proc/net/dev ]; then cat /proc/net/dev; f
     else echo '@@BSD'; netstat -ibn; fi";
 
 async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -> Result<Vec<Counter>> {
-    let output = ssh::run_command(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
+    let output = ssh::run_script(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
         ssh::SshError::HostKeyChanged { .. } => anyhow!("SSH-Host-Schlüssel hat sich geändert"),
         ssh::SshError::Failed(msg) => anyhow!(msg),
     })?;
@@ -185,7 +185,8 @@ async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -
     } else if output.contains("@@BSD") {
         Ok(parse_netstat(&output))
     } else {
-        bail!("Live-Ansicht per SSH gibt es für Linux und FreeBSD/OPNsense – für Windows bitte den Verlauf nutzen");
+        let first: String = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("(keine Ausgabe)").chars().take(120).collect();
+        bail!("Live-Ansicht per SSH gibt es für Linux und FreeBSD/OPNsense – für Windows bitte den Verlauf nutzen (Antwort des Geräts: {first})");
     }
 }
 

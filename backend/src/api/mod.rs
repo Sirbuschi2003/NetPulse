@@ -6,6 +6,7 @@ mod credentials;
 mod dashboard;
 mod devices;
 mod session;
+mod stream;
 
 use axum::{
     extract::State,
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}", get(devices::detail).patch(devices::update).delete(devices::remove))
         .route("/devices/{id}/credentials", put(devices::set_credentials))
         .route("/devices/{id}/poll", post(devices::poll_now))
+        .route("/devices/{id}/diagnose", get(devices::diagnose).post(devices::diagnose_now))
         .route("/devices/{id}/ssh-key", delete(devices::reset_ssh_key))
         .route("/devices/{id}/live", get(devices::live))
         .route("/devices/{id}/interfaces/history", get(devices::interface_history))
@@ -45,6 +47,9 @@ pub fn router(state: AppState) -> Router {
         .route("/networks/{id}/scan", post(admin::scan_network))
         .route("/scan", post(admin::trigger_scan))
         .route("/scan/status", get(admin::scan_status))
+        .route("/settings/discovery", get(admin::get_discovery).put(admin::set_discovery))
+        .route("/settings/live", get(admin::get_live).put(admin::set_live))
+        .route("/stream", get(stream::events))
         // Zugangsdaten
         .route("/credentials", get(credentials::list).post(credentials::create))
         .route("/credentials/{id}", axum::routing::patch(credentials::update).delete(credentials::remove))
@@ -61,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/users", get(admin::list_users).post(admin::add_user))
         .route("/users/{id}", delete(admin::delete_user))
         .route("/audit", get(admin::audit_log))
+        .route("/logs", get(admin::system_log))
         .layer(middleware::from_fn(auth::csrf_guard));
 
     Router::new()

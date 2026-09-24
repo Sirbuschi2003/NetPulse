@@ -130,6 +130,16 @@ async fn check_all(state: &AppState, pinger: &Arc<Pinger>) -> Result<()> {
     }
     tx.commit().await?;
 
+    // Statuswechsel sofort an offene Browser melden
+    let changes: Vec<_> = checks
+        .iter()
+        .filter(|c| c.previous_status != if c.up { "up" } else { "down" })
+        .map(|c| serde_json::json!({ "id": c.id, "status": if c.up { "up" } else { "down" }, "label": c.label }))
+        .collect();
+    if !changes.is_empty() {
+        state.hub.publish(&serde_json::json!({ "type": "status", "devices": changes }));
+    }
+
     let down = checks.iter().filter(|c| !c.up).count();
     tracing::debug!("Statusprüfung: {} Geräte, {down} nicht erreichbar", checks.len());
     Ok(())

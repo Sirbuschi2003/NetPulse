@@ -7,7 +7,7 @@
 //! Ausgewertet werden alle Kanäle: Schalter/Relais, Rollläden, Licht, Energiezähler (EM/PM),
 //! Temperatur-/Feuchtesensoren, Akku, WLAN-Signal, Laufzeit und verfügbare Updates.
 
-use std::{net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, sync::OnceLock, time::Duration};
 
 use anyhow::{anyhow, bail, Result};
 use argon2::password_hash::rand_core::{OsRng, RngCore};
@@ -17,13 +17,20 @@ use sha2::{Digest, Sha256};
 
 use super::Credential;
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .connect_timeout(Duration::from_secs(2))
-        .user_agent("NetPulse")
-        .build()
-        .expect("HTTP-Client")
+/// Ein gemeinsamer Client für alle Abfragen: hält Verbindungen offen (Keep-Alive),
+/// statt für jede Anfrage neu aufzubauen – wichtig für die Echtzeit-Abfrage im Sekundentakt.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            // Shellys im WLAN antworten teils langsam – großzügige Wartezeiten
+            .timeout(Duration::from_secs(8))
+            .connect_timeout(Duration::from_secs(4))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .user_agent("NetPulse")
+            .build()
+            .expect("HTTP-Client")
+    })
 }
 
 /// Grunddaten aus `/shelly` (ohne Anmeldung)
@@ -36,12 +43,16 @@ pub struct Info {
 }
 
 pub async fn probe(ip: Ipv4Addr) -> Option<Info> {
-    let response = client().get(format!("http://{ip}/shelly")).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
+    // Zwei Versuche: Gen1-Geräte im WLAN verschlucken gelegentlich eine Anfrage
+    for _ in 0..2 {
+        if let Ok(response) = client().get(format!("http://{ip}/shelly")).send().await {
+            if !response.status().is_success() {
+                return None;
+            }
+            return parse_info(&response.json::<Value>().await.ok()?);
+        }
     }
-    let v: Value = response.json().await.ok()?;
-    parse_info(&v)
+    None
 }
 
 fn parse_info(v: &Value) -> Option<Info> {
@@ -147,6 +158,18 @@ pub async fn collect(ip: Ipv4Addr, info: &Info, cred: Option<&Credential>) -> Re
     Ok(data)
 }
 
+/// Nur der aktuelle Zustand (eine Anfrage) – für die Echtzeit-Abfrage
+pub async fn status(ip: Ipv4Addr, info: &Info, cred: Option<&Credential>) -> Result<Value> {
+    if info.auth && cred.is_none() {
+        bail!("Shelly verlangt eine Anmeldung – HTTP-Zugangsdaten hinterlegen");
+    }
+    if info.generation >= 2 {
+        Ok(parse_gen2(&get_json(ip, "/rpc/Shelly.GetStatus", info.generation, cred).await?))
+    } else {
+        Ok(parse_gen1(&get_json(ip, "/status", 1, cred).await?, &Value::Null))
+    }
+}
+
 fn round(v: f64, digits: i32) -> f64 {
     let f = 10f64.powi(digits);
     (v * f).round() / f
@@ -243,7 +266,7 @@ fn parse_gen1(status: &Value, settings: &Value) -> Value {
     }
     let temp = status["tmp"]["tC"].as_f64().or_else(|| status["temperature"].as_f64());
     summarize(json!({
-        "name": settings["name"].as_str().filter(|n| !n.is_empty()),
+        "name": settings["name"].as_str().filter(|n| !n.is_empty()).or_else(|| settings["device"]["hostname"].as_str()),
         "channels": channels,
         "temp_c": temp,
         "humidity_pct": status["hum"]["value"].as_f64(),

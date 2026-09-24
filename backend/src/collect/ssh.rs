@@ -81,6 +81,20 @@ pub async fn run_command(
     Ok(result?.1)
 }
 
+/// POSIX-Skript über `sh -s` ausführen – unabhängig von der Login-Shell
+/// (OPNsense/pfSense nutzen z. B. csh, das `if [ … ]` nicht versteht)
+pub async fn run_script(
+    ip: Ipv4Addr,
+    cred: &Credential,
+    expected_host_key: Option<&str>,
+    script: &str,
+) -> Result<String, SshError> {
+    let (session, _) = connect(ip, cred, expected_host_key).await?;
+    let result = exec(&session, "sh -s", Some(script.as_bytes())).await;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "de").await;
+    Ok(result?.1)
+}
+
 async fn connect(
     ip: Ipv4Addr,
     cred: &Credential,

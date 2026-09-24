@@ -1,7 +1,7 @@
 //! Geräteerkennung: durchsucht die freigegebenen Netze nach aktiven Geräten.
 //!
 //! Jedes Netz wird einzeln gescannt. Aufträge kommen über einen Kanal:
-//! - regelmäßig alle `DISCOVERY_INTERVAL_MIN` Minuten für alle Netze,
+//! - für alle Netze nach Zeitplan (siehe `schedule`: Intervall, täglich zu festen Uhrzeiten oder nur manuell),
 //! - sofort für ein gerade hinzugefügtes Netz (hat Vorrang vor dem Rest eines laufenden Durchlaufs),
 //! - „Jetzt scannen“ in der Oberfläche.
 //!
@@ -18,6 +18,7 @@ use std::{
 };
 
 use anyhow::Result;
+use chrono::Utc;
 use futures::{stream, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -28,7 +29,7 @@ use crate::{
         add_event,
         names,
         net::{self, Pinger},
-        reclassify, ScanRequest,
+        reclassify, schedule, ScanRequest,
     },
     AppState,
 };
@@ -40,15 +41,18 @@ const SWEEP_PARALLEL: usize = 128;
 pub async fn run(state: AppState, pinger: Arc<Pinger>, mut requests: UnboundedReceiver<ScanRequest>) {
     // Kurz warten, damit der Webserver zuerst startet
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let mut next_full_scan = tokio::time::Instant::now();
+    // Ein Neustart des Containers löst nur dann einen Scan aus, wenn das so eingestellt ist
+    // oder laut Zeitplan ohnehin einer fällig (bzw. verpasst) ist.
+    let mut scan_now = schedule::load(&state.db, &state.config).await.on_start;
 
     loop {
-        let first = tokio::select! {
-            request = requests.recv() => match request {
+        let first = if std::mem::take(&mut scan_now) {
+            ScanRequest::All
+        } else {
+            match wait_for_work(&state, &mut requests).await {
                 Some(request) => request,
                 None => return,
-            },
-            _ = tokio::time::sleep_until(next_full_scan) => ScanRequest::All,
+            }
         };
 
         let mut queue: VecDeque<i64> = VecDeque::new();
@@ -58,9 +62,12 @@ pub async fn run(state: AppState, pinger: Arc<Pinger>, mut requests: UnboundedRe
             take(request, &mut queue, &mut full);
         }
         if full {
-            next_full_scan = tokio::time::Instant::now() + state.config.discovery_interval;
+            if let Err(e) = schedule::set_last_full_scan(&state.db, Utc::now()).await {
+                tracing::error!("Zeitpunkt des Scans konnte nicht gespeichert werden: {e}");
+            }
             match enabled_network_ids(&state).await {
                 Ok(ids) => {
+                    tracing::info!("Vollständiger Scan von {} Netz(en) startet", ids.len());
                     for id in ids {
                         if !queue.contains(&id) {
                             queue.push_back(id);
@@ -85,6 +92,28 @@ pub async fn run(state: AppState, pinger: Arc<Pinger>, mut requests: UnboundedRe
             }
         }
         state.scan_progress.finish();
+    }
+}
+
+/// Wartet auf einen Auftrag aus der Oberfläche oder den nächsten Termin laut Zeitplan.
+/// Der Zeitplan wird mindestens jede Minute neu gelesen, Änderungen greifen also sofort.
+async fn wait_for_work(state: &AppState, requests: &mut UnboundedReceiver<ScanRequest>) -> Option<ScanRequest> {
+    loop {
+        let plan = schedule::load(&state.db, &state.config).await;
+        let last = schedule::last_full_scan(&state.db).await;
+        let now = Utc::now();
+        let due = schedule::next_due(&plan, last, now, schedule::timezone());
+        if due.is_some_and(|d| d <= now) {
+            return Some(ScanRequest::All);
+        }
+        let wait = due
+            .and_then(|d| (d - now).to_std().ok())
+            .unwrap_or(Duration::from_secs(60))
+            .min(Duration::from_secs(60));
+        tokio::select! {
+            request = requests.recv() => return request,
+            _ = tokio::time::sleep(wait) => {}
+        }
     }
 }
 

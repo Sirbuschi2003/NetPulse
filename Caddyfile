@@ -9,7 +9,9 @@
 
 {$SITE_ADDRESS} {
 	tls internal
-	encode gzip
+	# Live-Stream (Server-Sent Events) nicht komprimieren – sonst puffert Caddy die kleinen Meldungen
+	@compress not path /api/stream
+	encode @compress gzip
 
 	header {
 		Strict-Transport-Security "max-age=31536000"

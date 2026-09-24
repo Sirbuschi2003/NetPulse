@@ -479,3 +479,27 @@ pub async fn events(
     let events = sqlx::query_as::<_, Event>(&sql).bind(limit).fetch_all(&st.db).await?;
     Ok(Json(events))
 }
+
+async fn diagnose_view(st: &AppState, id: i64) -> ApiResult<Json<Value>> {
+    type Row = (Option<Value>, Option<String>, Option<DateTime<Utc>>);
+    let row: Option<Row> =
+        sqlx::query_as("SELECT inventory_log, inventory_error, inventory_at FROM devices WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await?;
+    let (log, error, at) = row.ok_or(ApiError::NotFound)?;
+    Ok(Json(json!({ "log": log, "error": error, "inventory_at": at })))
+}
+
+/// Protokoll der letzten tiefen Abfrage: welche Schritte wurden versucht, was ging schief
+pub async fn diagnose(State(st): State<AppState>, _user: CurrentUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    diagnose_view(&st, id).await
+}
+
+/// Gerät sofort abfragen und das frische Protokoll zurückgeben
+pub async fn diagnose_now(State(st): State<AppState>, _admin: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    if let Err(e) = crate::collect::poll_device(&st, id).await {
+        tracing::warn!("Diagnose von Gerät {id}: {e:#}");
+    }
+    diagnose_view(&st, id).await
+}
