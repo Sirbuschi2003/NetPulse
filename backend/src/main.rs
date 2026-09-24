@@ -22,7 +22,9 @@ mod error;
 mod logbuf;
 mod mib;
 mod oui;
+mod push;
 mod scanner;
+mod totp;
 mod vault;
 
 use std::{sync::Arc, time::Duration};
@@ -53,6 +55,8 @@ pub struct AppState {
     pub login_limiter: Arc<auth::LoginLimiter>,
     /// Live-Meldungen an die Browser (Server-Sent Events)
     pub hub: Arc<collect::fast::Hub>,
+    /// Absenderschlüssel für Push-Nachrichten an die App
+    pub vapid: Arc<push::Vapid>,
 }
 
 #[tokio::main]
@@ -80,6 +84,13 @@ async fn main() -> Result<()> {
 
     let vault = Vault::open(&config.data_dir, config.secret_key.as_deref())
         .context("Tresor für Zugangsdaten konnte nicht geöffnet werden")?;
+    let vapid_subject = config
+        .public_url
+        .clone()
+        .filter(|u| u.starts_with("https://"))
+        .unwrap_or_else(|| "https://github.com/Sirbuschi2003/NetPulse".into());
+    let vapid = push::Vapid::load_or_create(std::path::Path::new(&config.data_dir), vapid_subject)
+        .context("Push-Schlüssel (vapid.key) konnte nicht angelegt werden")?;
     let (scan_tx, scan_rx) = mpsc::unbounded_channel();
     let (poll_tx, poll_rx) = mpsc::unbounded_channel();
     let state = AppState {
@@ -93,6 +104,7 @@ async fn main() -> Result<()> {
         cred_jobs: Arc::new(collect::check::Jobs::default()),
         login_limiter: Arc::new(auth::LoginLimiter::default()),
         hub: Arc::new(collect::fast::Hub::default()),
+        vapid: Arc::new(vapid),
     };
 
     // Hintergrund-Tasks: laufen parallel zum Webserver

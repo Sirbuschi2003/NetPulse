@@ -522,6 +522,9 @@ async function viewCredentials() {
 // ---------------------------------------------------------------------------
 
 const CHANNEL_KINDS = {
+  app: { label: 'NetPulse-App (Push aufs Handy)', icon: 'device-mobile', fields: [],
+    hint: 'Sendet an alle Geräte, auf denen unter „Mein Konto“ Push aktiviert wurde. Voraussetzung: NetPulse ist per HTTPS mit gültigem '
+      + 'Zertifikat erreichbar (z. B. über den eigenen Reverse-Proxy) und auf dem Handy als App installiert (iPhone: Teilen → „Zum Home-Bildschirm“).' },
   ntfy: { label: 'ntfy (Push aufs Handy)', icon: 'device-mobile', fields: [['server', 'Server', 'https://ntfy.sh'], ['topic', 'Thema (Topic)', 'z. B. netpulse-a8f3k2'], ['token', 'Zugriffstoken (optional)', '', 'password']],
     hint: 'App „ntfy“ installieren, dasselbe Thema abonnieren – fertig. Tipp: ein langes, zufälliges Thema wählen oder einen eigenen ntfy-Server nutzen.' },
   email: { label: 'E-Mail (SMTP)', icon: 'send', fields: [['host', 'SMTP-Server', 'smtp.example.de'], ['port', 'Port', '587'], ['security', 'Verschlüsselung', '', 'select:starttls=STARTTLS (587),tls=TLS (465),none=keine (nur intern)'],
@@ -614,9 +617,10 @@ async function viewUsers() {
     view().innerHTML = `
       <div class="grid">
         <section class="card span-2 table-wrap"><table>
-          <thead><tr><th>Benutzer</th><th>Rolle</th><th>Angelegt</th><th>Letzte Anmeldung</th><th></th></tr></thead>
+          <thead><tr><th>Benutzer</th><th>Rolle</th><th>2FA</th><th>Angelegt</th><th>Letzte Anmeldung</th><th></th></tr></thead>
           <tbody>${users.map((u) => `<tr><td><span class="cell-dev">${icon('user', 'i-sm')}${esc(u.username)}</span></td>
             <td>${u.role === 'admin' ? '<span class="badge accent">Administrator</span>' : '<span class="badge plain">Nur lesen</span>'}</td>
+            <td>${u.totp_enabled ? `<span class="badge st-up">aktiv</span>${u.id !== state.user.id ? ` <button class="ghost sm" data-totp="${u.id}" data-name="${esc(u.username)}" type="button" title="Zwei-Faktor zurücksetzen (z. B. Handy verloren)">${icon('refresh', 'i-sm')}</button>` : ''}` : '<span class="badge warn">aus</span>'}</td>
             <td class="small">${esc(fmtTime(u.created_at))}</td><td class="small">${esc(fmtTime(u.last_login))}</td>
             <td>${u.id === state.user.id ? '<span class="muted small">(du)</span>' : `<button class="ghost sm" data-del="${u.id}" data-name="${esc(u.username)}" type="button">${icon('trash', 'i-sm')}</button>`}</td></tr>`).join('')}
           </tbody></table></section>
@@ -636,6 +640,10 @@ async function viewUsers() {
         await render();
       }, 'Benutzer angelegt');
     });
+    $$('[data-totp]').forEach((btn) => btn.addEventListener('click', () => {
+      if (!confirm(`Zwei-Faktor-Anmeldung von „${btn.dataset.name}“ zurücksetzen? Die Anmeldung geht danach nur mit Passwort, bis 2FA neu eingerichtet ist.`)) return;
+      attempt(async () => { await api(`/users/${btn.dataset.totp}/totp`, { method: 'DELETE' }); await render(); }, 'Zwei-Faktor-Anmeldung zurückgesetzt');
+    }));
     $$('[data-del]').forEach((btn) => btn.addEventListener('click', () => {
       if (!confirm(`Benutzer „${btn.dataset.name}“ löschen?`)) return;
       attempt(async () => { await api(`/users/${btn.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Benutzer gelöscht');
@@ -652,6 +660,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
+  totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -716,6 +725,120 @@ async function viewLogs() {
   auto();
 }
 
+// ----- Zwei-Faktor-Anmeldung -----
+async function renderTotp() {
+  const box = $('#totp-box');
+  const { enabled } = await api('/me/totp');
+  if (enabled) {
+    box.innerHTML = `<p><span class="badge st-up">aktiv</span> Bei der Anmeldung wird zusätzlich der Code aus der Authenticator-App abgefragt.</p>
+      <form class="form" id="totp-off"><label>Zum Ausschalten Passwort eingeben<input name="password" type="password" required autocomplete="current-password"></label>
+      <button type="submit" class="ghost">Ausschalten</button></form>`;
+    $('#totp-off').addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      attempt(async () => { await api('/me/totp/disable', { method: 'POST', body: { password: ev.target.elements.password.value } }); await renderTotp(); },
+        'Zwei-Faktor-Anmeldung ausgeschaltet');
+    });
+    return;
+  }
+  box.innerHTML = `<p class="muted">Schützt dein Konto zusätzlich mit einem 6-stelligen Code aus einer App wie Google/Microsoft Authenticator,
+      Aegis, 2FAS oder Bitwarden. <b>Dringend empfohlen, wenn NetPulse aus dem Internet erreichbar ist.</b></p>
+    <button type="button" id="totp-setup">${icon('shield-lock')}Einrichten</button>`;
+  $('#totp-setup').addEventListener('click', () => attempt(async () => {
+    const s = await api('/me/totp/setup', { method: 'POST' });
+    box.innerHTML = `<ol class="steps"><li>QR-Code mit der Authenticator-App scannen</li><li>Den angezeigten Code eingeben</li></ol>
+      <div class="qr">${s.qr_svg || ''}</div>
+      <p class="muted small">Oder von Hand eintragen: <code class="mono">${esc(s.secret.replace(/(.{4})/g, '$1 ').trim())}</code></p>
+      <form class="form" id="totp-on"><label>Code aus der App<input name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="7" placeholder="123 456"></label>
+      <button type="submit">${icon('check')}Aktivieren</button></form>`;
+    $('#totp-on').addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      attempt(async () => { await api('/me/totp/enable', { method: 'POST', body: { code: ev.target.elements.code.value } }); await renderTotp(); },
+        'Zwei-Faktor-Anmeldung ist aktiv');
+    });
+  }));
+}
+
+// ----- NetPulse-App & Push -----
+const b64ToBytes = (b64) => {
+  const raw = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+};
+
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Gerät';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+  const app = window.matchMedia('(display-mode: standalone)').matches ? ' (App)' : '';
+  return `${os}${browser ? ` · ${browser}` : ''}${app}`;
+}
+
+async function currentSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  const reg = await navigator.serviceWorker.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+async function renderPush() {
+  const box = $('#push-box');
+  const devices = await api('/push/devices');
+  const supported = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const iosBrowser = /iPhone|iPad/.test(navigator.userAgent) && !window.matchMedia('(display-mode: standalone)').matches;
+  const sub = supported ? await currentSubscription() : null;
+  let status;
+  if (!window.isSecureContext || location.protocol !== 'https:') {
+    status = `<div class="notice">${icon('alert-triangle')}<span>Push und App-Installation brauchen HTTPS mit einem gültigen Zertifikat –
+      also den Aufruf über deine eigene Adresse (z. B. <code>https://monitoring.buschehome.de</code>) statt über die IP-Adresse.</span></div>`;
+  } else if (iosBrowser) {
+    status = `<div class="notice info">${icon('device-mobile')}<span>iPhone/iPad: Zuerst in Safari auf <b>Teilen → „Zum Home-Bildschirm“</b>
+      tippen und NetPulse dann über das neue Symbol öffnen – erst dort erlaubt iOS Push-Nachrichten.</span></div>`;
+  } else if (!supported) {
+    status = `<div class="notice">${icon('alert-triangle')}<span>Dieser Browser unterstützt keine Push-Nachrichten.</span></div>`;
+  } else if (Notification.permission === 'denied') {
+    status = `<div class="notice">${icon('alert-triangle')}<span>Benachrichtigungen sind für NetPulse blockiert – in den Browser-/App-Einstellungen erlauben.</span></div>`;
+  } else {
+    status = sub
+      ? `<p><span class="badge st-up">aktiv</span> Dieses Gerät erhält Push-Nachrichten.</p>
+         <div class="actions"><button type="button" id="push-test">${icon('send')}Test-Nachricht</button>
+         <button type="button" class="ghost" id="push-off">Auf diesem Gerät ausschalten</button></div>`
+      : `<p class="muted">Alarme erscheinen als Nachricht auf diesem Gerät – auch wenn NetPulse geschlossen ist.</p>
+         <button type="button" id="push-on">${icon('bell')}Push auf diesem Gerät aktivieren</button>`;
+  }
+  box.innerHTML = `${status}
+    <p class="muted small">Damit Alarme als Push kommen: unter <b>Benachrichtigungen</b> einen Kanal „NetPulse-App“ anlegen und in den Alarmregeln auswählen.</p>
+    ${devices.length ? `<h3 class="sub">Angemeldete Geräte</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
+      <span>${esc(d.device || 'Gerät')}${sub && d.endpoint === sub.endpoint ? ' <span class="badge accent">dieses</span>' : ''}</span></span>
+      <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ''}
+      <button class="ghost sm" type="button" data-unsub="${d.id}" title="Abmelden">${icon('x', 'i-sm')}</button></span></li>`).join('')}</ul>` : ''}`;
+  $('#push-on')?.addEventListener('click', () => attempt(async () => {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Benachrichtigungen wurden nicht erlaubt');
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const { public_key: key } = await api('/push/key');
+    const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+    const j = subscription.toJSON();
+    await api('/push/subscribe', { method: 'POST', body: { endpoint: j.endpoint, keys: j.keys, device: deviceName() } });
+    await renderPush();
+  }, 'Push-Nachrichten aktiviert'));
+  $('#push-test')?.addEventListener('click', () => attempt(async () => {
+    const r = await api('/push/test', { method: 'POST' });
+    if (!r.sent) throw new Error('Keine Nachricht zugestellt – Push auf diesem Gerät neu aktivieren');
+  }, 'Test-Nachricht gesendet – sie sollte gleich erscheinen'));
+  $('#push-off')?.addEventListener('click', () => attempt(async () => {
+    const s = await currentSubscription();
+    if (s) {
+      await api('/push/unsubscribe', { method: 'POST', body: { endpoint: s.endpoint } });
+      await s.unsubscribe();
+    }
+    await renderPush();
+  }, 'Push auf diesem Gerät ausgeschaltet'));
+  $$('[data-unsub]', box).forEach((b) => b.addEventListener('click', () => attempt(async () => {
+    await api('/push/unsubscribe', { method: 'POST', body: { id: Number(b.dataset.unsub) } });
+    await renderPush();
+  }, 'Gerät abgemeldet')));
+}
+
 async function viewAccount() {
   view().innerHTML = `
     <div class="grid">
@@ -730,7 +853,11 @@ async function viewAccount() {
           <button type="submit">Passwort ändern</button>
           <p class="hint">Alle anderen Sitzungen werden dabei abgemeldet.</p>
         </form></section>
+      <section class="card span-1"><header><h2>${icon('shield-lock')}Zwei-Faktor-Anmeldung</h2></header><div id="totp-box"><div class="empty">Lade …</div></div></section>
+      <section class="card span-2"><header><h2>${icon('device-mobile')}NetPulse-App &amp; Push-Nachrichten</h2></header><div id="push-box"><div class="empty">Lade …</div></div></section>
     </div>`;
+  renderTotp();
+  renderPush();
   $('#pw-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);

@@ -17,7 +17,7 @@ use crate::{
     AppState,
 };
 
-const CHANNEL_KINDS: &[&str] = &["email", "ntfy", "gotify", "telegram", "discord", "teams", "webhook"];
+const CHANNEL_KINDS: &[&str] = &["email", "ntfy", "gotify", "telegram", "discord", "teams", "webhook", "app"];
 const RULE_KINDS: &[&str] =
     &["device_down", "new_device", "mac_changed", "disk_usage", "cpu_usage", "mem_usage", "temperature"];
 const MASK: &str = "••••••";
@@ -155,6 +155,22 @@ pub async fn test_channel(State(st): State<AppState>, _admin: AdminUser, Path(id
         severity: Severity::Info,
         link: st.config.public_url.clone(),
     };
+    if kind == "app" {
+        let message = crate::push::PushMessage {
+            title: &notification.title,
+            body: &notification.message,
+            severity: "info",
+            url: "/#/alerts",
+            tag: "test",
+        };
+        let (ok, failed) = crate::push::send(&st, None, &message).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+        if ok == 0 {
+            return Err(ApiError::BadRequest(format!(
+                "Kein Gerät erreicht ({failed} fehlgeschlagen) – zuerst auf dem Handy unter „Mein Konto“ Push aktivieren"
+            )));
+        }
+        return Ok(Json(json!({ "ok": true, "sent": ok })));
+    }
     notify::send(&kind, &config, &notification)
         .await
         .map_err(|e| ApiError::BadRequest(format!("Senden fehlgeschlagen: {e:#}")))?;

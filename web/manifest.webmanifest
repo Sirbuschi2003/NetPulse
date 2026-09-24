@@ -1,0 +1,23 @@
+{
+  "name": "NetPulse",
+  "short_name": "NetPulse",
+  "description": "Netzwerk-Monitoring: Geräte, Live-Daten und Alarme",
+  "id": "/",
+  "start_url": "/#/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "lang": "de",
+  "categories": ["utilities", "productivity"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Alarme", "url": "/#/alerts", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "Geräte", "url": "/#/devices", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+  ]
+}

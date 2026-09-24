@@ -123,11 +123,12 @@ pub struct UserRow {
     role: String,
     created_at: DateTime<Utc>,
     last_login: Option<DateTime<Utc>>,
+    totp_enabled: bool,
 }
 
 pub async fn list_users(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<UserRow>>> {
     let users = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, role, created_at, last_login FROM users ORDER BY username",
+        "SELECT id, username, role, created_at, last_login, totp_enabled FROM users ORDER BY username",
     )
     .fetch_all(&st.db)
     .await?;
@@ -303,4 +304,17 @@ pub async fn set_live(
     crate::collect::fast::save_settings(&st.db, &settings).await?;
     audit::by(&st.db, &user, "live_settings", json!(settings)).await;
     Ok(Json(settings))
+}
+
+/// Zwei-Faktor-Anmeldung eines Benutzers zurücksetzen (z. B. Handy verloren)
+pub async fn reset_totp(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let target: Option<(String,)> = sqlx::query_as(
+        "UPDATE users SET totp_enabled = false, totp_secret = NULL, totp_last_step = NULL WHERE id = $1 RETURNING username",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    let (username,) = target.ok_or(ApiError::NotFound)?;
+    audit::by(&st.db, &admin, "totp_reset", json!({ "username": username })).await;
+    Ok(Json(json!({ "ok": true })))
 }

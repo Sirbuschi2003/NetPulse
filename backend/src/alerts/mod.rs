@@ -268,6 +268,20 @@ async fn dispatch(state: &AppState, rule: &Rule, notification: Notification) {
         }
     };
     for (id, name, kind, sealed) in channels {
+        if kind == "app" {
+            let message = crate::push::PushMessage {
+                title: &notification.title,
+                body: &notification.message,
+                severity: notification.severity.name(),
+                url: "/#/alerts",
+                tag: &format!("rule-{}", rule.id),
+            };
+            match crate::push::send(state, None, &message).await {
+                Ok((ok, failed)) => tracing::info!("Push „{}“ an {ok} Gerät(e) gesendet ({failed} fehlgeschlagen)", notification.title),
+                Err(e) => tracing::warn!("Push über Kanal {id} ({name}) fehlgeschlagen: {e:#}"),
+            }
+            continue;
+        }
         let result = match state.vault.open_value::<Value>(&sealed) {
             Ok(config) => notify::send(&kind, &config, &notification).await,
             Err(e) => Err(e),

@@ -76,6 +76,8 @@ services:
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?Bitte SITE_ADDRESS setzen, z. B. https://192.168.178.10:8443}
       UPSTREAM: 127.0.0.1:${APP_PORT:-18080}
+      # Eingang für Nginx Proxy Manager o. Ä. (z. B. http://:18081), Standard nur lokal
+      PROXY_LISTEN: ${PROXY_LISTEN:-http://127.0.0.1:18081}
     volumes:
       - caddy-data:/data
       - caddy-config:/config

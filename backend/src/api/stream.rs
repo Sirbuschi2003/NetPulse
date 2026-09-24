@@ -8,14 +8,26 @@ use std::{convert::Infallible, time::Duration};
 
 use axum::{
     extract::State,
-    response::sse::{Event, KeepAlive, Sse},
+    http::{header::HeaderName, HeaderValue},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
 };
 use futures::{stream, Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{auth::CurrentUser, AppState};
 
-pub async fn events(State(st): State<AppState>, _user: CurrentUser) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+/// `X-Accel-Buffering: no`: Nginx (z. B. Nginx Proxy Manager) leitet die Meldungen sofort weiter
+pub async fn events(State(st): State<AppState>, user: CurrentUser) -> impl IntoResponse {
+    (
+        [(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"))],
+        sse(st, user),
+    )
+}
+
+fn sse(st: AppState, _user: CurrentUser) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = st.hub.subscribe();
     let first = st.hub.snapshot().to_string();
     let initial = stream::once(async move { Ok(Event::default().data(first)) });

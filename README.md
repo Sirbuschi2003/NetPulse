@@ -40,7 +40,9 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
   CPU/RAM/Temperatur hoch. Versand über **ntfy (Handy-Push), E-Mail, Telegram, Gotify, Discord, Microsoft Teams, Webhook**.
 - **Weboberfläche:** modernes Design (hell/dunkel), Geräte als Karten oder Tabelle, Detailseiten mit Diagrammen,
   frei anpassbares Dashboard, Live-Fortschritt beim Scannen, Handy-tauglich.
-- **Sicherheit:** Rollen (Admin / Nur lesen), Audit-Log, Zugangsdaten AES-256-verschlüsselt, siehe unten.
+- **NetPulse-App:** als App aufs Handy installierbar (PWA), **Push-Nachrichten** bei Alarmen, Zugriff von außen über
+  den eigenen Reverse-Proxy (z. B. Nginx Proxy Manager) – siehe unten.
+- **Sicherheit:** Rollen (Admin / Nur lesen), **Zwei-Faktor-Anmeldung (TOTP)**, Audit-Log, Zugangsdaten AES-256-verschlüsselt, siehe unten.
 
 Aufbau und Roadmap: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) · Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md)
 
@@ -163,6 +165,31 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 
 ---
 
+## Zugriff von außen & NetPulse-App (Handy)
+
+NetPulse lässt sich wie eine App aufs Handy installieren und schickt Alarme als **Push-Nachricht**. Dafür muss
+NetPulse unter einer eigenen Adresse mit **gültigem Zertifikat** erreichbar sein – z. B. über einen vorhandenen
+**Nginx Proxy Manager (NPM)** als `https://monitoring.example.de`.
+
+1. **Vorher Zwei-Faktor-Anmeldung einschalten:** *Mein Konto → Zwei-Faktor-Anmeldung → Einrichten* (für alle Konten).
+   Ohne 2FA NetPulse nicht ins Internet stellen.
+2. **Eingang für den Proxy freigeben:** im Portainer-Stack die Variable `PROXY_LISTEN=http://:18081` setzen
+   und `PUBLIC_URL=https://monitoring.example.de` (für Links in Nachrichten). Stack aktualisieren.
+   Port 18081 nur im LAN erreichbar lassen (nicht am Router freigeben) – ins Internet geht nur NPM.
+3. **In NPM einen Proxy Host anlegen:**
+   - Domain: `monitoring.example.de`, Scheme `http`, Forward Hostname/IP: IP des NAS, Port `18081`
+   - **Websockets Support** an, **Block Common Exploits** an
+   - Reiter *SSL*: Let's-Encrypt-Zertifikat anfordern, **Force SSL** und **HTTP/2** an, **HSTS** an
+   - Der Live-Stream funktioniert ohne weitere Einstellungen (NetPulse sendet `X-Accel-Buffering: no`).
+4. Am Router Port 443 zu NPM weiterleiten (falls noch nicht geschehen) und den DNS-Eintrag auf die eigene IP setzen.
+5. **App installieren:** `https://monitoring.example.de` auf dem Handy öffnen –
+   Android/Chrome: Menü → *App installieren*; iPhone/Safari: *Teilen → Zum Home-Bildschirm*.
+   Dann in der App *Mein Konto → Push auf diesem Gerät aktivieren* und die Test-Nachricht senden.
+6. Unter **Benachrichtigungen** einen Kanal **„NetPulse-App“** anlegen und in den Alarmregeln auswählen.
+
+Push-Nachrichten sind Ende-zu-Ende verschlüsselt (Web Push, RFC 8291): Die Push-Dienste von Google/Apple/Mozilla
+sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (z. B. WireGuard) zum Heimnetz.
+
 ## Konfiguration (`.env`)
 
 | Variable | Standard | Bedeutung |
@@ -172,6 +199,7 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 | `SCAN_NETWORKS` | – | Netze beim ersten Start, z. B. `192.168.178.0/24,10.0.10.0/24` |
 | `INITIAL_ADMIN_USER` / `_PASSWORD` | `admin` / zufällig | Erstes Admin-Konto |
 | `DISCOVERY_INTERVAL_MIN` | 15 | Vorgabe für den Modus „regelmäßig“; der Such-Zeitplan selbst wird unter **Netzwerke** eingestellt (Standard: täglich 03:00, kein Scan beim Neustart) |
+| `PROXY_LISTEN` | http://127.0.0.1:18081 | Eingang für einen vorgeschalteten Reverse-Proxy (z. B. `http://:18081` für Nginx Proxy Manager) |
 | `TZ` | Europe/Berlin | Zeitzone für die Uhrzeiten im Such-Zeitplan |
 | `MONITOR_INTERVAL_SEC` | 60 | Abstand der Erreichbarkeitsprüfungen in Sekunden |
 | `RETENTION_METRICS_DAYS` | 90 | Aufbewahrung der Messwerte |

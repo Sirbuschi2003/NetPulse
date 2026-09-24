@@ -478,3 +478,9 @@ ol.diag li.info .i { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .alert-pop { animation: none; } }
 #sched-area { margin-top: 18px; }
 .gap-top { margin-top: 18px; }
+
+/* ---------- Zwei-Faktor & App ---------- */
+.qr { display: grid; place-items: center; background: #fff; border-radius: var(--radius-sm); padding: 10px; width: max-content; margin: 8px 0; }
+.qr svg { width: 220px; height: 220px; display: block; }
+ol.steps { margin: 0 0 6px; padding-left: 20px; color: var(--text-2); font-size: 13.5px; }
+h3.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }

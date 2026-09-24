@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.5.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.6.0#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -857,6 +857,8 @@ function showLogin() {
       <p class="muted">Netzwerk-Monitoring</p>
       <label>Benutzername<input name="username" autocomplete="username" required autofocus></label>
       <label>Passwort<input name="password" type="password" autocomplete="current-password" required></label>
+      <label id="code-field" hidden>Code aus der Authenticator-App<input name="code" inputmode="numeric" autocomplete="one-time-code"
+        pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123 456"></label>
       <button type="submit">Anmelden</button>
       <p class="error" id="login-error"></p>
     </form></div>`;
@@ -864,7 +866,15 @@ function showLogin() {
     ev.preventDefault();
     const f = new FormData(ev.target);
     try {
-      state.user = await api('/login', { method: 'POST', body: { username: f.get('username'), password: f.get('password') } });
+      const result = await api('/login', { method: 'POST', body: { username: f.get('username'), password: f.get('password'), code: f.get('code') || null } });
+      if (result.totp_required) {
+        // Passwort stimmt – jetzt noch den Code aus der Authenticator-App
+        $('#code-field').hidden = false;
+        $('#login-error').textContent = '';
+        $('#login-form input[name=code]').focus();
+        return;
+      }
+      state.user = result;
       startApp();
     } catch (e) {
       $('#login-error').textContent = e.message;
@@ -937,6 +947,12 @@ async function refreshShell() {
   } catch { /* egal */ }
 }
 
+/** Service Worker: macht NetPulse als App installierbar und empfängt Push-Nachrichten (nur über HTTPS) */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register('/sw.js').catch(() => { /* z. B. selbst signiertes Zertifikat */ });
+}
+
 function applyTheme(theme) {
   if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
@@ -951,6 +967,7 @@ function startApp() {
   $('#user-name').textContent = state.user.username;
   refreshShell();
   connectStream();
+  registerServiceWorker();
   clearInterval(state.globalTimer);
   state.globalTimer = setInterval(refreshShell, 10000);
   if (!location.hash || location.hash === '#/') location.hash = '#/dashboard';

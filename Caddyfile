@@ -5,10 +5,14 @@
 	admin off
 	# Port 80 nicht belegen (auf einem NAS meist schon von der Weboberfläche genutzt)
 	auto_https disable_redirects
+	servers {
+		# Vorgeschalteter Reverse-Proxy im eigenen Netz (z. B. Nginx Proxy Manager):
+		# dessen X-Forwarded-For übernehmen, damit Audit-Log und Login-Sperre die echte Adresse sehen
+		trusted_proxies static private_ranges
+	}
 }
 
-{$SITE_ADDRESS} {
-	tls internal
+(netpulse) {
 	# Live-Stream (Server-Sent Events) nicht komprimieren – sonst puffert Caddy die kleinen Meldungen
 	@compress not path /api/stream
 	encode @compress gzip
@@ -19,12 +23,28 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
 		Permissions-Policy "geolocation=(), camera=(), microphone=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		-Server
 	}
 
 	# Interne Endpunkte nicht nach außen geben
 	respond /healthz 404
 
-	reverse_proxy {$UPSTREAM}
+	reverse_proxy {$UPSTREAM} {
+		# Live-Stream sofort weiterreichen
+		flush_interval -1
+	}
+}
+
+# Direkter Zugriff im LAN (HTTPS mit eigenem Zertifikat)
+{$SITE_ADDRESS} {
+	tls internal
+	import netpulse
+}
+
+# Eingang für einen vorgeschalteten Reverse-Proxy mit eigenem Zertifikat (z. B. Nginx Proxy Manager
+# für monitoring.example.de). Standard: nur lokal erreichbar. Zum Freigeben PROXY_LISTEN setzen,
+# z. B. http://:18081 – und diesen Port nur für den Proxy erreichbar machen.
+{$PROXY_LISTEN:http://127.0.0.1:18081} {
+	import netpulse
 }

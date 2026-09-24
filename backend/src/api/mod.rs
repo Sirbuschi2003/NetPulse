@@ -26,6 +26,15 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(session::logout))
         .route("/me", get(session::me))
         .route("/me/password", post(session::change_password))
+        .route("/me/totp", get(session::totp_status))
+        .route("/me/totp/setup", post(session::totp_setup))
+        .route("/me/totp/enable", post(session::totp_enable))
+        .route("/me/totp/disable", post(session::totp_disable))
+        .route("/push/key", get(session::push_key))
+        .route("/push/subscribe", post(session::push_subscribe))
+        .route("/push/unsubscribe", post(session::push_unsubscribe))
+        .route("/push/devices", get(session::push_devices))
+        .route("/push/test", post(session::push_test))
         // Geräte & Status
         .route("/summary", get(devices::summary))
         .route("/devices", get(devices::list))
@@ -65,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         // Verwaltung
         .route("/users", get(admin::list_users).post(admin::add_user))
         .route("/users/{id}", delete(admin::delete_user))
+        .route("/users/{id}/totp", delete(admin::reset_totp))
         .route("/audit", get(admin::audit_log))
         .route("/logs", get(admin::system_log))
         .layer(middleware::from_fn(auth::csrf_guard));
