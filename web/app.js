@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.6#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.7#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -600,25 +600,28 @@ function powerBars(list) {
 
 /** Geräte des Widgets: Auswahl (include) und Hauptzähler (main_id) aus der Widget-Einstellung */
 function powerModel(summary, widget = {}) {
-  let list = powerList(summary);
+  const all = powerList(summary);
+  let list = all;
   if (Array.isArray(widget.include)) {
     const include = new Set(widget.include);
     list = list.filter((p) => include.has(p.id) || p.id === widget.main_id);
   }
   const main = widget.main_id ? list.find((p) => p.id === widget.main_id) || null : null;
   const rest = list.filter((p) => p !== main);
-  // Was misst der Hauptzähler? „net“ = Netzbezug (PV schon abgezogen), „gross“ = Gesamtverbrauch.
-  // Ohne Angabe: mit Erzeugern im Haus ist es fast immer der Netzbezug.
-  const mode = widget.main_mode || (rest.some((p) => p.role === 'producer') ? 'net' : 'gross');
-  return { list: rest, main, mode };
+  // Was misst der Hauptzähler? Standard „net“: saldierender Zähler am Hausanschluss
+  // (+ = Netzbezug, − = Einspeisung). „gross“ nur, wenn ausdrücklich so eingestellt.
+  const mode = widget.main_mode || 'net';
+  // Für die Rechnung am saldierenden Zähler zählt jede Erzeugung – auch wenn sie im Widget ausgeblendet ist
+  const producers = all.filter((p) => p !== main && p.role === 'producer');
+  return { list: rest, main, mode, producers };
 }
 
 /** Verbrauch, Erzeugung, Netz, Bilanz und „Sonstiges“ (Hauptzähler minus Einzelmessungen) */
-function modelFigures({ list, main, mode }) {
+function modelFigures({ list, main, mode, producers = [] }) {
   const role = (p) => p.role || 'consumer';
   const sum = (r) => list.filter((p) => role(p) === r).reduce((a, p) => a + Math.abs(p.power_w), 0);
   const has = (r) => list.some((p) => role(p) === r);
-  const production = has('producer') ? sum('producer') : null;
+  let production = has('producer') ? sum('producer') : null;
   let consumption = has('consumer') ? sum('consumer') : null;
   let gridImport = null;
   let gridExport = null;
@@ -631,10 +634,13 @@ function modelFigures({ list, main, mode }) {
   let other = null;
   if (main) {
     if (role(main) === 'grid' || mode === 'net') {
-      // Zähler am Hausanschluss misst den Netzbezug (PV schon abgezogen): Hausverbrauch = Bezug − Einspeisung + eigene Erzeugung
+      // Saldierender Zähler: +1000 W = Netzbezug, −200 W = Einspeisung. Der Netzbezug IST der Zählerwert.
+      // Hausverbrauch = Zählerwert + Erzeugung (1000 + 600 = 1600 W; −200 + 600 = 400 W).
+      const pv = producers.length ? producers.reduce((a, p) => a + Math.abs(p.power_w), 0) : production;
       gridImport = Math.max(0, main.power_w);
       gridExport = Math.max(0, -main.power_w);
-      consumption = Math.max(0, main.power_w + (production || 0));
+      consumption = Math.max(0, main.power_w + (pv || 0));
+      if (pv != null) production = pv;
     } else {
       consumption = Math.abs(main.power_w);
     }
@@ -721,7 +727,7 @@ function powerWidgetDialog(widget = {}) {
       </tbody></table></div>
       <fieldset id="pw-mode"><legend>Was misst der Hauptzähler?</legend><div class="checks">
         <label class="inline"><input type="radio" name="mode" value="net"${(widget.main_mode || 'net') === 'net' ? ' checked' : ''}>
-          Netzbezug – PV/Balkonkraftwerk ist schon abgezogen (Zähler am Hausanschluss)</label>
+          Saldierender Zähler am Hausanschluss: + = Netzbezug, − = Einspeisung (Standard)</label>
         <label class="inline"><input type="radio" name="mode" value="gross"${widget.main_mode === 'gross' ? ' checked' : ''}>
           Gesamtverbrauch des Hauses (ohne Abzug der Erzeugung)</label></div></fieldset>
       <p class="hint">Die Rolle gilt für das ganze System (auch Summen und Statusseite); Anzeigen und Hauptzähler nur für dieses Widget.
