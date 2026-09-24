@@ -227,6 +227,7 @@ const CRED_KINDS = {
   snmp_v3: { label: 'SNMP v3 (empfohlen)', icon: 'shield-lock', port: 161 },
   ssh_key: { label: 'SSH mit Schlüssel (empfohlen)', icon: 'key', port: 22 },
   ssh_password: { label: 'SSH mit Passwort', icon: 'lock', port: 22 },
+  http: { label: 'HTTP / Web-Anmeldung (z. B. Shelly)', icon: 'bolt', port: 80 },
 };
 
 async function viewCredentials() {
@@ -261,7 +262,7 @@ async function viewCredentials() {
       <label>Art<select name="kind"${editing ? ' disabled' : ''}>${Object.entries(CRED_KINDS).map(([k, v]) => `<option value="${k}"${cred && cred.kind === k ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
       <label>Name<input name="name" required maxlength="100" value="${esc(cred ? cred.name : '')}" placeholder="z. B. Heimnetz SNMP"></label>
       <div class="form-row">
-        <label data-for="snmp_v3 ssh_key ssh_password">Benutzername<input name="username" value="${esc(cred ? cred.username || '' : '')}" autocomplete="off"></label>
+        <label data-for="snmp_v3 ssh_key ssh_password http">Benutzername<input name="username" value="${esc(cred ? cred.username || '' : '')}" autocomplete="off"></label>
         <label>Port<input name="port" type="number" min="1" max="65535" value="${esc(cred ? cred.port || '' : '')}" placeholder="Standard"></label>
       </div>
       <label data-for="snmp_v2c">Community<input name="community" type="password" autocomplete="new-password" placeholder="${keep || 'z. B. public'}"></label>
@@ -275,10 +276,10 @@ async function viewCredentials() {
           <option value="des">DES (veraltet)</option><option value="none">keine</option></select></label>
         <label>Verschlüsselungs-Passwort<input name="priv_password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
       </div>
-      <label data-for="ssh_password">Passwort<input name="password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
+      <label data-for="ssh_password http">Passwort<input name="password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
       <label data-for="ssh_key">Privater Schlüssel (OpenSSH-Format)<textarea name="private_key" class="mono" placeholder="${keep || '-----BEGIN OPENSSH PRIVATE KEY-----'}"></textarea></label>
       <label data-for="ssh_key">Passphrase (optional)<input name="passphrase" type="password" autocomplete="new-password" placeholder="${keep}"></label>
-      <label class="inline" data-for="snmp_v2c snmp_v3 ssh_key"><input type="checkbox" name="auto"${cred && cred.auto ? ' checked' : ''}> Automatisch bei allen passenden Geräten ausprobieren</label>
+      <label class="inline" data-for="snmp_v2c snmp_v3 ssh_key http"><input type="checkbox" name="auto"${cred && cred.auto ? ' checked' : ''}> Automatisch bei allen passenden Geräten verwenden</label>
       <p class="hint" id="auto-hint"></p>
       <div class="actions"><button type="submit">${icon('check')}Speichern</button></div></form>`);
     const form = $('#cred-form', dlg);
@@ -287,7 +288,10 @@ async function viewCredentials() {
       $$('[data-for]', form).forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(kind); });
       $('#auto-hint', dlg).textContent = kind === 'snmp_v2c'
         ? 'Hinweis: Bei SNMP v2c wird die Community unverschlüsselt an jedes getestete Gerät gesendet. Für „automatisch“ besser SNMP v3.'
-        : kind === 'ssh_password' ? 'SSH-Passwörter werden aus Sicherheitsgründen nie automatisch ausprobiert – bitte Geräte gezielt zuordnen.' : '';
+        : kind === 'ssh_password' ? 'SSH-Passwörter werden aus Sicherheitsgründen nie automatisch ausprobiert – bitte Geräte gezielt zuordnen.'
+          : kind === 'http' ? 'Gilt für alle erkannten Shelly-Geräte (Benutzer bei Gen2+ immer „admin“). Das Passwort geht nur an Geräte, die sich '
+            + 'vorher als Shelly ausgewiesen haben; bei Gen2+ wird es per Digest-Verfahren nie im Klartext übertragen.' : '';
+      if (kind === 'http' && !form.elements.username.value) form.elements.username.value = 'admin';
     };
     form.kind.addEventListener('change', update);
     update();

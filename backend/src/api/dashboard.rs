@@ -13,6 +13,8 @@ use crate::{
 fn default_layout() -> Value {
     json!([
         { "type": "summary", "size": 3 },
+        { "type": "internet", "size": 2 },
+        { "type": "power", "size": 1 },
         { "type": "alerts", "size": 1 },
         { "type": "down", "size": 1 },
         { "type": "types", "size": 1 },

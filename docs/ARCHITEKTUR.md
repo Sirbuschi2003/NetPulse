@@ -84,9 +84,16 @@ Zielgerät einmalig aktiviert und mit einem Konto mit Leserechten versehen werde
 - Regeln: offline länger als X Minuten, neues Gerät, MAC-/SSH-Schlüssel geändert, Speicher, CPU, RAM, Temperatur
 - Kanäle: E-Mail, ntfy, Gotify, Telegram, Discord, Microsoft Teams, Webhook; Entwarnung beim Beheben
 
+**✅ Phase 3b: Live-Daten, Herstellerprofile, Shelly**
+- Live-Datenraten je Schnittstelle (SNMP und SSH), WAN-Erkennung über die Standardroute, Dashboard-Widget „Internet“
+- Profile für UniFi, Synology, MikroTik, APC, pf-Firewalls, ENTITY-SENSOR-MIB
+- SNMP-Explorer mit Namen aus ~4.800 MIBs (Tabelle `mib_names`)
+- Shelly Gen1–Gen4 über die lokale HTTP-API (Digest-Auth für Gen2+), Gerätenamen per mDNS und NetBIOS
+
 **Phase 4: Weitere Datenquellen**
 - WinRM (HTTPS) als Alternative zu SSH für Windows
 - FRITZ!Box über TR-064 (Bandbreite, verbundene Geräte, DSL-Werte)
+- UniFi- und OPNsense-API (Clients, Bandbreite je Client, Regeln), weitere Smart-Home-Geräte (Tasmota, ESPHome, Home Assistant)
 - Redfish für Server-Hardware (iDRAC, iLO)
 - mDNS/NetBIOS-Namen, Syslog-Empfang, NetFlow/sFlow
 - HTTP- und TLS-Prüfungen (Antwortzeit, Statuscode, Zertifikatslaufzeit)

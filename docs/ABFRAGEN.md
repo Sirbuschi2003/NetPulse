@@ -101,6 +101,41 @@ Seriennummer und LLDP-Nachbarn.
 - **FRITZ!Box:** unterstützt **kein SNMP**. NetPulse erkennt sie trotzdem als Router und überwacht die Erreichbarkeit.
   Die Abfrage über die FRITZ!Box-Schnittstelle (TR-064) ist geplant.
 
+## Shelly (Steckdosen, Relais, Rollladen, Energiezähler)
+
+NetPulse erkennt Shellys automatisch (Gen1 sowie Gen2/Gen3/Gen4 „Plus/Pro/Mini“) und liest ihren **Namen**,
+Schaltzustand, **Leistung (W)**, Zählerstand (kWh), Spannung, Temperatur, WLAN-Signal und verfügbare Updates.
+
+- **Ohne Passwort am Shelly:** Es ist nichts zu tun.
+- **Mit Passwort:** unter Zugangsdaten → **„HTTP / Web-Anmeldung (z. B. Shelly)“** einmal Benutzer (`admin`) und Passwort
+  eintragen und **„automatisch bei allen passenden Geräten verwenden“** aktivieren. Damit gilt der Eintrag für alle Shellys.
+  - Das Passwort geht nur an Geräte, die sich vorher als Shelly ausgewiesen haben.
+  - Gen2 und neuer nutzen eine Digest-Anmeldung (SHA-256); das Passwort wird dabei nie im Klartext übertragen.
+    Gen1-Geräte kennen nur die einfache Basic-Anmeldung, dort sichert nur das eigene WLAN die Übertragung.
+  - Haben Shellys unterschiedliche Passwörter, einfach mehrere Einträge anlegen. NetPulse probiert sie der Reihe nach durch.
+
+Die aktuelle Leistung aller Shellys zeigt das Dashboard-Widget **„Stromverbrauch“**.
+
+## Gerätenamen
+
+NetPulse fragt jeden gefundenen Gerätenamen aus mehreren Quellen ab (der erste Treffer zählt):
+1. Name aus dem Gerät selbst (Shelly, SNMP `sysName`, SSH-Hostname)
+2. **mDNS/Bonjour** (Apple, Drucker, Chromecast, Sonos, ESPHome, Shelly …)
+3. **NetBIOS** (Windows-PCs, Samba)
+4. DNS-Name (z. B. von der FRITZ!Box)
+
+Ein eigener Anzeigename (Gerät → Einstellungen) hat immer Vorrang.
+
+## Live-Ansicht und SNMP-Explorer
+
+- **Live:** Bei Geräten mit SNMP- oder SSH-Zugang zeigt der Reiter „Live“ die Datenrate jeder Schnittstelle, aktualisiert
+  alle 2 Sekunden. Die WAN-Schnittstelle von Routern und Firewalls (z. B. **OPNsense** mit dem Plugin `os-net-snmp`) wird
+  über die Standardroute erkannt und im Dashboard-Widget **„Internet“** angezeigt. Falls die Erkennung nicht passt:
+  Gerät → Schnittstellen → Schnittstelle anklicken → „Als Internet markieren“.
+- **SNMP-Explorer:** liest beliebige Werte eines Geräts, mit Namen aus rund **4.800 MIBs** (IETF/IANA und die Hersteller-MIBs
+  der LibreNMS-Sammlung, knapp 960.000 benannte Werte). Suche per OID oder Name, z. B. `ifXTable`, `unifiVapTable` oder
+  `enterprises`. Die Namensliste belegt etwa 160 MB in der Datenbank.
+
 ## Drucker
 
 Netzwerkdrucker haben SNMP meist schon aktiv (oft v1/v2c mit Community `public`). Dann reicht ein SNMP-v2c-Eintrag

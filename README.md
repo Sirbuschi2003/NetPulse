@@ -22,6 +22,14 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
     USV-Akku, Synology-Temperatur, LLDP-Nachbarn
   - **SSH (Linux, NAS, Proxmox, Raspberry Pi, Windows mit OpenSSH):** Betriebssystem, Kernel, CPU, RAM, Festplatten,
     Temperaturen, Netzwerk, fehlgeschlagene Dienste, Container, Windows-Updates, Neustart nötig
+- **Live-Datenraten** jeder Schnittstelle mit Animation (alle 2 s), Dashboard-Widget **„Internet“** mit Live-Download/-Upload
+  (WAN-Erkennung z. B. bei OPNsense über die Standardroute), Verlauf je Schnittstelle.
+- **Herstellerprofile:** UniFi (WLANs, Clients je WLAN, Kanalauslastung), Synology (Festplatten, Temperaturen, RAID),
+  MikroTik, APC, pf-Firewalls, Sensoren (ENTITY-SENSOR-MIB).
+- **Shelly** (Gen1–Gen4): Name, Schaltzustand, Leistung, Energie, Temperatur, Updates; eine Zugangsangabe für alle Shellys.
+  Dashboard-Widget **„Stromverbrauch“**.
+- **Gerätenamen** aus mDNS/Bonjour, NetBIOS, SNMP, SSH und DNS.
+- **SNMP-Explorer** mit Namen aus ~4.800 MIBs (knapp 960.000 benannte Werte).
 - **Alarme** mit Entwarnung: Gerät offline, neues Gerät im Netz, MAC-/SSH-Schlüssel geändert, Speicher voll,
   CPU/RAM/Temperatur hoch. Versand über **ntfy (Handy-Push), E-Mail, Telegram, Gotify, Discord, Microsoft Teams, Webhook**.
 - **Weboberfläche:** modernes Design (hell/dunkel), Geräte als Karten oder Tabelle, Detailseiten mit Diagrammen,

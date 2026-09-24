@@ -19,6 +19,7 @@ mod classify;
 mod collect;
 mod config;
 mod error;
+mod mib;
 mod oui;
 mod scanner;
 mod vault;
@@ -44,6 +45,8 @@ pub struct AppState {
     /// Geräte-IDs für eine sofortige tiefe Abfrage
     pub poll_tx: mpsc::UnboundedSender<i64>,
     pub vault: Arc<Vault>,
+    /// Letzte Zählerstände für die Live-Ansicht
+    pub live: Arc<collect::live::LiveCache>,
     pub login_limiter: Arc<auth::LoginLimiter>,
 }
 
@@ -76,6 +79,7 @@ async fn main() -> Result<()> {
         scan_progress: Arc::new(scanner::ScanProgress::default()),
         poll_tx,
         vault: Arc::new(vault),
+        live: Arc::new(collect::live::LiveCache::default()),
         login_limiter: Arc::new(auth::LoginLimiter::default()),
     };
 
@@ -85,6 +89,7 @@ async fn main() -> Result<()> {
     tokio::spawn(scanner::monitor::run(state.clone(), pinger));
     tokio::spawn(collect::run(state.clone(), poll_rx));
     tokio::spawn(alerts::run(state.clone()));
+    tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
@@ -132,6 +137,13 @@ async fn apply_retention(db: &PgPool, config: &Config) -> Result<()> {
         .execute(db)
         .await?;
     sqlx::query("SELECT add_retention_policy('device_metrics', make_interval(days => $1))")
+        .bind(config.metrics_retention_days)
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT remove_retention_policy('interface_stats', if_exists => true)")
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT add_retention_policy('interface_stats', make_interval(days => $1))")
         .bind(config.metrics_retention_days)
         .execute(db)
         .await?;

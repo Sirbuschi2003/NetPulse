@@ -26,6 +26,7 @@ use crate::{
     oui,
     scanner::{
         add_event,
+        names,
         net::{self, Pinger},
         reclassify, ScanRequest,
     },
@@ -194,22 +195,38 @@ async fn scan_network(state: &AppState, pinger: &Arc<Pinger>, network_id: i64, q
 
 async fn store_device(state: &AppState, ip: Ipv4Addr, rtt: Option<Duration>, mac: Option<String>) -> Result<()> {
     let ports: Vec<i32> = net::scan_ports(ip).await.into_iter().map(i32::from).collect();
-    let hostname = net::reverse_dns(ip).await;
-    let vendor = mac.as_deref().and_then(oui::lookup);
+    // Namen aus DNS, mDNS/Bonjour und NetBIOS parallel abfragen; Shelly an Port 80 erkennen
+    let shelly_probe = async {
+        if ports.contains(&80) {
+            crate::collect::shelly::probe(ip).await
+        } else {
+            None
+        }
+    };
+    let (hostname, mdns, netbios, shelly) =
+        tokio::join!(net::reverse_dns(ip), names::mdns_name(ip), names::netbios_name(ip), shelly_probe);
+    let reported_name = shelly.as_ref().and_then(|s| s.name.clone()).or(mdns).or(netbios);
+    let integration = shelly.as_ref().map(|_| "shelly");
+    let model = shelly.as_ref().and_then(|s| s.model.clone());
+    let vendor = if shelly.is_some() { Some("Shelly".to_string()) } else { mac.as_deref().and_then(oui::lookup) };
     let rtt_ms = rtt.map(|d| d.as_secs_f32() * 1000.0);
 
     // Einfügen oder aktualisieren. `xmax = 0` ist ein PostgreSQL-Trick, um zu erkennen,
     // ob die Zeile neu eingefügt wurde; `old` liefert die vorherige MAC-Adresse.
     let (id, inserted, old_mac): (i64, bool, Option<String>) = sqlx::query_as(
         "WITH old AS (SELECT mac FROM devices WHERE ip = $1::inet)
-         INSERT INTO devices (ip, mac, hostname, vendor, open_ports, status, status_since, last_rtt_ms, last_seen, last_check)
-         VALUES ($1::inet, $2, $3, $4, $5, 'up', now(), $6, now(), now())
+         INSERT INTO devices (ip, mac, hostname, vendor, open_ports, status, status_since, last_rtt_ms, last_seen, last_check,
+                              reported_name, integration, model)
+         VALUES ($1::inet, $2, $3, $4, $5, 'up', now(), $6, now(), now(), $7, $8, $9)
          ON CONFLICT (ip) DO UPDATE SET
-             mac        = COALESCE(EXCLUDED.mac, devices.mac),
-             hostname   = COALESCE(EXCLUDED.hostname, devices.hostname),
-             vendor     = COALESCE(EXCLUDED.vendor, devices.vendor),
-             open_ports = EXCLUDED.open_ports,
-             last_seen  = now()
+             mac           = COALESCE(EXCLUDED.mac, devices.mac),
+             hostname      = COALESCE(EXCLUDED.hostname, devices.hostname),
+             vendor        = COALESCE(EXCLUDED.vendor, devices.vendor),
+             open_ports    = EXCLUDED.open_ports,
+             reported_name = COALESCE(EXCLUDED.reported_name, devices.reported_name),
+             integration   = COALESCE(EXCLUDED.integration, devices.integration),
+             model         = COALESCE(devices.model, EXCLUDED.model),
+             last_seen     = now()
          RETURNING id, (xmax = 0), (SELECT mac FROM old)",
     )
     .bind(ip.to_string())
@@ -218,12 +235,15 @@ async fn store_device(state: &AppState, ip: Ipv4Addr, rtt: Option<Duration>, mac
     .bind(&vendor)
     .bind(&ports)
     .bind(rtt_ms)
+    .bind(&reported_name)
+    .bind(integration)
+    .bind(&model)
     .fetch_one(&state.db)
     .await?;
 
     reclassify(&state.db, id).await?;
 
-    let label = hostname.unwrap_or_else(|| ip.to_string());
+    let label = reported_name.or(hostname).unwrap_or_else(|| ip.to_string());
     if inserted {
         let vendor_info = vendor.map(|v| format!(", {v}")).unwrap_or_default();
         add_event(&state.db, id, "discovered", &format!("Neues Gerät entdeckt: {label} ({ip}{vendor_info})")).await?;

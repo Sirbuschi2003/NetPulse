@@ -6,6 +6,7 @@
 
 pub mod discovery;
 pub mod monitor;
+pub mod names;
 pub mod net;
 
 use std::sync::{

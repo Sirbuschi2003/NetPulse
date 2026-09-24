@@ -351,3 +351,46 @@ dialog .dlg-body { padding: 20px; overflow-y: auto; }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 100; display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: var(--radius-sm); background: var(--text); color: var(--bg); box-shadow: var(--shadow-lg); animation: slide 0.2s; }
 .toast.error { background: var(--down); color: #fff; }
 @keyframes slide { from { transform: translateY(10px); opacity: 0; } }
+
+/* ---------- Live-Ansicht & Animationen ---------- */
+svg.flow { width: 100%; height: 12px; display: block; overflow: visible; }
+svg.flow .flow-track { stroke: var(--border); stroke-width: 3; stroke-linecap: round; fill: none; }
+svg.flow .flow-dash { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; fill: none;
+  stroke-dasharray: 5 13; animation: flow 2s linear infinite; }
+svg.flow.c1 .flow-dash, svg.flow.up .flow-dash { stroke: var(--accent-2); animation-direction: reverse; }
+svg.flow.idle .flow-dash { opacity: 0.25; }
+@keyframes flow { to { stroke-dashoffset: -36; } }
+@media (prefers-reduced-motion: reduce) { svg.flow .flow-dash { animation: none; } }
+
+svg.spark { width: 100%; height: 44px; display: block; }
+svg.spark .line { fill: none; stroke-width: 1.6; }
+svg.spark .spark-area { stroke: none; opacity: 0.12; }
+
+.inet-path { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin: 4px 0 14px; }
+.inet-node { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--text-2); max-width: 110px; }
+.inet-node:hover { text-decoration: none; }
+.inet-node > svg.i { width: 34px; height: 34px; color: var(--accent); }
+.inet-node small { font-size: 11px; color: var(--muted); max-width: 110px; }
+.inet-flows { display: flex; flex-direction: column; gap: 10px; }
+.inet-values { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
+.inet-values strong { display: block; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.inet-dir { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--accent); font-weight: 600; }
+.inet-dir.up { color: var(--accent-2); }
+
+.live-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.live-pulse { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.live-pulse::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--up); animation: blink 1.2s infinite; }
+@keyframes blink { 50% { opacity: 0.25; } }
+.if-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.if-card { padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface-2); display: flex; flex-direction: column; gap: 10px; }
+.if-card.wan { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.if-card.down { opacity: 0.55; }
+.if-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.if-card header .ellipsis { font-weight: 600; }
+.if-rates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.if-rates strong { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.if-rates .inet-dir { font-size: 11.5px; }
+.meter > span { transition: width 0.6s ease; }
+.explorer-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.explorer-tools input[name="oid"] { flex: 1 1 320px; }
+td.val { max-width: 520px; overflow-wrap: anywhere; }

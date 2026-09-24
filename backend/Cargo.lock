@@ -1819,6 +1819,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dns-lookup",
+ "flate2",
  "futures",
  "hex",
  "lettre",

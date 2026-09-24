@@ -116,7 +116,7 @@ async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i6
 async fn device_down(state: &AppState, rule: &Rule) -> Result<()> {
     // Neue Ausfälle
     let down: Vec<(i64, String, i64)> = sqlx::query_as(
-        "SELECT d.id, COALESCE(d.name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
+        "SELECT d.id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
                 (EXTRACT(EPOCH FROM now() - d.status_since) / 60)::bigint
            FROM devices d
           WHERE d.monitored AND d.status = 'down'
@@ -146,7 +146,7 @@ async fn device_down(state: &AppState, rule: &Rule) -> Result<()> {
            FROM devices d
           WHERE a.rule_id = $1 AND a.resolved_at IS NULL AND d.id = a.device_id
             AND (d.status <> 'down' OR NOT d.monitored)
-          RETURNING d.id, COALESCE(d.name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
+          RETURNING d.id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
                     (EXTRACT(EPOCH FROM a.resolved_at - a.opened_at) / 60)::bigint",
     )
     .bind(rule.id)

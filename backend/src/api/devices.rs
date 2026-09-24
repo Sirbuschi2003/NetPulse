@@ -21,11 +21,11 @@ use crate::{
 const DEVICE_COLUMNS: &str = "id, host(ip) AS ip, mac, hostname, name, notes, open_ports, status, status_since, \
                               last_rtt_ms, monitored, first_seen, last_seen, last_check, vendor, \
                               COALESCE(device_type, 'unknown') AS device_type, device_type_manual, os, model, \
-                              inventory_at, inventory_error, \
+                              inventory_at, inventory_error, wan_interface, wan_interface_manual, reported_name, integration, \
                               EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = devices.id) AS has_credentials";
 
 const EVENT_SELECT: &str = "SELECT e.id, e.time, e.device_id, \
-                            COALESCE(d.name, d.hostname, host(d.ip)) AS device_label, e.kind, e.message \
+                            COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS device_label, e.kind, e.message \
                             FROM events e LEFT JOIN devices d ON d.id = e.device_id";
 
 #[derive(Serialize, FromRow)]
@@ -51,6 +51,10 @@ pub struct Device {
     model: Option<String>,
     inventory_at: Option<DateTime<Utc>>,
     inventory_error: Option<String>,
+    wan_interface: Option<String>,
+    wan_interface_manual: bool,
+    reported_name: Option<String>,
+    integration: Option<String>,
     has_credentials: bool,
 }
 
@@ -92,6 +96,22 @@ pub async fn summary(State(st): State<AppState>, _user: CurrentUser) -> ApiResul
     let (open_alerts,): (i64,) = sqlx::query_as("SELECT count(*) FROM alerts WHERE resolved_at IS NULL")
         .fetch_one(&st.db)
         .await?;
+    let wan_devices: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, COALESCE(name, reported_name, hostname, host(ip)), wan_interface, COALESCE(device_type, 'unknown')
+           FROM devices WHERE wan_interface IS NOT NULL
+          ORDER BY (device_type IN ('router', 'firewall')) DESC, id",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    // Aktuelle Leistung aller Geräte mit Strommessung (z. B. Shelly), Messwert höchstens 15 Minuten alt
+    let power: Vec<(i64, String, f32)> = sqlx::query_as(
+        "SELECT DISTINCT ON (s.device_id) s.device_id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)), s.power_w
+           FROM device_stats s JOIN devices d ON d.id = s.device_id
+          WHERE s.power_w IS NOT NULL AND s.time > now() - interval '15 minutes'
+          ORDER BY s.device_id, s.time DESC",
+    )
+    .fetch_all(&st.db)
+    .await?;
     let types: Vec<(String, i64)> =
         sqlx::query_as("SELECT COALESCE(device_type, 'unknown'), count(*) FROM devices GROUP BY 1 ORDER BY 2 DESC")
             .fetch_all(&st.db)
@@ -102,6 +122,14 @@ pub async fn summary(State(st): State<AppState>, _user: CurrentUser) -> ApiResul
         "scan": st.scan_progress.snapshot(),
         "open_alerts": open_alerts,
         "types": types.into_iter().map(|(t, n)| json!({ "type": t, "count": n })).collect::<Vec<_>>(),
+        "power": power
+            .into_iter()
+            .map(|(id, label, watt)| json!({ "id": id, "label": label, "power_w": watt }))
+            .collect::<Vec<_>>(),
+        "wan_devices": wan_devices
+            .into_iter()
+            .map(|(id, label, iface, kind)| json!({ "id": id, "label": label, "interface": iface, "device_type": kind }))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -133,6 +161,8 @@ struct StatPoint {
     temp_c: Option<f32>,
     rx_bps: Option<f64>,
     tx_bps: Option<f64>,
+    clients: Option<f32>,
+    power_w: Option<f32>,
 }
 
 pub async fn detail(
@@ -170,7 +200,8 @@ pub async fn detail(
     let stats = sqlx::query_as::<_, StatPoint>(
         "SELECT time_bucket(make_interval(mins => $2), time) AS bucket,
                 avg(cpu_pct)::real AS cpu_pct, avg(mem_pct)::real AS mem_pct, avg(disk_pct)::real AS disk_pct,
-                avg(temp_c)::real AS temp_c, avg(rx_bps) AS rx_bps, avg(tx_bps) AS tx_bps
+                avg(temp_c)::real AS temp_c, avg(rx_bps) AS rx_bps, avg(tx_bps) AS tx_bps,
+                avg(clients)::real AS clients, avg(power_w)::real AS power_w
            FROM device_stats
           WHERE device_id = $1 AND time > now() - make_interval(hours => $3)
           GROUP BY bucket
@@ -215,6 +246,8 @@ pub struct DeviceUpdate {
     monitored: Option<bool>,
     /// Gerätetyp von Hand setzen; „auto“ schaltet zurück auf automatische Erkennung
     device_type: Option<String>,
+    /// Internet-Schnittstelle von Hand setzen; leerer Text = automatisch erkennen
+    wan_interface: Option<String>,
 }
 
 pub async fn update(
@@ -244,7 +277,9 @@ pub async fn update(
             status    = CASE WHEN $4::boolean = false THEN 'unknown' ELSE status END,
             status_since = CASE WHEN $4::boolean IS NOT NULL AND $4::boolean <> monitored THEN now() ELSE status_since END,
             device_type = CASE WHEN $5::text IS NULL OR $5 = 'auto' THEN device_type ELSE $5 END,
-            device_type_manual = CASE WHEN $5::text IS NULL THEN device_type_manual ELSE $5 <> 'auto' END
+            device_type_manual = CASE WHEN $5::text IS NULL THEN device_type_manual ELSE $5 <> 'auto' END,
+            wan_interface = CASE WHEN $6::text IS NULL THEN wan_interface ELSE NULLIF(trim($6), '') END,
+            wan_interface_manual = CASE WHEN $6::text IS NULL THEN wan_interface_manual ELSE trim($6) <> '' END
           WHERE id = $1
           RETURNING {DEVICE_COLUMNS}"
     );
@@ -254,6 +289,7 @@ pub async fn update(
         .bind(&req.notes)
         .bind(req.monitored)
         .bind(&req.device_type)
+        .bind(&req.wan_interface)
         .fetch_optional(&st.db)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -330,6 +366,102 @@ pub async fn reset_ssh_key(
     audit::by(&st.db, &user, "ssh_key_reset", json!({ "device_id": id })).await;
     let _ = st.poll_tx.send(id);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Aktuelle Datenraten aller Schnittstellen (für die Live-Ansicht, alle ~2 s abgefragt)
+pub async fn live(State(st): State<AppState>, _user: CurrentUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    crate::collect::live::live(&st, id)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))
+}
+
+#[derive(Deserialize)]
+pub struct InterfaceQuery {
+    name: String,
+    hours: Option<i32>,
+}
+
+#[derive(Serialize, FromRow)]
+pub struct InterfacePoint {
+    bucket: DateTime<Utc>,
+    rx_bps: Option<f64>,
+    tx_bps: Option<f64>,
+}
+
+/// Verlauf der Datenrate einer Schnittstelle
+pub async fn interface_history(
+    State(st): State<AppState>,
+    _user: CurrentUser,
+    Path(id): Path<i64>,
+    Query(q): Query<InterfaceQuery>,
+) -> ApiResult<Json<Vec<InterfacePoint>>> {
+    let hours = q.hours.unwrap_or(24).clamp(1, 24 * 90);
+    let bucket = (hours * 60 / 300).max(5);
+    let points = sqlx::query_as::<_, InterfacePoint>(
+        "SELECT time_bucket(make_interval(mins => $3), time) AS bucket, avg(rx_bps) AS rx_bps, avg(tx_bps) AS tx_bps
+           FROM interface_stats
+          WHERE device_id = $1 AND name = $2 AND time > now() - make_interval(hours => $4)
+          GROUP BY bucket ORDER BY bucket",
+    )
+    .bind(id)
+    .bind(&q.name)
+    .bind(bucket)
+    .bind(hours)
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(points))
+}
+
+#[derive(Deserialize)]
+pub struct SnmpQuery {
+    oid: Option<String>,
+    max: Option<usize>,
+}
+
+/// SNMP-Explorer: beliebigen Teilbaum lesen, mit Namen aus den MIBs
+pub async fn snmp_explorer(
+    State(st): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+    Query(q): Query<SnmpQuery>,
+) -> ApiResult<Json<Value>> {
+    let start = q.oid.as_deref().filter(|o| !o.trim().is_empty()).unwrap_or("1.3.6.1.2.1.1");
+    let base = crate::mib::resolve(&st.db, start)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest(format!("„{start}“ ist weder eine OID noch ein bekannter MIB-Name")))?;
+    let (ip,): (String,) = sqlx::query_as("SELECT host(ip) FROM devices WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let creds = crate::collect::load_credentials(&st, id).await?;
+    let cred = creds
+        .iter()
+        .find(|c| c.linked && c.kind.starts_with("snmp"))
+        .ok_or_else(|| ApiError::BadRequest("Dem Gerät sind keine SNMP-Zugangsdaten zugeordnet".into()))?;
+    let addr = ip.parse().map_err(|_| ApiError::BadRequest("Nur IPv4 wird unterstützt".into()))?;
+    let max = q.max.unwrap_or(500).clamp(1, 5000);
+    let mut session = crate::collect::snmp::open(addr, cred).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    let rows = crate::collect::snmp::walk(&mut session, &base, max)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    let oids: Vec<Vec<u64>> = rows.iter().map(|(o, _)| o.clone()).collect();
+    let names = crate::mib::names_for(&st.db, &oids).await?;
+    let (mib_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM mib_names").fetch_one(&st.db).await?;
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|(oid, value)| {
+            let (kind, text) = value.describe();
+            json!({ "oid": crate::collect::snmp::dotted(oid), "name": names.get(oid), "type": kind, "value": text })
+        })
+        .collect();
+    Ok(Json(json!({
+        "base": crate::collect::snmp::dotted(&base),
+        "truncated": rows.len() >= max,
+        "mib_names": mib_count,
+        "rows": rows,
+    })))
 }
 
 #[derive(Deserialize)]

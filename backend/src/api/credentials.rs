@@ -18,7 +18,7 @@ use crate::{
     AppState,
 };
 
-const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key"];
+const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key", "http"];
 
 #[derive(Serialize, FromRow)]
 pub struct CredentialInfo {
@@ -99,7 +99,7 @@ pub async fn create(
     let secret = merge(Secret::default(), req.secret);
     let missing = match kind {
         "snmp_v2c" => secret.community.is_none(),
-        "ssh_password" => secret.password.is_none(),
+        "ssh_password" | "http" => secret.password.is_none(),
         "ssh_key" => secret.private_key.is_none(),
         _ => false,
     };

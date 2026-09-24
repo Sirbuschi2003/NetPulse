@@ -44,7 +44,7 @@ async function viewDevices(_arg, params) {
     if (filters.status === 'new' && Date.now() - new Date(d.first_seen).getTime() > 86400000) return false;
     if (['up', 'down', 'unknown'].includes(filters.status) && (!d.monitored || d.status !== filters.status)) return false;
     if (!filters.q) return true;
-    const hay = [d.name, d.hostname, d.ip, d.mac, d.vendor, d.os, d.model, d.notes, typeInfo(d.device_type).label,
+    const hay = [d.name, d.reported_name, d.hostname, d.ip, d.mac, d.vendor, d.os, d.model, d.notes, typeInfo(d.device_type).label,
       ...(d.open_ports || []).map(portLabel)].join(' ').toLowerCase();
     return hay.includes(filters.q);
   };
@@ -61,7 +61,7 @@ async function viewDevices(_arg, params) {
   const row = (d) => `
     <tr class="clickable${d.monitored ? '' : ' unmonitored'}" data-id="${d.id}">
       <td><div class="cell-dev">${devIcon(d, 'sm')}<div class="ellipsis"><div>${esc(deviceLabel(d))}</div>
-        ${d.name && d.hostname ? `<div class="muted small">${esc(d.hostname)}</div>` : ''}</div></div></td>
+        ${(d.reported_name || d.hostname) && deviceLabel(d) !== (d.reported_name || d.hostname) ? `<div class="muted small">${esc(d.reported_name || d.hostname)}</div>` : ''}</div></div></td>
       <td>${statusBadge(d)}</td>
       <td class="mono">${esc(d.ip)}</td>
       <td><div class="mono small">${esc(d.mac || '–')}</div><div class="muted small">${esc(d.vendor || '')}</div></td>
@@ -111,16 +111,21 @@ async function viewDevice(id) {
   const tabs = () => {
     const inv = data.inventory || {};
     const list = [['overview', 'Übersicht']];
-    if (inv.ssh || inv.snmp) list.push(['system', 'System']);
+    // Live-Datenraten gibt es für Geräte mit SNMP- oder SSH-Zugang (Netzwerk-Schnittstellen)
+    if (data.device.has_credentials && (inv.snmp || inv.ssh || !inv.shelly)) list.push(['live', 'Live']);
+    if (inv.ssh || inv.snmp || inv.shelly) list.push(['system', 'System']);
     if ((inv.ssh && inv.ssh.interfaces && inv.ssh.interfaces.length) || (inv.snmp && inv.snmp.interfaces)) list.push(['interfaces', 'Schnittstellen']);
     if ((inv.ssh && inv.ssh.disks && inv.ssh.disks.length) || (inv.snmp && inv.snmp.storage && inv.snmp.storage.length)) list.push(['storage', 'Speicher']);
     list.push(['history', 'Verlauf']);
     list.push(['events', 'Ereignisse']);
+    if (isAdmin() && inv.snmp) list.push(['explorer', 'SNMP-Explorer']);
     if (isAdmin()) list.push(['settings', 'Einstellungen']);
     return list;
   };
 
   const render = () => {
+    state.liveStops.forEach((stop) => stop());
+    state.liveStops = [];
     const d = data.device;
     const t = typeInfo(d.device_type);
     view().innerHTML = `
@@ -144,31 +149,158 @@ async function viewDevice(id) {
       setTimeout(reload, 8000);
     }, 'Abfrage gestartet – Ergebnisse erscheinen in wenigen Sekunden'));
     const body = $('#tab-body');
-    const renderers = { overview: tabOverview, system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, settings: tabSettings };
+    const renderers = { overview: tabOverview, live: tabLive, system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
     body.innerHTML = (renderers[tab] || tabOverview)();
     applyWidths(body);
     if (tab === 'settings') bindSettings();
+    if (tab === 'live') bindLive();
+    if (tab === 'interfaces') bindInterfaces();
+    if (tab === 'explorer') bindExplorer();
     $('#range')?.addEventListener('change', (ev) => { hours = Number(ev.target.value); reload(); });
   };
 
   const reload = async () => {
     data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
-    if (tab !== 'settings') render();
+    if (!['settings', 'live', 'explorer'].includes(tab)) render();
   };
+
+  /** Schnittstelle als Internet-Anschluss markieren (leer = automatisch erkennen) */
+  const markWan = (name) => attempt(async () => {
+    data.device = await api(`/devices/${id}`, { method: 'PATCH', body: { wan_interface: name } });
+  }, name ? `${name} ist jetzt der Internet-Anschluss` : 'Internet-Anschluss wird wieder automatisch erkannt');
+
+  // ----- Live -----
+  function tabLive() {
+    return `<div class="live-head"><span class="live-pulse" id="live-status">verbinde …</span>
+        <label class="inline small"><input type="checkbox" id="live-all"> auch getrennte Schnittstellen zeigen</label></div>
+      <div class="if-grid" id="if-grid"></div>`;
+  }
+
+  function bindLive() {
+    const grid = $('#if-grid');
+    let showAll = false;
+    let last = null;
+    let lastHistory = {};
+    const card = (i, wan) => `
+      <div class="if-card${wan ? ' wan' : ''}${i.oper === 'down' ? ' down' : ''}" data-if="${esc(i.name)}">
+        <header><span class="ellipsis" title="${esc(i.alias || i.name)}">${esc(i.name)}${i.alias ? ` <span class="muted small">· ${esc(i.alias)}</span>` : ''}</span>
+          <span class="actions">${wan ? '<span class="badge accent">Internet</span>' : ''}<span class="dot ${i.oper === 'up' ? 'up' : ''}"></span></span></header>
+        <div class="if-rates">
+          <div><span class="inet-dir">${icon('arrow-down', 'i-sm')} Empfangen</span><strong data-rx>–</strong></div>
+          <div><span class="inet-dir up">${icon('arrow-up', 'i-sm')} Gesendet</span><strong data-tx>–</strong></div>
+        </div>
+        ${flowLine('down')}${flowLine('up c1')}
+        ${i.speed_mbps ? '<div class="meter" data-util><span></span></div>' : ''}
+        <div data-spark>${sparkline([])}</div>
+        <div class="muted small">${i.speed_mbps ? `Verbindung ${esc(linkLabel(i.speed_mbps))} · ` : ''}gesamt ↓ <span data-rxb></span> · ↑ <span data-txb></span></div>
+        ${isAdmin() && !wan ? `<button type="button" class="ghost sm" data-mark-wan="${esc(i.name)}">${icon('world-www', 'i-sm')}Als Internet markieren</button>` : ''}
+      </div>`;
+
+    const update = (live, history) => {
+      last = live;
+      lastHistory = history;
+      $('#live-status').textContent = live.warming_up
+        ? 'Erste Messung – die Raten erscheinen in 2 Sekunden …'
+        : `Live per ${live.source} · ${new Date(live.time).toLocaleTimeString('de-DE')}`;
+      const list = live.interfaces
+        .filter((i) => showAll || i.oper === 'up' || (i.rx_bps || 0) + (i.tx_bps || 0) > 0)
+        .sort((a, b) => (b.name === live.wan) - (a.name === live.wan));
+      const keys = `${live.wan}|${list.map((i) => i.name).join('|')}`;
+      if (grid.dataset.keys !== keys) {
+        grid.innerHTML = list.map((i) => card(i, i.name === live.wan)).join('') || empty('Keine aktiven Schnittstellen.', 'plug-connected');
+        grid.dataset.keys = keys;
+        $$('[data-mark-wan]', grid).forEach((b) => b.addEventListener('click', () => markWan(b.dataset.markWan)));
+      }
+      list.forEach((i) => {
+        const el = grid.querySelector(`[data-if="${CSS.escape(i.name)}"]`);
+        if (!el) return;
+        tweenNumber($('[data-rx]', el), i.rx_bps, fmtBps);
+        tweenNumber($('[data-tx]', el), i.tx_bps, fmtBps);
+        const [down, up] = $$('svg.flow', el);
+        setFlow(down, i.rx_bps);
+        setFlow(up, i.tx_bps);
+        const util = $('[data-util]', el);
+        if (util) {
+          const value = (Math.max(i.rx_bps || 0, i.tx_bps || 0) / (i.speed_mbps * 1e6)) * 100;
+          util.className = `meter ${value >= 90 ? 'crit' : value >= 70 ? 'warn' : ''}`;
+          util.firstElementChild.style.width = `${Math.min(100, Math.max(0.5, value))}%`;
+          util.title = `Auslastung ${value.toFixed(1)} %`;
+        }
+        $('[data-spark]', el).innerHTML = sparkline(history[i.name]);
+        $('[data-rxb]', el).textContent = fmtBytes(i.rx_bytes);
+        $('[data-txb]', el).textContent = fmtBytes(i.tx_bytes);
+      });
+    };
+    $('#live-all').addEventListener('change', (ev) => { showAll = ev.target.checked; if (last) update(last, lastHistory); });
+    startLive(id, update, (e) => {
+      $('#live-status').textContent = 'Keine Live-Daten';
+      grid.dataset.keys = '';
+      grid.innerHTML = `<div class="notice">${icon('alert-triangle')}<span>${esc(e.message)}</span></div>`;
+    });
+  }
+
+  // ----- SNMP-Explorer -----
+  function tabExplorer() {
+    const presets = [['System', 'system'], ['Schnittstellen', 'ifXTable'], ['Speicher', 'hrStorageTable'], ['Sensoren', 'entPhySensorTable'],
+      ['IP/ARP', 'ipNetToMediaTable'], ['LLDP', 'lldpRemTable'], ['Herstellerbereich', 'enterprises']];
+    return `<div class="explorer-tools">
+        <input name="oid" id="ex-oid" value="system" placeholder="OID oder MIB-Name, z. B. 1.3.6.1.2.1.2.2, ifTable, unifiVapTable" aria-label="OID">
+        <select id="ex-max" aria-label="Maximale Anzahl"><option>200</option><option selected>500</option><option>2000</option><option>5000</option></select>
+        <button type="button" id="ex-go">${icon('binary-tree')}Lesen</button>
+        <input id="ex-filter" type="search" placeholder="Ergebnis filtern …" aria-label="Filtern"></div>
+      <div class="actions">${presets.map(([l, o]) => `<button type="button" class="ghost sm" data-preset="${o}">${esc(l)}</button>`).join('')}</div>
+      <p class="hint" id="ex-info">Liest beliebige SNMP-Werte des Geräts – mit Namen aus rund 4.800 Standard- und Hersteller-MIBs.</p>
+      <div id="ex-result"></div>`;
+  }
+
+  function bindExplorer() {
+    let rows = [];
+    const show = () => {
+      const q = $('#ex-filter').value.trim().toLowerCase();
+      const shown = q ? rows.filter((r) => `${r.name || ''} ${r.oid} ${r.value}`.toLowerCase().includes(q)) : rows;
+      $('#ex-result').innerHTML = shown.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>OID</th><th>Typ</th><th>Wert</th></tr></thead>
+        <tbody>${shown.map((r) => `<tr><td class="mono small">${esc(r.name || '–')}</td><td class="mono small muted">${esc(r.oid)}</td>
+          <td class="small">${esc(r.type)}</td><td class="val mono small">${esc(r.value)}</td></tr>`).join('')}</tbody></table></div>`
+        : empty('Keine Werte.', 'binary-tree');
+    };
+    const load = async () => {
+      const oid = $('#ex-oid').value.trim();
+      $('#ex-info').textContent = 'Lese …';
+      try {
+        const res = await api(`/devices/${id}/snmp?oid=${encodeURIComponent(oid)}&max=${$('#ex-max').value}`);
+        rows = res.rows;
+        $('#ex-info').textContent = `${rows.length} Werte ab ${res.base}${res.truncated ? ' (gekürzt – Maximum erhöhen)' : ''}`
+          + (res.mib_names ? '' : ' · MIB-Namen werden gerade noch geladen');
+        show();
+      } catch (e) {
+        $('#ex-info').textContent = e.message;
+        rows = [];
+        show();
+      }
+    };
+    $('#ex-go').addEventListener('click', load);
+    $('#ex-oid').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') load(); });
+    $('#ex-filter').addEventListener('input', show);
+    $$('[data-preset]').forEach((b) => b.addEventListener('click', () => { $('#ex-oid').value = b.dataset.preset; load(); }));
+    load();
+  }
 
   // ----- Übersicht -----
   function tabOverview() {
     const d = data.device;
     const last = data.stats[data.stats.length - 1] || {};
     const avail = availability(data.points);
-    const gauges = [['cpu', 'CPU', last.cpu_pct, '%'], ['gauge', 'RAM', last.mem_pct, '%'], ['database', 'Speicher', last.disk_pct, '%'], ['temperature', 'Temperatur', last.temp_c, '°C']]
+    const gauges = [['cpu', 'CPU', last.cpu_pct, '%'], ['gauge', 'RAM', last.mem_pct, '%'], ['database', 'Speicher', last.disk_pct, '%'],
+      ['temperature', 'Temperatur', last.temp_c, '°C'], ['bolt', 'Leistung', last.power_w, 'W'], ['antenna-bars-5', 'WLAN-Clients', last.clients, '']]
       .filter((g) => g[2] != null);
     return `<div class="grid">
       <section class="span-1"><h3>Details</h3><dl class="details">
         <dt>IP-Adresse</dt><dd class="mono">${esc(d.ip)}</dd>
         <dt>MAC-Adresse</dt><dd class="mono">${esc(d.mac || '–')}</dd>
         <dt>Hersteller</dt><dd>${esc(d.vendor || '–')}</dd>
-        <dt>Hostname</dt><dd>${esc(d.hostname || '–')}</dd>
+        <dt>Hostname (DNS)</dt><dd>${esc(d.hostname || '–')}</dd>
+        ${d.reported_name ? `<dt>Gerätename</dt><dd>${esc(d.reported_name)}</dd>` : ''}
         <dt>Antwortzeit</dt><dd>${esc(fmtMs(d.last_rtt_ms))}</dd>
         <dt>Status seit</dt><dd>${esc(fmtTime(d.status_since))}</dd>
         <dt>Erstmals gesehen</dt><dd>${esc(fmtTime(d.first_seen))}</dd>
@@ -178,7 +310,7 @@ async function viewDevice(id) {
       </dl></section>
       <section class="span-2">
         ${gauges.length ? `<div class="gauges">${gauges.map(([ic, label, v, unit]) => `<div class="gauge"><div class="l">${icon(ic, 'i-sm')}${label}</div>
-          <div class="v">${Math.round(v)} ${unit}</div>${unit === '%' ? meter(v) : meter(v, { warn: 70, crit: 85 })}</div>`).join('')}</div><br>` : ''}
+          <div class="v">${unit === 'W' ? esc(fmtWatt(v)) : `${Math.round(v)} ${unit}`}</div>${unit === '%' ? meter(v) : unit === '°C' ? meter(v, { warn: 70, crit: 85 }) : ''}</div>`).join('')}</div><br>` : ''}
         <h3>Antwortzeit ${avail != null ? `<span class="muted">· ${avail} % verfügbar (${hours} h)</span>` : ''}</h3>
         ${lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, width: 760, outages: true })}
         ${inventoryStatus()}
@@ -205,6 +337,7 @@ async function viewDevice(id) {
   function tabSystem() {
     const ssh = (data.inventory || {}).ssh;
     const snmp = (data.inventory || {}).snmp;
+    const shelly = (data.inventory || {}).shelly;
     const rows = [];
     const add = (label, value) => { if (value != null && value !== '' && value !== false) rows.push(`<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`); };
     if (ssh) {
@@ -241,8 +374,65 @@ async function viewDevice(id) {
       add('Seriennummer', snmp.serial);
       add('CPU-Last', snmp.cpu_pct != null ? `${Math.round(snmp.cpu_pct)} % (${snmp.cpu_cores} Kerne)` : null);
       add('LLDP-Nachbarn', snmp.lldp_neighbors ? snmp.lldp_neighbors.join(', ') : null);
+      add('Prozesse', snmp.processes);
+      add('Angemeldete Benutzer', snmp.users || null);
+      add('Firewall-States (pf)', snmp.firewall ? snmp.firewall.states : null);
+    }
+    if (shelly) {
+      add('Gerätename', shelly.name);
+      add('Modell', shelly.model);
+      add('Generation', shelly.generation ? `Gen${shelly.generation}` : null);
+      add('Laufzeit', shelly.uptime_s != null ? fmtDuration(shelly.uptime_s) : null);
+      add('WLAN', shelly.rssi != null ? `${shelly.ssid ? `${shelly.ssid}, ` : ''}${shelly.rssi} dBm` : null);
+      add('Firmware-Update verfügbar', shelly.update);
     }
     let extra = '';
+    if (shelly) {
+      const kindLabel = { switch: 'Schalter', light: 'Licht', cover: 'Rollladen', em: 'Energiezähler', em1: 'Energiezähler', pm1: 'Strommesser' };
+      extra += `<section class="card"><header><h2>${icon('bolt')}Shelly</h2>${shelly.power_w != null ? `<span class="badge accent">${esc(fmtWatt(shelly.power_w))}</span>` : ''}</header>
+        <ul class="list">${(shelly.channels || []).map((c) => `<li><span class="lead">${icon(c.kind === 'cover' ? 'arrows-exchange' : c.kind === 'light' ? 'bulb' : 'bolt', 'i-sm')}
+          <span>${esc(kindLabel[c.kind] || c.kind)} ${Number(c.id) + 1}
+          ${c.on === true ? '<span class="badge st-up">an</span>' : c.on === false ? '<span class="badge plain">aus</span>' : ''}
+          ${c.state ? `<span class="badge plain">${esc(c.state)}${c.position != null ? ` · ${esc(c.position)} %` : ''}</span>` : ''}</span></span>
+          <span class="meta">${c.power_w != null ? esc(fmtWatt(c.power_w)) : ''}${c.energy_kwh != null ? ` · ${esc(c.energy_kwh)} kWh` : ''}${c.voltage != null ? ` · ${esc(Math.round(c.voltage))} V` : ''}</span></li>`).join('')
+          || '<li class="muted">Keine Kanäle</li>'}</ul>
+        ${shelly.temp_c != null || shelly.humidity_pct != null || shelly.battery_pct != null ? `<dl class="details">
+          ${shelly.temp_c != null ? `<dt>Temperatur</dt><dd>${esc(shelly.temp_c)} °C</dd>` : ''}
+          ${shelly.humidity_pct != null ? `<dt>Luftfeuchte</dt><dd>${esc(shelly.humidity_pct)} %</dd>` : ''}
+          ${shelly.battery_pct != null ? `<dt>Akku</dt><dd>${esc(shelly.battery_pct)} %</dd>` : ''}</dl>` : ''}
+        ${shelly.energy_kwh != null ? `<p class="muted small">Gesamtverbrauch seit Zählerstart: ${esc(shelly.energy_kwh)} kWh</p>` : ''}</section>`;
+    }
+    if (snmp && snmp.unifi) {
+      const u = snmp.unifi;
+      extra += `<section class="card"><header><h2>${icon('access-point')}UniFi-WLAN</h2><span class="badge accent">${esc(u.clients)} Clients</span></header>
+        ${u.model ? `<p class="muted small">${esc(u.model)}${u.version ? ` · Firmware ${esc(u.version)}` : ''}</p>` : ''}
+        ${(u.radios || []).map((r) => `<div class="meter-row"><span><div>${esc(r.band || r.name)}</div><div class="muted small">Kanalauslastung</div></span>
+          ${meter(r.utilization_pct || 0, { warn: 50, crit: 75 })}<span class="small">${r.utilization_pct != null ? `${r.utilization_pct} %` : '–'}</span></div>`).join('')}
+        ${(u.wlans || []).length ? `<div class="table-wrap"><table><thead><tr><th>WLAN</th><th>Funk</th><th>Kanal</th><th>Clients</th></tr></thead>
+          <tbody>${u.wlans.map((w) => `<tr><td>${esc(w.ssid || '–')}</td><td class="small">${esc(w.radio || '')}</td><td>${esc(w.channel ?? '–')}</td>
+            <td><b>${esc(w.clients ?? 0)}</b></td></tr>`).join('')}</tbody></table></div>` : ''}</section>`;
+    }
+    if (snmp && snmp.synology && (snmp.synology.disks || snmp.synology.volumes)) {
+      const s = snmp.synology;
+      extra += `<section class="card"><header><h2>${icon('database')}Festplatten &amp; Volumes</h2></header>
+        ${(s.volumes || []).map((v) => `<div class="meter-row"><span><div>${esc(v.name)}</div><div class="muted small">${esc(v.status)}</div></span>
+          ${meter(v.pct || 0)}<span class="small">${esc(fmtBytes(v.used_bytes))} / ${esc(fmtBytes(v.total_bytes))}</span></div>`).join('')}
+        ${(s.disks || []).length ? `<ul class="list">${s.disks.map((d) => `<li><span class="lead">${icon('database', 'i-sm')}<span class="ellipsis">${esc(d.id)} <span class="muted small">${esc(d.model || '')}</span></span></span>
+          <span class="meta">${d.status === 'normal' ? '<span class="badge st-up">normal</span>' : `<span class="badge sev-critical">${esc(d.status)}</span>`}
+          ${d.temp_c != null ? ` ${esc(d.temp_c)} °C` : ''}</span></li>`).join('')}</ul>` : ''}</section>`;
+    }
+    if (snmp && snmp.mikrotik) {
+      const m = snmp.mikrotik;
+      extra += `<section class="card"><header><h2>${icon('router')}MikroTik</h2></header><dl class="details">
+        <dt>RouterOS</dt><dd>${esc(m.version || '–')}</dd>
+        <dt>Temperatur</dt><dd>${m.temp_c != null ? `${esc(m.temp_c)} °C` : '–'}${m.cpu_temp_c != null ? ` (CPU ${esc(m.cpu_temp_c)} °C)` : ''}</dd>
+        <dt>Spannung</dt><dd>${m.voltage_v != null ? `${esc(m.voltage_v)} V` : '–'}</dd>
+        <dt>WLAN-Clients</dt><dd>${esc(m.clients ?? 0)}</dd></dl></section>`;
+    }
+    if (snmp && snmp.sensors && snmp.sensors.length) {
+      extra += `<section class="card"><header><h2>${icon('temperature')}Sensoren</h2></header><ul class="list">
+        ${snmp.sensors.slice(0, 30).map((x) => `<li><span class="ellipsis">${esc(x.name || x.kind)}</span><span class="meta">${esc(x.value)} ${esc((x.kind.match(/\((.*)\)/) || [])[1] || '')}</span></li>`).join('')}</ul></section>`;
+    }
     if (snmp && snmp.printer && snmp.printer.length) {
       extra += `<section class="card"><header><h2>${icon('printer')}Verbrauchsmaterial</h2></header>
         ${snmp.printer.map((s) => `<div class="meter-row"><span class="ellipsis">${esc(s.descr || 'Material')}</span>
@@ -275,17 +465,43 @@ async function viewDevice(id) {
     const list = (inv.snmp && inv.snmp.interfaces) || (inv.ssh && inv.ssh.interfaces) || [];
     const ips = (inv.ssh && inv.ssh.ips) || [];
     const nics = (inv.ssh && inv.ssh.nics) || [];
-    const rows = list.filter((i) => i.type !== 24).map((i) => `<tr>
-      <td><div>${esc(i.name || i.descr)}</div>${i.alias ? `<div class="muted small">${esc(i.alias)}</div>` : ''}</td>
+    const wan = data.device.wan_interface;
+    const rows = list.filter((i) => i.type !== 24).map((i) => `<tr class="clickable" data-if="${esc(i.name)}">
+      <td><div>${esc(i.name || i.descr)} ${i.name === wan ? `<span class="badge accent">Internet${data.device.wan_interface_manual ? '' : ' (erkannt)'}</span>` : ''}</div>
+        ${i.alias ? `<div class="muted small">${esc(i.alias)}</div>` : ''}</td>
       <td>${i.oper === 'up' ? '<span class="badge st-up">verbunden</span>' : `<span class="badge plain">${esc(i.oper || '–')}</span>`}</td>
-      <td>${i.speed_mbps ? (i.speed_mbps >= 1000 ? `${i.speed_mbps / 1000} Gbit/s` : `${Math.round(i.speed_mbps)} Mbit/s`) : '–'}</td>
+      <td>${esc(linkLabel(i.speed_mbps) || '–')}</td>
       <td class="mono small">${esc(i.mac || '–')}</td>
       <td>${esc(fmtBytes(i.rx_bytes))}</td><td>${esc(fmtBytes(i.tx_bytes))}</td></tr>`).join('');
     const ipRows = ips.map((a) => `<li><span class="mono">${esc(a.addr)}</span><span class="meta">${esc(a.iface)}</span></li>`)
       .concat(nics.map((n) => `<li><span><div>${esc(n.name)}</div><div class="mono small muted">${esc((n.ips || []).join(', '))}</div></span><span class="meta mono">${esc(n.mac || '')}</span></li>`));
-    return `${rows ? `<div class="table-wrap"><table><thead><tr><th>Schnittstelle</th><th>Status</th><th>Geschwindigkeit</th><th>MAC</th><th>Empfangen</th><th>Gesendet</th></tr></thead>
+    return `${rows ? `<p class="hint">Schnittstelle anklicken für den Verlauf der Datenrate.</p>
+      <div class="table-wrap"><table><thead><tr><th>Schnittstelle</th><th>Status</th><th>Geschwindigkeit</th><th>MAC</th><th>Empfangen</th><th>Gesendet</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : ''}
+      <div id="if-history"></div>
       ${ipRows.length ? `<br><h3>Adressen</h3><ul class="list">${ipRows.join('')}</ul>` : ''}`;
+  }
+
+  function bindInterfaces() {
+    const showHistory = async (name, range = 24) => {
+      const box = $('#if-history');
+      box.innerHTML = '<p class="muted">Lade …</p>';
+      const points = await api(`/devices/${id}/interfaces/history?name=${encodeURIComponent(name)}&hours=${range}`);
+      const isWan = data.device.wan_interface === name;
+      box.innerHTML = `<section class="card"><header><h2>${icon('chart-line')}${esc(name)}</h2>
+          <div class="actions"><select id="if-range" aria-label="Zeitraum">${[[24, '24 Stunden'], [168, '7 Tage'], [720, '30 Tage']]
+            .map(([h, l]) => `<option value="${h}"${h === range ? ' selected' : ''}>${l}</option>`).join('')}</select>
+          ${isAdmin() ? (isWan
+            ? `<button type="button" class="ghost sm" id="if-unwan">${icon('x', 'i-sm')}Internet-Markierung entfernen</button>`
+            : `<button type="button" class="ghost sm" id="if-wan">${icon('world-www', 'i-sm')}Als Internet markieren</button>`) : ''}</div></header>
+        ${lineChart(points, { series: [{ key: 'rx_bps', label: 'Empfangen' }, { key: 'tx_bps', label: 'Gesendet' }], format: fmtBps, width: 1100, height: 200 })}
+        ${points.length ? '' : '<p class="muted small">Der Verlauf füllt sich mit jeder Abfrage (alle paar Minuten).</p>'}</section>`;
+      $('#if-range').addEventListener('change', (ev) => showHistory(name, Number(ev.target.value)));
+      $('#if-wan')?.addEventListener('click', async () => { if (await markWan(name)) render(); });
+      $('#if-unwan')?.addEventListener('click', async () => { if (await markWan('')) render(); });
+      box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    };
+    $$('#tab-body tr[data-if]').forEach((tr) => tr.addEventListener('click', () => showHistory(tr.dataset.if).catch((e) => toast(e.message, true))));
   }
 
   // ----- Speicher -----
@@ -312,7 +528,11 @@ async function viewDevice(id) {
           ${lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, width: 1100, height: 200, outages: true })}</section>
         ${pctSeries.length ? `<section class="card span-3"><header><h2>${icon('gauge')}Auslastung</h2></header>
           ${lineChart(s, { series: pctSeries, format: (v) => `${Math.round(v)} %`, maxValue: 100, width: 1100, height: 200 })}</section>` : ''}
-        ${has('rx_bps') ? `<section class="card span-2"><header><h2>${icon('arrows-exchange')}Datenverkehr</h2></header>
+        ${has('power_w') ? `<section class="card span-3"><header><h2>${icon('bolt')}Leistung</h2></header>
+          ${lineChart(s, { series: [{ key: 'power_w', label: 'Leistung' }], format: fmtWatt, width: 1100, height: 190 })}</section>` : ''}
+        ${has('clients') ? `<section class="card span-3"><header><h2>${icon('antenna-bars-5')}WLAN-Clients</h2></header>
+          ${lineChart(s, { series: [{ key: 'clients', label: 'Clients' }], width: 1100, height: 170 })}</section>` : ''}
+        ${has('rx_bps') ? `<section class="card span-2"><header><h2>${icon('arrows-exchange')}${data.device.wan_interface ? `Internet (${esc(data.device.wan_interface)})` : 'Datenverkehr'}</h2></header>
           ${lineChart(s, { series: [{ key: 'rx_bps', label: 'Empfangen' }, { key: 'tx_bps', label: 'Gesendet' }], format: fmtBps, width: 720 })}</section>` : ''}
         ${has('temp_c') ? `<section class="card span-1"><header><h2>${icon('temperature')}Temperatur</h2></header>
           ${lineChart(s, { series: [{ key: 'temp_c', label: 'Temperatur' }], format: (v) => `${Math.round(v)} °C`, width: 360 })}</section>` : ''}
@@ -326,7 +546,7 @@ async function viewDevice(id) {
   function tabSettings() {
     const d = data.device;
     const assigned = new Set(data.credential_ids);
-    const kindLabel = { snmp_v2c: 'SNMP v2c', snmp_v3: 'SNMP v3', ssh_password: 'SSH (Passwort)', ssh_key: 'SSH (Schlüssel)' };
+    const kindLabel = { snmp_v2c: 'SNMP v2c', snmp_v3: 'SNMP v3', ssh_password: 'SSH (Passwort)', ssh_key: 'SSH (Schlüssel)', http: 'HTTP / Shelly' };
     return `<div class="grid">
       <section class="span-1"><h3>Allgemein</h3><form class="form" id="dev-form">
         <label>Anzeigename<input name="name" maxlength="200" value="${esc(d.name || '')}" placeholder="${esc(d.hostname || d.ip)}"></label>

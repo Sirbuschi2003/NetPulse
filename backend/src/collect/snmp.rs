@@ -21,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Eigene, besitzende Kopie eines SNMP-Werts (die Bibliothek leiht nur den Empfangspuffer aus)
 #[derive(Debug, Clone)]
-enum Val {
+pub(crate) enum Val {
     Int(i64),
     Uint(u64),
     Bytes(Vec<u8>),
@@ -44,7 +44,7 @@ impl Val {
         }
     }
 
-    fn text(&self) -> Option<String> {
+    pub(crate) fn text(&self) -> Option<String> {
         match self {
             Val::Bytes(b) => {
                 let text = String::from_utf8_lossy(b).trim_matches(char::from(0)).trim().to_string();
@@ -58,12 +58,30 @@ impl Val {
         }
     }
 
-    fn num(&self) -> Option<f64> {
+    pub(crate) fn num(&self) -> Option<f64> {
         match self {
             Val::Int(n) => Some(*n as f64),
             Val::Uint(n) => Some(*n as f64),
             Val::Bytes(b) => String::from_utf8_lossy(b).trim().parse().ok(),
             _ => None,
+        }
+    }
+
+    /// Typ und lesbarer Wert für den SNMP-Explorer
+    pub(crate) fn describe(&self) -> (&'static str, String) {
+        match self {
+            Val::Int(n) => ("Integer", n.to_string()),
+            Val::Uint(n) => ("Zähler", n.to_string()),
+            Val::Oid(o) => ("OID", o.clone()),
+            Val::Ip(ip) => ("IP-Adresse", Ipv4Addr::from(*ip).to_string()),
+            Val::Missing => ("fehlt", String::new()),
+            Val::Bytes(b) => match std::str::from_utf8(b) {
+                // Text, wenn gültiges UTF-8 ohne Steuerzeichen (außer Zeilenumbruch/Tab)
+                Ok(text) if !text.is_empty() && !text.chars().any(|c| c.is_control() && !c.is_whitespace()) => {
+                    ("Text", text.to_string())
+                }
+                _ => ("Hex", b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")),
+            },
         }
     }
 
@@ -85,7 +103,7 @@ fn oid_parts(oid: &Oid) -> Vec<u64> {
     oid.iter().map(|it| it.collect()).unwrap_or_default()
 }
 
-async fn open(ip: Ipv4Addr, cred: &Credential) -> Result<AsyncSession> {
+pub(crate) async fn open(ip: Ipv4Addr, cred: &Credential) -> Result<AsyncSession> {
     let port = cred.port.and_then(|p| u16::try_from(p).ok()).unwrap_or(161);
     let addr = SocketAddr::from((ip, port));
     let secret = &cred.secret;
@@ -137,7 +155,7 @@ async fn open(ip: Ipv4Addr, cred: &Credential) -> Result<AsyncSession> {
 }
 
 /// GET mehrerer Werte (mit einer Wiederholung bei UDP-Verlust)
-async fn get(session: &mut AsyncSession, oids: &[&[u64]]) -> Result<Vec<(Vec<u64>, Val)>> {
+pub(crate) async fn get(session: &mut AsyncSession, oids: &[&[u64]]) -> Result<Vec<(Vec<u64>, Val)>> {
     let oids: Vec<Oid<'static>> = oids.iter().map(|o| oid(o)).collect::<Result<_>>()?;
     let refs: Vec<&Oid> = oids.iter().collect();
     for attempt in 0..2 {
@@ -152,7 +170,7 @@ async fn get(session: &mut AsyncSession, oids: &[&[u64]]) -> Result<Vec<(Vec<u64
 }
 
 /// Alle Werte unterhalb einer OID lesen (GETBULK), höchstens `max` Einträge
-async fn walk(session: &mut AsyncSession, base: &[u64], max: usize) -> Result<Vec<(Vec<u64>, Val)>> {
+pub(crate) async fn walk(session: &mut AsyncSession, base: &[u64], max: usize) -> Result<Vec<(Vec<u64>, Val)>> {
     let mut out = Vec::new();
     let mut current = base.to_vec();
     'outer: loop {
@@ -186,12 +204,12 @@ async fn walk(session: &mut AsyncSession, base: &[u64], max: usize) -> Result<Ve
     Ok(out)
 }
 
-fn dotted(parts: &[u64]) -> String {
+pub(crate) fn dotted(parts: &[u64]) -> String {
     parts.iter().map(u64::to_string).collect::<Vec<_>>().join(".")
 }
 
 /// Spalte einer Tabelle: Index (Rest der OID) → Wert
-async fn column(session: &mut AsyncSession, base: &[u64], max: usize) -> BTreeMap<Vec<u64>, Val> {
+pub(crate) async fn column(session: &mut AsyncSession, base: &[u64], max: usize) -> BTreeMap<Vec<u64>, Val> {
     walk(session, base, max)
         .await
         .unwrap_or_default()
@@ -202,8 +220,8 @@ async fn column(session: &mut AsyncSession, base: &[u64], max: usize) -> BTreeMa
 
 // Wichtige OIDs
 const SYSTEM: &[u64] = &[1, 3, 6, 1, 2, 1, 1];
-const IF_TABLE: &[u64] = &[1, 3, 6, 1, 2, 1, 2, 2, 1];
-const IFX_TABLE: &[u64] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1];
+pub(crate) const IF_TABLE: &[u64] = &[1, 3, 6, 1, 2, 1, 2, 2, 1];
+pub(crate) const IFX_TABLE: &[u64] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1];
 const HR_STORAGE: &[u64] = &[1, 3, 6, 1, 2, 1, 25, 2, 3, 1];
 const HR_PROCESSOR_LOAD: &[u64] = &[1, 3, 6, 1, 2, 1, 25, 3, 3, 1, 2];
 const PRINTER_SUPPLIES: &[u64] = &[1, 3, 6, 1, 2, 1, 43, 11, 1, 1];
@@ -212,7 +230,7 @@ const ENTITY_PHYSICAL: &[u64] = &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1];
 const LLDP_REM_SYSNAME: &[u64] = &[1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9];
 const SYNOLOGY_SYSTEM: &[u64] = &[1, 3, 6, 1, 4, 1, 6574, 1];
 
-fn with(base: &[u64], tail: &[u64]) -> Vec<u64> {
+pub(crate) fn with(base: &[u64], tail: &[u64]) -> Vec<u64> {
     base.iter().chain(tail).copied().collect()
 }
 
@@ -402,5 +420,254 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential) -> Result<Value> {
         data.insert("lldp_neighbors".into(), json!(neighbors));
     }
 
+    // Internet-Anschluss: Schnittstelle der Standardroute (RFC1213 ipRouteIfIndex für 0.0.0.0)
+    if let Ok(route) = get(&mut s, &[&[1, 3, 6, 1, 2, 1, 4, 21, 1, 2, 0, 0, 0, 0]]).await {
+        if let Some(if_index) = route.first().and_then(|(_, v)| v.num()) {
+            let name = data["interfaces"]
+                .as_array()
+                .and_then(|list| list.iter().find(|i| i["index"].as_f64() == Some(if_index)))
+                .and_then(|i| i["name"].as_str().map(str::to_string));
+            data.insert("default_route_if".into(), json!(name));
+        }
+    }
+
+    // Prozesse und angemeldete Benutzer (HOST-RESOURCES-MIB)
+    if let Ok(hr) = get(&mut s, &[&[1, 3, 6, 1, 2, 1, 25, 1, 5, 0], &[1, 3, 6, 1, 2, 1, 25, 1, 6, 0]]).await {
+        data.insert("users".into(), json!(hr.first().and_then(|(_, v)| v.num())));
+        data.insert("processes".into(), json!(hr.get(1).and_then(|(_, v)| v.num())));
+    }
+
+    // Temperatur- und weitere Sensoren (ENTITY-SENSOR-MIB, viele Switches und Router)
+    let sensor_value = column(&mut s, &with(ENTITY_SENSOR, &[4]), 64).await;
+    if !sensor_value.is_empty() {
+        let sensor_type = column(&mut s, &with(ENTITY_SENSOR, &[1]), 64).await;
+        let sensor_scale = column(&mut s, &with(ENTITY_SENSOR, &[2]), 64).await;
+        let sensor_precision = column(&mut s, &with(ENTITY_SENSOR, &[3]), 64).await;
+        let names = column(&mut s, &with(ENTITY_PHYSICAL, &[7]), 256).await;
+        let sensors: Vec<Value> = sensor_value
+            .iter()
+            .filter_map(|(idx, value)| {
+                let kind = match sensor_type.get(idx).and_then(Val::num)? as i64 {
+                    3 => "Spannung (V)",
+                    4 => "Spannung DC (V)",
+                    5 => "Strom (A)",
+                    6 => "Leistung (W)",
+                    8 => "Temperatur (°C)",
+                    10 => "Lüfter (U/min)",
+                    _ => return None,
+                };
+                // Skalierung (9 = Einheit ohne Vorsatz) und Nachkommastellen
+                let scale = sensor_scale.get(idx).and_then(Val::num).unwrap_or(9.0);
+                let precision = sensor_precision.get(idx).and_then(Val::num).unwrap_or(0.0);
+                let raw = value.num()?;
+                let v = raw * 10f64.powi(((scale - 9.0) * 3.0) as i32) / 10f64.powi(precision as i32);
+                Some(json!({ "name": names.get(idx).and_then(Val::text), "kind": kind, "value": (v * 10.0).round() / 10.0 }))
+            })
+            .collect();
+        if let Some(max_temp) = sensors
+            .iter()
+            .filter(|x| x["kind"] == "Temperatur (°C)")
+            .filter_map(|x| x["value"].as_f64())
+            .reduce(f64::max)
+        {
+            data.insert("temp_c".into(), json!(max_temp));
+        }
+        data.insert("sensors".into(), Value::Array(sensors));
+    }
+
+    // Herstellerprofile: ein GET erkennt, welche Hersteller-MIBs das Gerät kennt
+    let probe = get(
+        &mut s,
+        &[
+            &[1, 3, 6, 1, 4, 1, 41112, 1, 6, 3, 3, 0],      // UniFi: Modell
+            &[1, 3, 6, 1, 4, 1, 14988, 1, 1, 4, 4, 0],      // MikroTik: RouterOS-Version
+            &[1, 3, 6, 1, 4, 1, 318, 1, 1, 1, 1, 1, 1, 0],  // APC: USV-Modell
+            &[1, 3, 6, 1, 4, 1, 12325, 1, 200, 1, 1, 1, 0], // pf-Firewall (pfSense/OPNsense mit bsnmpd)
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let present = |i: usize| probe.get(i).is_some_and(|(_, v)| !matches!(v, Val::Missing));
+
+    if present(0) {
+        data.insert("unifi".into(), unifi(&mut s).await);
+    }
+    if present(1) {
+        data.insert("mikrotik".into(), mikrotik(&mut s, probe[1].1.text()).await);
+    }
+    if present(2) && !data.contains_key("ups") {
+        if let Some(ups) = apc(&mut s).await {
+            data.insert("ups".into(), ups);
+        }
+    }
+    if present(3) {
+        let states = get(&mut s, &[&[1, 3, 6, 1, 4, 1, 12325, 1, 200, 1, 3, 1, 0]]).await.unwrap_or_default();
+        data.insert(
+            "firewall".into(),
+            json!({ "running": probe[3].1.num() == Some(1.0), "states": states.first().and_then(|(_, v)| v.num()) }),
+        );
+    }
+    if data.contains_key("synology") {
+        let extra = synology_storage(&mut s).await;
+        if let Some(obj) = data.get_mut("synology").and_then(Value::as_object_mut) {
+            obj.extend(extra);
+        }
+    }
+
     Ok(Value::Object(data))
+}
+
+const ENTITY_SENSOR: &[u64] = &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1];
+
+/// UniFi-Access-Point (UBNT-UniFi-MIB): WLANs, Clients je WLAN, Funkkanäle, Kanalauslastung
+async fn unifi(s: &mut AsyncSession) -> Value {
+    const SYSTEM: &[u64] = &[1, 3, 6, 1, 4, 1, 41112, 1, 6, 3];
+    const RADIO: &[u64] = &[1, 3, 6, 1, 4, 1, 41112, 1, 6, 1, 1, 1];
+    const VAP: &[u64] = &[1, 3, 6, 1, 4, 1, 41112, 1, 6, 1, 2, 1];
+    let system = get(s, &[&with(SYSTEM, &[3, 0]), &with(SYSTEM, &[6, 0])]).await.unwrap_or_default();
+    let radio_name = column(s, &with(RADIO, &[2]), 16).await;
+    let radio_band = column(s, &with(RADIO, &[3]), 16).await;
+    let cu_total = column(s, &with(RADIO, &[6]), 16).await;
+    let radios: Vec<Value> = radio_name
+        .iter()
+        .map(|(idx, name)| {
+            let band = radio_band.get(idx).and_then(Val::text).unwrap_or_default();
+            let band = match band.as_str() {
+                "ng" => "2,4 GHz".to_string(),
+                "na" => "5 GHz".to_string(),
+                "6e" => "6 GHz".to_string(),
+                other => other.to_string(),
+            };
+            json!({ "name": name.text(), "band": band, "utilization_pct": cu_total.get(idx).and_then(Val::num) })
+        })
+        .collect();
+    let essid = column(s, &with(VAP, &[6]), 64).await;
+    let channel = column(s, &with(VAP, &[4]), 64).await;
+    let stations = column(s, &with(VAP, &[8]), 64).await;
+    let vap_radio = column(s, &with(VAP, &[9]), 64).await;
+    let rx = column(s, &with(VAP, &[10]), 64).await;
+    let tx = column(s, &with(VAP, &[16]), 64).await;
+    let vaps: Vec<Value> = essid
+        .iter()
+        .map(|(idx, name)| {
+            json!({
+                "ssid": name.text(),
+                "channel": channel.get(idx).and_then(Val::num),
+                "radio": vap_radio.get(idx).and_then(Val::text),
+                "clients": stations.get(idx).and_then(Val::num),
+                "rx_bytes": rx.get(idx).and_then(Val::num),
+                "tx_bytes": tx.get(idx).and_then(Val::num),
+            })
+        })
+        .collect();
+    let clients: f64 = vaps.iter().filter_map(|v| v["clients"].as_f64()).sum();
+    json!({
+        "model": system.first().and_then(|(_, v)| v.text()),
+        "version": system.get(1).and_then(|(_, v)| v.text()),
+        "radios": radios,
+        "wlans": vaps,
+        "clients": clients,
+    })
+}
+
+/// MikroTik (MIKROTIK-MIB): Temperatur, Spannung, WLAN-Clients
+async fn mikrotik(s: &mut AsyncSession, version: Option<String>) -> Value {
+    const HEALTH: &[u64] = &[1, 3, 6, 1, 4, 1, 14988, 1, 1, 3];
+    let health = get(s, &[&with(HEALTH, &[8, 0]), &with(HEALTH, &[10, 0]), &with(HEALTH, &[11, 0])])
+        .await
+        .unwrap_or_default();
+    let tenth = |i: usize| health.get(i).and_then(|(_, v)| v.num()).map(|x| x / 10.0);
+    let clients: f64 =
+        column(s, &[1, 3, 6, 1, 4, 1, 14988, 1, 1, 1, 3, 1, 6], 32).await.values().filter_map(Val::num).sum();
+    json!({
+        "version": version,
+        "voltage_v": tenth(0),
+        "temp_c": tenth(1),
+        "cpu_temp_c": tenth(2),
+        "clients": clients,
+    })
+}
+
+/// APC-USV (PowerNet-MIB), falls das Gerät die Standard-UPS-MIB nicht kennt
+async fn apc(s: &mut AsyncSession) -> Option<Value> {
+    const UPS: &[u64] = &[1, 3, 6, 1, 4, 1, 318, 1, 1, 1];
+    let v = get(
+        s,
+        &[
+            &with(UPS, &[1, 1, 1, 0]),
+            &with(UPS, &[2, 2, 1, 0]),
+            &with(UPS, &[2, 2, 3, 0]),
+            &with(UPS, &[4, 1, 1, 0]),
+            &with(UPS, &[4, 2, 3, 0]),
+        ],
+    )
+    .await
+    .ok()?;
+    let at = |i: usize| v.get(i).map(|(_, x)| x.clone()).unwrap_or(Val::Missing);
+    Some(json!({
+        "manufacturer": "APC",
+        "model": at(0).text(),
+        "charge_pct": at(1).num()?,
+        "runtime_min": at(2).num().map(|t| (t / 6000.0).round()),
+        "battery_status": "unbekannt",
+        "on_battery": at(3).num() == Some(3.0),
+        "load_pct": at(4).num(),
+    }))
+}
+
+/// Synology: Festplatten mit Temperatur und Zustand, RAID-Volumes
+async fn synology_storage(s: &mut AsyncSession) -> Map<String, Value> {
+    const DISK: &[u64] = &[1, 3, 6, 1, 4, 1, 6574, 2, 1, 1];
+    const RAID: &[u64] = &[1, 3, 6, 1, 4, 1, 6574, 3, 1, 1];
+    let mut out = Map::new();
+    let disk_id = column(s, &with(DISK, &[2]), 64).await;
+    if !disk_id.is_empty() {
+        let model = column(s, &with(DISK, &[3]), 64).await;
+        let status = column(s, &with(DISK, &[5]), 64).await;
+        let temp = column(s, &with(DISK, &[6]), 64).await;
+        let disks: Vec<Value> = disk_id
+            .iter()
+            .map(|(idx, id)| {
+                let status = match status.get(idx).and_then(Val::num).map(|v| v as i64) {
+                    Some(1) => "normal",
+                    Some(2) => "initialisiert",
+                    Some(3) => "nicht initialisiert",
+                    Some(4) => "Systempartition defekt",
+                    Some(5) => "defekt",
+                    _ => "unbekannt",
+                };
+                json!({ "id": id.text(), "model": model.get(idx).and_then(Val::text), "status": status,
+                        "temp_c": temp.get(idx).and_then(Val::num) })
+            })
+            .collect();
+        out.insert("disks".into(), Value::Array(disks));
+    }
+    let raid_name = column(s, &with(RAID, &[2]), 32).await;
+    if !raid_name.is_empty() {
+        let status = column(s, &with(RAID, &[3]), 32).await;
+        let free = column(s, &with(RAID, &[4]), 32).await;
+        let total = column(s, &with(RAID, &[5]), 32).await;
+        let volumes: Vec<Value> = raid_name
+            .iter()
+            .map(|(idx, name)| {
+                let total = total.get(idx).and_then(Val::num);
+                let free = free.get(idx).and_then(Val::num);
+                let status = match status.get(idx).and_then(Val::num).map(|v| v as i64) {
+                    Some(1) => "normal",
+                    Some(2) => "wird repariert",
+                    Some(3) => "wird migriert",
+                    Some(4) => "wird erweitert",
+                    Some(11) => "beeinträchtigt",
+                    Some(12) => "abgestürzt",
+                    Some(21) => "Datenbereinigung",
+                    _ => "unbekannt",
+                };
+                let used = total.zip(free).map(|(t, f)| t - f);
+                let pct = total.zip(free).filter(|(t, _)| *t > 0.0).map(|(t, f)| ((t - f) / t * 1000.0).round() / 10.0);
+                json!({ "name": name.text(), "status": status, "total_bytes": total, "used_bytes": used, "pct": pct })
+            })
+            .collect();
+        out.insert("volumes".into(), Value::Array(volumes));
+    }
+    out
 }

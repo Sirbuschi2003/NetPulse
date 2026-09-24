@@ -19,9 +19,9 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.3.0#i-${name}"/></svg>`;
 
-const state = { user: null, refreshTimer: null, globalTimer: null, summary: null };
+const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch('/api' + path, {
@@ -169,7 +169,7 @@ const statusBadge = (d) =>
     : `<span class="badge st-${esc(d.status)}"><span class="dot ${esc(d.status)}"></span>${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
 const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel' };
 const eventBadge = (kind) => `<span class="badge ev-${esc(kind)}">${esc(EVENT_LABEL[kind] || kind)}</span>`;
-const deviceLabel = (d) => d.name || d.hostname || d.ip;
+const deviceLabel = (d) => d.name || d.reported_name || d.hostname || d.ip;
 
 const PORT_NAMES = {
   21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS', 80: 'HTTP', 110: 'POP3', 139: 'NetBIOS',
@@ -250,11 +250,102 @@ function availability(points) {
 }
 
 // ---------------------------------------------------------------------------
+// Live-Daten mit Animation
+// ---------------------------------------------------------------------------
+
+/**
+ * Fragt alle 2 s die Live-Datenraten eines Geräts ab und merkt sich pro Schnittstelle
+ * die letzten 60 Werte. `onData(data, history)` wird bei jedem Ergebnis aufgerufen.
+ * Liefert eine Stopp-Funktion; beim Seitenwechsel werden alle Abfragen automatisch beendet.
+ */
+function startLive(deviceId, onData, onError, history = {}) {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    try {
+      const data = await api(`/devices/${deviceId}/live`);
+      if (stopped) return;
+      data.interfaces.forEach((i) => {
+        const h = (history[i.name] ||= []);
+        if (i.rx_bps != null || i.tx_bps != null) {
+          h.push({ rx: i.rx_bps || 0, tx: i.tx_bps || 0 });
+          if (h.length > 60) h.shift();
+        }
+      });
+      onData(data, history);
+      timer = setTimeout(tick, data.warming_up ? 1600 : 2000);
+    } catch (e) {
+      if (stopped) return;
+      if (onError) onError(e);
+      timer = setTimeout(tick, 10000);
+    }
+  };
+  tick();
+  const stop = () => { stopped = true; clearTimeout(timer); };
+  state.liveStops.push(stop);
+  return stop;
+}
+
+/** Zahl weich zum neuen Wert hochzählen lassen */
+function tweenNumber(el, target, format) {
+  if (!el) return;
+  const from = Number(el.dataset.value || 0);
+  const to = target ?? 0;
+  el.dataset.value = to;
+  const start = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / 700);
+    const eased = 1 - (1 - t) ** 3;
+    el.textContent = target == null ? '–' : format(from + (to - from) * eased);
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+/** Fließlinie: je höher die Datenrate, desto schneller wandern die Striche */
+function flowLine(cls = '') {
+  return `<svg class="flow ${cls}" viewBox="0 0 200 12" preserveAspectRatio="none" aria-hidden="true">
+    <path class="flow-track" d="M2 6H198"/><path class="flow-dash" d="M2 6H198"/></svg>`;
+}
+function setFlow(svg, bps) {
+  if (!svg) return;
+  const dash = svg.querySelector('.flow-dash');
+  if (!bps || bps < 1000) {
+    dash.style.animationPlayState = 'paused';
+    svg.classList.add('idle');
+    return;
+  }
+  svg.classList.remove('idle');
+  dash.style.animationPlayState = 'running';
+  // 1 kbit/s → 4 s pro Durchlauf, 1 Gbit/s → 0,35 s
+  const seconds = Math.max(0.35, Math.min(4, 4 - Math.log10(bps / 1000) * 0.6));
+  dash.style.animationDuration = `${seconds.toFixed(2)}s`;
+}
+
+/** Mini-Verlauf der letzten 60 Werte (Empfang und Senden) */
+function sparkline(points, height = 44) {
+  if (!points || points.length < 3) return `<svg class="spark" viewBox="0 0 240 ${height}"></svg>`;
+  const W = 240;
+  const max = Math.max(1, ...points.map((p) => Math.max(p.rx, p.tx))) * 1.1;
+  const x = (i) => (i / 59) * W;
+  const y = (v) => height - 2 - (v / max) * (height - 4);
+  const offset = 60 - points.length;
+  const line = (key) => points.map((p, i) => `${i ? 'L' : 'M'}${x(i + offset).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
+  const area = `${line('rx')} L${x(59).toFixed(1)},${height} L${x(offset).toFixed(1)},${height} Z`;
+  return `<svg class="spark" viewBox="0 0 ${W} ${height}" preserveAspectRatio="none">
+    <path class="spark-area c0" d="${area}"/><path class="line c0" d="${line('rx')}"/><path class="line c1" d="${line('tx')}"/></svg>`;
+}
+
+const linkLabel = (mbps) => (mbps ? (mbps >= 1000 ? `${mbps / 1000} Gbit/s` : `${Math.round(mbps)} Mbit/s`) : '');
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
 const WIDGETS = {
   summary: { title: 'Übersicht', icon: 'gauge', render: wSummary },
+  internet: { title: 'Internet', icon: 'world-www', render: wInternet },
+  power: { title: 'Stromverbrauch', icon: 'bolt', render: wPower },
   alerts: { title: 'Offene Alarme', icon: 'bell', render: wAlerts },
   down: { title: 'Nicht erreichbar', icon: 'alert-triangle', render: wDown },
   types: { title: 'Gerätetypen', icon: 'category', render: wTypes },
@@ -280,6 +371,61 @@ function wSummary({ summary }) {
     ${kpi('Offene Alarme', summary.open_alerts, 'bell', summary.open_alerts ? 'tone-warn' : 'tone-muted', '#/alerts')}
     ${kpi('Neu (24 h)', s.new_24h, 'radar', 'tone-info', '#/devices?status=new')}
   </div>`;
+}
+
+/** Internet-Anschluss live: Download/Upload mit Fließanimation (Daten kommen per startLive) */
+function wInternet({ summary }, widget) {
+  const wan = (summary.wan_devices || []).find((w) => w.id === widget.device_id) || (summary.wan_devices || [])[0];
+  if (!wan) {
+    return empty('Noch kein Internet-Anschluss erkannt. Dem Router bzw. der Firewall (z. B. OPNsense) SNMP-Zugangsdaten '
+      + 'zuordnen – die WAN-Schnittstelle wird dann automatisch erkannt oder lässt sich beim Gerät markieren.', 'world-www');
+  }
+  return `<div class="inet" data-live-wan="${wan.id}" data-iface="${esc(wan.interface)}">
+    <div class="inet-path">
+      <span class="inet-node">${icon('cloud')}<small>Internet</small></span>
+      <div class="inet-flows">${flowLine('down')}${flowLine('up c1')}</div>
+      <a class="inet-node" href="#/device/${wan.id}">${devIcon({ device_type: wan.device_type }, 'sm')}<small class="ellipsis">${esc(wan.label)}</small></a>
+    </div>
+    <div class="inet-values">
+      <div><span class="inet-dir">${icon('arrow-down', 'i-sm')} Download</span><strong data-rx>–</strong></div>
+      <div><span class="inet-dir up">${icon('arrow-up', 'i-sm')} Upload</span><strong data-tx>–</strong></div>
+    </div>
+    <div data-spark>${sparkline([])}</div>
+    <p class="muted small" data-meta>Schnittstelle ${esc(wan.interface)} · verbinde …</p>
+  </div>`;
+}
+
+const fmtWatt = (w) => (w == null ? '–' : w >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${Math.round(w)} W`);
+
+/** Aktuelle Leistung aller Geräte mit Strommessung (z. B. Shelly) */
+function wPower({ summary }) {
+  const list = [...(summary.power || [])].sort((a, b) => b.power_w - a.power_w);
+  if (!list.length) return empty('Keine Geräte mit Strommessung. Shelly-Steckdosen und -Zähler werden automatisch erkannt.', 'bolt');
+  const total = list.reduce((sum, p) => sum + p.power_w, 0);
+  const max = list[0].power_w || 1;
+  return `<div class="inet-values"><div><span class="inet-dir">${icon('bolt', 'i-sm')} Gesamt</span><strong>${esc(fmtWatt(total))}</strong></div></div>
+    <div class="bars">${list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${esc(p.label)}</a>
+      <span class="bar" data-w="${pct(p.power_w, max)}"></span><span class="muted">${esc(fmtWatt(p.power_w))}</span>`).join('')}</div>`;
+}
+
+/** Live-Aktualisierung aller Internet-Widgets auf der Seite */
+function mountInternetWidgets(root, histories) {
+  $$('[data-live-wan]', root).forEach((el) => {
+    const id = Number(el.dataset.liveWan);
+    const iface = el.dataset.iface;
+    histories[id] ||= {};
+    const [down, up] = $$('svg.flow', el);
+    startLive(id, (data, history) => {
+      const i = data.interfaces.find((x) => x.name === iface);
+      if (!i) { $('[data-meta]', el).textContent = `Schnittstelle ${iface} nicht gefunden`; return; }
+      tweenNumber($('[data-rx]', el), i.rx_bps, fmtBps);
+      tweenNumber($('[data-tx]', el), i.tx_bps, fmtBps);
+      setFlow(down, i.rx_bps);
+      setFlow(up, i.tx_bps);
+      $('[data-spark]', el).innerHTML = sparkline(history[iface]);
+      $('[data-meta]', el).textContent = `Schnittstelle ${iface}${i.speed_mbps ? ` · ${linkLabel(i.speed_mbps)}` : ''} · live per ${data.source}`;
+    }, (e) => { $('[data-meta]', el).textContent = e.message; }, histories[id]);
+  });
 }
 
 function deviceRow(d, meta) {
@@ -386,6 +532,7 @@ async function viewDashboard() {
   let layout = await api('/dashboard');
   let ctx = null;
   let editing = false;
+  const liveHistories = {};
 
   const load = async () => {
     const [summary, devices, events, alerts] = await Promise.all([
@@ -428,6 +575,10 @@ async function viewDashboard() {
       <div class="grid${editing ? ' editing' : ''}">${cards.join('') || empty('Keine Widgets – über „Anpassen“ hinzufügen.', 'layout-grid')}</div>`;
     applyWidths(view());
     bindEditing();
+    // Live-Widgets neu starten (die alten Abfragen gehören zu den ersetzten Elementen)
+    state.liveStops.forEach((stop) => stop());
+    state.liveStops = [];
+    mountInternetWidgets(view(), liveHistories);
   };
 
   const move = (from, to) => {
@@ -486,6 +637,8 @@ function showLogin() {
   state.user = null;
   clearInterval(state.refreshTimer);
   clearInterval(state.globalTimer);
+  state.liveStops.forEach((stop) => stop());
+  state.liveStops = [];
   $('#app').hidden = true;
   $('#login-view').innerHTML = `
     <div class="login-wrap"><form class="card login" id="login-form">
@@ -530,6 +683,8 @@ function autoRefresh(fn, seconds = 30) {
 async function route() {
   if (!state.user) return;
   clearInterval(state.refreshTimer);
+  state.liveStops.forEach((stop) => stop());
+  state.liveStops = [];
   $('#sidebar').classList.remove('open');
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
   const [name, arg] = path.split('/');

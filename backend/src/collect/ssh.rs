@@ -62,6 +62,30 @@ impl client::Handler for Client {
 }
 
 pub async fn collect(ip: Ipv4Addr, cred: &Credential, expected_host_key: Option<&str>) -> Result<SshResult, SshError> {
+    let (session, host_key) = connect(ip, cred, expected_host_key).await?;
+    let data = run_collection(&session).await;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "de").await;
+    Ok(SshResult { data: data?, host_key })
+}
+
+/// Einzelnen lesenden Befehl ausführen (für die Live-Ansicht)
+pub async fn run_command(
+    ip: Ipv4Addr,
+    cred: &Credential,
+    expected_host_key: Option<&str>,
+    command: &str,
+) -> Result<String, SshError> {
+    let (session, _) = connect(ip, cred, expected_host_key).await?;
+    let result = exec(&session, command, None).await;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "de").await;
+    Ok(result?.1)
+}
+
+async fn connect(
+    ip: Ipv4Addr,
+    cred: &Credential,
+    expected_host_key: Option<&str>,
+) -> Result<(Handle<Client>, String), SshError> {
     let port = cred.port.and_then(|p| u16::try_from(p).ok()).unwrap_or(22);
     let seen = Arc::new(Mutex::new(None));
     let handler = Client { expected: expected_host_key.map(str::to_string), seen: seen.clone() };
@@ -85,11 +109,8 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential, expected_host_key: Option<
         Err(_) => return Err(SshError::Failed(format!("Keine Antwort auf Port {port}"))),
     };
     let host_key = seen.lock().unwrap().clone().unwrap_or_default();
-
     authenticate(&mut session, cred).await?;
-    let data = run_collection(&session).await;
-    let _ = session.disconnect(Disconnect::ByApplication, "", "de").await;
-    Ok(SshResult { data: data?, host_key })
+    Ok((session, host_key))
 }
 
 async fn authenticate(session: &mut Handle<Client>, cred: &Credential) -> Result<()> {
@@ -187,6 +208,7 @@ for i in /sys/class/net/*; do
   echo "if=$n|$(cat $i/operstate 2>/dev/null)|$(cat $i/speed 2>/dev/null)|$(cat $i/address 2>/dev/null)|$(cat $i/statistics/rx_bytes 2>/dev/null)|$(cat $i/statistics/tx_bytes 2>/dev/null)"
 done 2>/dev/null
 command -v ip >/dev/null 2>&1 && ip -o -4 addr show 2>/dev/null | awk '{print "ip="$2"|"$4}'
+command -v ip >/dev/null 2>&1 && echo "default_if=$(ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit }}')"
 command -v systemctl >/dev/null 2>&1 && echo "failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)"
 command -v docker >/dev/null 2>&1 && docker ps -q >/dev/null 2>&1 && echo "containers=$(docker ps -q | wc -l)"
 [ -f /var/run/reboot-required ] && echo "reboot_required=1"
@@ -249,6 +271,7 @@ fn parse_posix(output: &str, uname: &str) -> Value {
     for key in ["hostname", "os", "kernel", "arch", "cpu_model", "proxmox", "synology"] {
         data.insert(key.into(), json!(get(key)));
     }
+    data.insert("default_route_if".into(), json!(get("default_if")));
     data.insert("uptime_s".into(), json!(num("uptime_s")));
     data.insert("cpu_cores".into(), json!(num("cpu_cores")));
     data.insert(
