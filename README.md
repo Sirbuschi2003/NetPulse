@@ -46,6 +46,11 @@ GitHub baut bei jeder Änderung fertige Images für Intel/AMD und Raspberry Pi
 **Updates:** Stack öffnen → **Pull and redeploy** und dabei *Re-pull image* aktivieren.
 Wer es automatisch mag, schaltet im Stack **GitOps updates** ein.
 
+**Port belegt?** („Address already in use“ im Log): NetPulse nutzt das Netzwerk des Hosts direkt.
+Ist ein Port schon vergeben, einfach eine zusätzliche Variable setzen:
+`APP_PORT` (Standard 18080), `DB_PORT` (Standard 5433) oder für die Weboberfläche
+einen anderen Port in `SITE_ADDRESS`.
+
 **Stammzertifikat für den Browser** (gegen die Zertifikatswarnung): In Portainer den Container
 `netpulse-proxy` öffnen → **Console** → *Connect* → `cat /data/caddy/pki/authorities/local/root.crt`
 eingeben, die Ausgabe in eine Datei `netpulse-root.crt` kopieren und wie unten beschrieben importieren.
@@ -143,7 +148,7 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 | `RETENTION_METRICS_DAYS` | 90 | Aufbewahrung der Messwerte |
 | `RETENTION_EVENTS_DAYS` | 180 | Aufbewahrung der Ereignisse |
 | `RETENTION_AUDIT_DAYS` | 365 | Aufbewahrung des Audit-Logs |
-| `DB_PORT` / `APP_PORT` | 5433 / 8080 | Interne Ports auf dem Host (nur 127.0.0.1) |
+| `DB_PORT` / `APP_PORT` | 5433 / 18080 | Interne Ports auf dem Host (nur 127.0.0.1) |
 
 ## Sicherheit auf einen Blick
 

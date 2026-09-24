@@ -44,7 +44,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://netpulse:${DB_PASSWORD}@127.0.0.1:${DB_PORT:-5433}/netpulse
-      LISTEN_ADDR: 127.0.0.1:${APP_PORT:-8080}
+      LISTEN_ADDR: 127.0.0.1:${APP_PORT:-18080}
       SCAN_NETWORKS: ${SCAN_NETWORKS:-}
       INITIAL_ADMIN_USER: ${INITIAL_ADMIN_USER:-admin}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
@@ -67,7 +67,7 @@ services:
     depends_on: [app]
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-https://localhost:8443}
-      UPSTREAM: 127.0.0.1:${APP_PORT:-8080}
+      UPSTREAM: 127.0.0.1:${APP_PORT:-18080}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

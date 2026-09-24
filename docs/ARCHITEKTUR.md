@@ -5,7 +5,7 @@
 ```
                 ┌──────────────────── Docker-Host (NAS / Raspberry Pi), network_mode: host ─────────────────────┐
                 │                                                                                              │
- Browser ──HTTPS──►  Caddy :8443  ──HTTP──►  NetPulse (Rust)  127.0.0.1:8080                                     │
+ Browser ──HTTPS──►  Caddy :8443  ──HTTP──►  NetPulse (Rust)  127.0.0.1:18080                                    │
                 │    TLS, CSP, HSTS          ├─ REST-API + Weboberfläche (axum)                                │
                 │                            ├─ Discovery-Task   (alle 15 min + „Jetzt scannen“)               │
                 │                            ├─ Monitor-Task     (jede Minute)                                 │

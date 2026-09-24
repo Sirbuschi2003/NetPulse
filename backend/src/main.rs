@@ -67,7 +67,13 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
-        .with_context(|| format!("Kann {} nicht öffnen", config.listen_addr))?;
+        .with_context(|| {
+            format!(
+                "Kann {} nicht öffnen – ist der Port schon von einem anderen Dienst belegt? \
+                 Dann in der Konfiguration APP_PORT auf einen freien Port setzen.",
+                config.listen_addr
+            )
+        })?;
     tracing::info!("NetPulse läuft auf http://{}", config.listen_addr);
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())
