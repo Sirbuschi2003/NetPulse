@@ -28,6 +28,13 @@ pub struct Config {
     pub inventory_interval: Duration,
     /// Öffentliche Adresse der Oberfläche – für Links in Benachrichtigungen
     pub public_url: Option<String>,
+    /// Syslog-Empfang (UDP), 0 = aus
+    pub syslog_port: u16,
+    /// SNMP-Trap-Empfang (UDP), 0 = aus
+    pub trap_port: u16,
+    /// Erlaubte Trap-Communities (leer = alle)
+    pub trap_communities: Vec<String>,
+    pub syslog_retention_days: i32,
 }
 
 impl Config {
@@ -54,6 +61,12 @@ impl Config {
             public_url: optional("PUBLIC_URL")
                 .or_else(|| optional("SITE_ADDRESS"))
                 .map(|u| u.trim_end_matches('/').to_string()),
+            syslog_port: number("SYSLOG_PORT", 5514)?,
+            trap_port: number("TRAP_PORT", 1162)?,
+            trap_communities: optional("TRAP_COMMUNITY")
+                .map(|s| s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
+                .unwrap_or_default(),
+            syslog_retention_days: number("RETENTION_SYSLOG_DAYS", 30)?,
         })
     }
 }

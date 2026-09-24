@@ -27,6 +27,7 @@ mod oui;
 mod perf;
 mod push;
 mod scanner;
+mod syslog;
 mod totp;
 mod vault;
 
@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
     tokio::spawn(alerts::run(state.clone()));
     tokio::spawn(alerts::deliver::run(state.clone()));
     tokio::spawn(checks::run(state.clone()));
+    syslog::start(&state);
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));
 
@@ -182,6 +184,13 @@ async fn apply_retention(db: &PgPool, config: &Config) -> Result<()> {
         .await?;
     sqlx::query("SELECT add_retention_policy('check_results', make_interval(days => $1))")
         .bind(config.metrics_retention_days)
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT remove_retention_policy('syslog_messages', if_exists => true)")
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT add_retention_policy('syslog_messages', make_interval(days => $1))")
+        .bind(config.syslog_retention_days)
         .execute(db)
         .await?;
     sqlx::query("SELECT remove_retention_policy('device_stats', if_exists => true)")

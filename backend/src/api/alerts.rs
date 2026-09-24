@@ -20,6 +20,7 @@ use crate::{
 const CHANNEL_KINDS: &[&str] = &["email", "ntfy", "gotify", "telegram", "discord", "teams", "webhook", "app"];
 const RULE_KINDS: &[&str] = &[
     "device_down", "new_device", "mac_changed", "disk_usage", "cpu_usage", "mem_usage", "temperature", "check_down", "cert_expiry",
+    "syslog_match",
 ];
 const MASK: &str = "••••••";
 
@@ -246,11 +247,12 @@ pub struct RuleRow {
     repeat_min: i32,
     check_id: Option<i64>,
     check_label: Option<String>,
+    pattern: Option<String>,
 }
 
 const RULE_SELECT: &str = "SELECT r.id, r.name, r.kind, r.device_id, COALESCE(d.name, d.hostname, host(d.ip)) AS device_label,
                                   r.threshold, r.duration_min, r.channel_ids, r.notify_recovery, r.enabled, r.repeat_min,
-                                  r.check_id, c.name AS check_label
+                                  r.check_id, c.name AS check_label, r.pattern
                              FROM alert_rules r LEFT JOIN devices d ON d.id = r.device_id LEFT JOIN checks c ON c.id = r.check_id";
 
 pub async fn list_rules(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<RuleRow>>> {
@@ -272,6 +274,8 @@ pub struct RuleInput {
     repeat_min: Option<i32>,
     /// Nur für Check-Regeln: bestimmter Check (leer = alle)
     check_id: Option<i64>,
+    /// Nur für Protokoll-Regeln: Suchtext
+    pattern: Option<String>,
 }
 
 pub async fn create_rule(
@@ -289,8 +293,8 @@ pub async fn create_rule(
     }
     let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(kind);
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled, repeat_min, check_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled, repeat_min, check_id, pattern)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
     )
     .bind(name)
     .bind(kind)
@@ -302,6 +306,7 @@ pub async fn create_rule(
     .bind(req.enabled.unwrap_or(true))
     .bind(req.repeat_min.unwrap_or(0).clamp(0, 10_080))
     .bind(req.check_id)
+    .bind(req.pattern.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| p.chars().take(200).collect::<String>()))
     .fetch_one(&st.db)
     .await?;
     audit::by(&st.db, &user, "rule_add", json!({ "id": id, "rule": req })).await;
@@ -325,7 +330,8 @@ pub async fn update_rule(
             notify_recovery = COALESCE($7, notify_recovery),
             enabled = COALESCE($8, enabled),
             repeat_min = COALESCE($9, repeat_min),
-            check_id = $10
+            check_id = $10,
+            pattern = CASE WHEN $11::text IS NULL THEN pattern ELSE NULLIF(trim($11), '') END
           WHERE id = $1",
     )
     .bind(id)
@@ -338,6 +344,7 @@ pub async fn update_rule(
     .bind(req.enabled)
     .bind(req.repeat_min.map(|r| r.clamp(0, 10_080)))
     .bind(req.check_id)
+    .bind(req.pattern.as_deref().map(|p| p.chars().take(200).collect::<String>()))
     .execute(&st.db)
     .await?;
     if updated.rows_affected() == 0 {

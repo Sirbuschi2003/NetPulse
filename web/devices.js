@@ -145,6 +145,7 @@ async function viewDevice(id) {
     list.push(['events', 'Ereignisse']);
     if (isAdmin() && inv.snmp) list.push(['explorer', 'SNMP-Explorer']);
     list.push(['diagnose', 'Diagnose']);
+    if (isAdmin()) list.push(['syslog', 'Protokoll']);
     if (isAdmin()) list.push(['settings', 'Einstellungen']);
     return list;
   };
@@ -176,12 +177,20 @@ async function viewDevice(id) {
       setTimeout(reload, 8000);
     }, 'Abfrage gestartet – Ergebnisse erscheinen in wenigen Sekunden'));
     const body = $('#tab-body');
-    const renderers = { overview: tabOverview, live: isShelly() ? tabShellyLive : tabLive, diagnose: tabDiagnose, system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
+    const renderers = { overview: tabOverview, live: isShelly() ? tabShellyLive : tabLive, diagnose: tabDiagnose, syslog: () => '<div id="dev-syslog"><div class="empty">Lade …</div></div>', system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
     body.innerHTML = (renderers[tab] || tabOverview)();
     applyWidths(body);
     if (tab === 'settings') bindSettings();
     if (tab === 'live') { if (isShelly()) bindShellyLive(); else bindLive(); }
     if (tab === 'diagnose') bindDiagnose();
+    if (tab === 'syslog') {
+      api(`/remote-logs?device=${id}&hours=168&limit=300`).then((r) => {
+        $('#dev-syslog').innerHTML = r.items.length
+          ? `<div class="table-wrap"><table class="log-table"><thead><tr><th>Zeit</th><th>Stufe</th><th>Programm</th><th>Meldung</th></tr></thead>
+             <tbody>${logRows(r.items, false)}</tbody></table></div><p class="muted small"><a href="#/syslog?device=${id}">Alle Meldungen mit Filter</a></p>`
+          : empty(`Keine Syslog-Meldungen oder Traps von diesem Gerät in den letzten 7 Tagen. Gerät so einrichten, dass es an NetPulse sendet (UDP ${r.syslog_port}, Traps ${r.trap_port}).`, 'file-text');
+      }).catch((e) => { $('#dev-syslog').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
+    }
     if (tab === 'interfaces') bindInterfaces();
     if (tab === 'explorer') bindExplorer();
     $('#range')?.addEventListener('change', (ev) => { hours = Number(ev.target.value); reload(); });
@@ -190,7 +199,7 @@ async function viewDevice(id) {
 
   const reload = async () => {
     data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
-    if (!['settings', 'live', 'explorer', 'diagnose'].includes(tab)) render();
+    if (!['settings', 'live', 'explorer', 'diagnose', 'syslog'].includes(tab)) render();
   };
 
   /** Schnittstelle als Internet-Anschluss markieren (leer = automatisch erkennen) */

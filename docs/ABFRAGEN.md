@@ -140,6 +140,23 @@ Ports: UniFi OS Server **11443**, UniFi-OS-Konsolen **443**, ältere Network App
 NetPulse alle drei. Der Controller nutzt meist ein selbst signiertes Zertifikat; NetPulse prüft es deshalb nicht.
 Die Zugangsdaten werden nie automatisch ausprobiert, sondern nur an das fest zugeordnete Gerät gesendet.
 
+## Protokolle: Syslog und SNMP-Traps
+
+NetPulse nimmt Protokollmeldungen per **Syslog (UDP 5514)** und **SNMP-Traps (UDP 1162, v1/v2c)** an.
+Als Ziel die IP-Adresse des NetPulse-Hosts eintragen:
+
+- **OPNsense:** System → Einstellungen → Protokollierung → Remote → „+“: Transport UDP(4), Anwendungen nach Wunsch
+  (z. B. „filter“, „audit“, „system“), Hostname = NetPulse-IP, Port 5514.
+- **UniFi:** Einstellungen → Control Plane → Integrations bzw. System → „Remote Syslog Server“ (Port 5514).
+- **Synology:** Protokoll-Center → Protokolle senden → Server = NetPulse-IP, Port 5514, UDP, Format BSD.
+- **Linux (rsyslog):** `/etc/rsyslog.d/90-netpulse.conf` mit `*.warning @NETPULSE-IP:5514`.
+- **Switches/Drucker/USV:** SNMP-Trap-Ziel = NetPulse-IP, Port 1162, Community wie eingestellt
+  (mit `TRAP_COMMUNITY` lässt sich die Annahme auf bestimmte Communities beschränken).
+
+Die Meldungen erscheinen unter **Protokolle** und beim Gerät im Tab **„Protokoll“** (Zuordnung über die Absender-IP).
+Mit der Alarmregel **„Protokollmeldung“** gibt es Benachrichtigungen, z. B. bei „Failed password“ oder „linkDown“.
+Die Standardports 514/162 würden Root-Rechte im Container erfordern; deshalb 5514/1162.
+
 ## Gerätenamen
 
 NetPulse fragt jeden gefundenen Gerätenamen aus mehreren Quellen ab (der erste Treffer zählt):

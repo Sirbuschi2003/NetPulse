@@ -565,3 +565,13 @@ body.status-page { background: var(--bg); color: var(--text); }
 .beats.days i { flex: 1; width: auto; }
 .beats i.warn { background: var(--warn); }
 .status-foot { text-align: center; margin-top: 18px; }
+
+/* ---------- Protokolle ---------- */
+.log-table td { vertical-align: top; }
+.log-table .log-msg { white-space: pre-wrap; word-break: break-word; min-width: 280px; }
+.nowrap { white-space: nowrap; }
+.badge.sev-error { background: var(--down-soft); color: var(--down); }
+.badge.sev-info { background: var(--surface-3); color: var(--text-2); }
+tr.sev-row-bad td:first-child { box-shadow: inset 3px 0 0 var(--down); }
+tr.sev-row-warn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.badge.sev-warn { background: var(--warn-soft); color: var(--warn); }

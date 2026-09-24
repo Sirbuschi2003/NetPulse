@@ -479,3 +479,65 @@ pub async fn delete_maintenance(State(st): State<AppState>, AdminUser(user): Adm
     audit::by(&st.db, &user, "maintenance_delete", json!({ "id": id, "name": name })).await;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ---------------------------------------------------------------------------
+// Empfangene Protokolle (Syslog, SNMP-Traps)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RemoteLogQuery {
+    device: Option<i64>,
+    /// höchste Schwere (0 = Notfall … 7 = Debug)
+    severity: Option<i16>,
+    q: Option<String>,
+    /// `syslog` oder `trap`
+    source: Option<String>,
+    hours: Option<i32>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize, FromRow)]
+pub struct RemoteLog {
+    time: DateTime<Utc>,
+    device_id: Option<i64>,
+    device_label: Option<String>,
+    source: String,
+    facility: i16,
+    severity: i16,
+    host: Option<String>,
+    app: Option<String>,
+    message: String,
+}
+
+pub async fn remote_logs(State(st): State<AppState>, _admin: AdminUser, Query(q): Query<RemoteLogQuery>) -> ApiResult<Json<Value>> {
+    let text = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty())
+        .map(|t| format!("%{}%", t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    let rows = sqlx::query_as::<_, RemoteLog>(
+        "SELECT m.time, m.device_id, COALESCE(d.name, d.reported_name, d.hostname) AS device_label, host(m.source) AS source,
+                m.facility, m.severity, m.host, m.app, m.message
+           FROM syslog_messages m LEFT JOIN devices d ON d.id = m.device_id
+          WHERE m.time > now() - make_interval(hours => $1)
+            AND ($2::bigint IS NULL OR m.device_id = $2)
+            AND m.severity <= $3
+            AND ($4::text IS NULL OR m.message ILIKE $4 OR m.app ILIKE $4 OR m.host ILIKE $4)
+            AND ($5::text IS NULL OR ($5 = 'trap') = (m.app = 'snmp-trap'))
+          ORDER BY m.time DESC LIMIT $6",
+    )
+    .bind(q.hours.unwrap_or(24).clamp(1, 24 * 90))
+    .bind(q.device)
+    .bind(q.severity.unwrap_or(7))
+    .bind(&text)
+    .bind(q.source.as_deref().filter(|s| *s == "syslog" || *s == "trap"))
+    .bind(q.limit.unwrap_or(500).clamp(1, 5000))
+    .fetch_all(&st.db)
+    .await?;
+    let (last_hour,): (i64,) = sqlx::query_as("SELECT count(*) FROM syslog_messages WHERE time > now() - interval '1 hour'")
+        .fetch_one(&st.db)
+        .await?;
+    Ok(Json(json!({
+        "items": rows,
+        "last_hour": last_hour,
+        "syslog_port": st.config.syslog_port,
+        "trap_port": st.config.trap_port,
+    })))
+}

@@ -39,6 +39,11 @@ services:
       DISCOVERY_INTERVAL_MIN: ${DISCOVERY_INTERVAL_MIN:-15}
       # Zeitzone für den Such-Zeitplan (z. B. „täglich 03:00“)
       TZ: ${TZ:-Europe/Berlin}
+      # Empfang von Syslog-Meldungen und SNMP-Traps (UDP; 0 = aus)
+      SYSLOG_PORT: ${SYSLOG_PORT:-5514}
+      TRAP_PORT: ${TRAP_PORT:-1162}
+      TRAP_COMMUNITY: ${TRAP_COMMUNITY:-}
+      RETENTION_SYSLOG_DAYS: ${RETENTION_SYSLOG_DAYS:-30}
       MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-60}
       PUBLIC_URL: https://localhost:8443
       RUST_LOG: ${RUST_LOG:-info}

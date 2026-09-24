@@ -995,6 +995,7 @@ const ROUTES = {
   events: { title: 'Ereignisse', view: () => viewEvents() },
   checks: { title: 'Dienste', view: () => viewChecks() },
   map: { title: 'Netzwerkkarte', view: () => viewMap() },
+  syslog: { title: 'Protokolle', view: (a, p) => viewSyslog(a, p), admin: true },
   statuspage: { title: 'Statusseite', view: () => viewStatusPage(), admin: true },
   networks: { title: 'Netzwerke', view: () => viewNetworks(), admin: true },
   credentials: { title: 'Zugangsdaten', view: () => viewCredentials(), admin: true },

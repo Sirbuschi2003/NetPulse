@@ -89,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .route("/audit", get(admin::audit_log))
         .route("/logs", get(admin::system_log))
         .route("/system", get(admin::system))
+        .route("/remote-logs", get(admin::remote_logs))
         .route("/maintenance", get(admin::list_maintenance).post(admin::create_maintenance))
         .route("/maintenance/{id}", axum::routing::patch(admin::update_maintenance).delete(admin::delete_maintenance))
         .layer(middleware::from_fn(auth::csrf_guard));

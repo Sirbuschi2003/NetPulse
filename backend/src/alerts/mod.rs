@@ -32,6 +32,7 @@ pub(crate) struct Rule {
     pub notify_recovery: bool,
     pub repeat_min: i32,
     pub check_id: Option<i64>,
+    pub pattern: Option<String>,
 }
 
 pub async fn run(state: AppState) {
@@ -55,7 +56,7 @@ pub async fn run(state: AppState) {
 async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
     let _perf = crate::perf::Timer::new("Alarmprüfung");
     let rules: Vec<Rule> = sqlx::query_as(
-        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, repeat_min, check_id
+        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, repeat_min, check_id, pattern
            FROM alert_rules WHERE enabled",
     )
     .fetch_all(&state.db)
@@ -68,6 +69,7 @@ async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
             "disk_usage" | "cpu_usage" | "mem_usage" | "temperature" => threshold(state, rule).await,
             "check_down" => check_down(state, rule).await,
             "cert_expiry" => cert_expiry(state, rule).await,
+            "syslog_match" => syslog_match(state, rule).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -367,6 +369,61 @@ async fn open_check_alert(state: &AppState, rule: &Rule, check_id: i64, device_i
     .await?;
     let _ = device_id;
     Ok(inserted.is_some())
+}
+
+/// Bis wann Protokollmeldungen je Regel schon geprüft wurden (beim Start: ab jetzt)
+fn syslog_cursor() -> &'static std::sync::Mutex<std::collections::HashMap<i64, chrono::DateTime<chrono::Utc>>> {
+    static CURSOR: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, chrono::DateTime<chrono::Utc>>>> =
+        std::sync::OnceLock::new();
+    CURSOR.get_or_init(Default::default)
+}
+
+/// Neue Syslog-/Trap-Meldungen, die zur Regel passen (Suchtext, höchstens Schwere X) – eine Nachricht je Gerät
+async fn syslog_match(state: &AppState, rule: &Rule) -> Result<()> {
+    let now = chrono::Utc::now();
+    let since = *syslog_cursor().lock().unwrap().entry(rule.id).or_insert(now);
+    let pattern = rule.pattern.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| {
+        // Platzhalter von ILIKE entschärfen
+        format!("%{}%", p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+    });
+    let max_severity = rule.threshold.map_or(7, |t| t as i16);
+    type Hit = (Option<i64>, String, i64, String, i16, chrono::DateTime<chrono::Utc>);
+    let hits: Vec<Hit> = sqlx::query_as(
+        "SELECT m.device_id, COALESCE(d.name, d.reported_name, d.hostname, host(m.source)) || ' (' || host(m.source) || ')',
+                count(*), (array_agg(m.message ORDER BY m.time DESC))[1], min(m.severity), max(m.time)
+           FROM syslog_messages m LEFT JOIN devices d ON d.id = m.device_id
+          WHERE m.time > $1 AND m.severity <= $2
+            AND ($3::text IS NULL OR m.message ILIKE $3 OR m.app ILIKE $3)
+            AND ($4::bigint IS NULL OR m.device_id = $4)
+          GROUP BY m.device_id, d.name, d.reported_name, d.hostname, m.source",
+    )
+    .bind(since)
+    .bind(max_severity)
+    .bind(&pattern)
+    .bind(rule.device_id)
+    .fetch_all(&state.db)
+    .await?;
+    let newest = hits.iter().map(|h| h.5).max().unwrap_or(since).max(since);
+    syslog_cursor().lock().unwrap().insert(rule.id, newest);
+    for (device_id, label, count, sample, severity, _) in hits {
+        let message = if count == 1 { sample.clone() } else { format!("{count} Meldungen, zuletzt: {sample}") };
+        sqlx::query("INSERT INTO alerts (rule_id, device_id, message, resolved_at) VALUES ($1, $2, $3, now())")
+            .bind(rule.id)
+            .bind(device_id)
+            .bind(&message)
+            .execute(&state.db)
+            .await?;
+        let level = match severity {
+            0..=2 => Severity::Critical,
+            3 | 4 => Severity::Warning,
+            _ => Severity::Info,
+        };
+        let mut n = Notification::new(format!("Protokoll: {label}"), message, level, state.config.public_url.as_ref().map(|u| format!("{u}/#/syslog")))
+            .var("wert", format!("{count} Meldung(en)"));
+        n.device_id = device_id;
+        dispatch(state, rule, n).await;
+    }
+    Ok(())
 }
 
 /// Offene Alarme erneut melden, solange sie bestehen (je Regel einstellbar)

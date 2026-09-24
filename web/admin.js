@@ -13,6 +13,7 @@ const RULE_KINDS = {
   cpu_usage: { label: 'CPU-Auslastung hoch', icon: 'cpu', unit: '%', hint: 'Durchschnittliche CPU-Last (SNMP/SSH nötig).' },
   mem_usage: { label: 'RAM-Auslastung hoch', icon: 'gauge', unit: '%', hint: 'Belegter Arbeitsspeicher (SNMP/SSH nötig).' },
   temperature: { label: 'Temperatur hoch', icon: 'temperature', unit: '°C', hint: 'Höchste gemeldete Temperatur (SSH/Synology-SNMP).' },
+  syslog_match: { label: 'Protokollmeldung (Syslog/Trap)', icon: 'file-text', unit: null, syslog: true, hint: 'Alarm bei neuen Syslog-Meldungen oder SNMP-Traps, die den Suchtext enthalten und mindestens die gewählte Stufe haben (z. B. „Failed password“, „linkDown“). Mehrere Treffer werden je Gerät zusammengefasst.' },
   check_down: { label: 'Dienst ausgefallen', icon: 'world-www', unit: null, check: true, hint: 'Webseite, Port, DNS oder Zertifikat-Check schlägt fehl (unter „Dienste“ angelegt).' },
   cert_expiry: { label: 'Zertifikat läuft ab', icon: 'shield-lock', unit: 'Tage', check: true, hint: 'Alarm, wenn ein überwachtes Zertifikat in weniger als X Tagen abläuft.' },
 };
@@ -96,6 +97,8 @@ async function viewAlerts(_arg, params) {
       <label>Art der Regel<select name="kind"${rule ? ' disabled' : ''}>${Object.entries(RULE_KINDS).map(([k, v]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
       <p class="hint" id="kind-hint"></p>
       <label>Name<input name="name" value="${esc(r.name || '')}" placeholder="z. B. NAS offline"></label>
+      <div id="f-syslog" class="form-row"><label>Suchtext (leer = alle)<input name="pattern" value="${esc(r.pattern || '')}" placeholder="z. B. Failed password"></label>
+        <label>Mindestens Stufe<select name="syslog_sev">${SYSLOG_SEV.map((s, i) => `<option value="${i}"${i === (r.threshold ?? 4) ? ' selected' : ''}>${esc(s)}${i ? ' oder schlimmer' : ''}</option>`).join('')}</select></label></div>
       <label id="f-check">Dienst<select name="check_id"><option value="">Alle Dienste</option>
         ${checkList.map((c) => `<option value="${c.id}"${c.id === r.check_id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
       <label id="f-device">Gerät<select name="device_id"><option value="">Alle Geräte</option>
@@ -120,6 +123,7 @@ async function viewAlerts(_arg, params) {
       $('#unit', dlg).textContent = def.unit ? `(${def.unit})` : '';
       $('#f-duration', dlg).hidden = !(k === 'device_down' || k === 'check_down' || (def.unit && k !== 'cert_expiry'));
       $('#f-check', dlg).hidden = !def.check;
+      $('#f-syslog', dlg).hidden = !def.syslog;
       $('#f-device', dlg).hidden = !!def.check;
       $('#f-recovery', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
       $('#f-repeat', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
@@ -134,7 +138,8 @@ async function viewAlerts(_arg, params) {
         kind: form.kind.value,
         device_id: !RULE_KINDS[form.kind.value].check && form.device_id.value ? Number(form.device_id.value) : null,
         check_id: RULE_KINDS[form.kind.value].check && form.check_id.value ? Number(form.check_id.value) : null,
-        threshold: form.threshold.value === '' ? null : Number(form.threshold.value),
+        threshold: RULE_KINDS[form.kind.value].syslog ? Number(form.syslog_sev.value) : form.threshold.value === '' ? null : Number(form.threshold.value),
+        pattern: RULE_KINDS[form.kind.value].syslog ? form.pattern.value.trim() : null,
         duration_min: Number(form.duration_min.value || 0),
         channel_ids: $$('input[name="ch"]:checked', form).map((c) => Number(c.value)),
         notify_recovery: form.notify_recovery.checked,
@@ -1114,5 +1119,81 @@ async function viewStatusPage() {
       await api('/settings/status-page', { method: 'PUT', body: { enabled: e.enabled.checked, title: e.title.value, description: e.description.value, items, new_token: e.new_token.checked } });
       await viewStatusPage();
     }, 'Statusseite gespeichert');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Protokolle (Syslog & SNMP-Traps)
+// ---------------------------------------------------------------------------
+
+const SYSLOG_SEV = ['Notfall', 'Alarm', 'Kritisch', 'Fehler', 'Warnung', 'Hinweis', 'Info', 'Debug'];
+const sevBadge = (s) => `<span class="badge sev-${s <= 2 ? 'critical' : s === 3 ? 'error' : s === 4 ? 'warn' : 'info'}">${esc(SYSLOG_SEV[s] || s)}</span>`;
+
+function logRows(items, withDevice = true) {
+  return items.map((m) => `<tr class="sev-row-${m.severity <= 3 ? 'bad' : m.severity === 4 ? 'warn' : 'ok'}">
+    <td class="small mono nowrap">${esc(new Date(m.time).toLocaleString('de-DE'))}</td>
+    ${withDevice ? `<td class="small">${m.device_id ? `<a href="#/device/${m.device_id}">${esc(m.device_label || m.source)}</a>` : esc(m.host || m.source)}
+      <div class="muted mono small">${esc(m.source)}</div></td>` : ''}
+    <td>${sevBadge(m.severity)}</td><td class="small">${m.app === 'snmp-trap' ? '<span class="badge accent">Trap</span>' : esc(m.app || '')}</td>
+    <td class="small log-msg">${esc(m.message)}</td></tr>`).join('');
+}
+
+async function viewSyslog(_arg, params) {
+  const devices = await api('/devices');
+  const f = { device: params.get('device') || '', severity: '7', q: '', source: '', hours: '24' };
+  view().innerHTML = `
+    <div class="page-head"><div class="actions">
+        <select id="sl-device" aria-label="Gerät"><option value="">Alle Geräte</option>
+          ${devices.map((d) => `<option value="${d.id}"${String(d.id) === f.device ? ' selected' : ''}>${esc(deviceLabel(d))}</option>`).join('')}</select>
+        <select id="sl-sev" aria-label="Schwere">${SYSLOG_SEV.map((s, i) => `<option value="${i}"${i === 7 ? ' selected' : ''}>${i === 7 ? 'Alle Stufen' : `${esc(s)} und schlimmer`}</option>`).join('')}</select>
+        <select id="sl-src" aria-label="Quelle"><option value="">Syslog + Traps</option><option value="syslog">nur Syslog</option><option value="trap">nur SNMP-Traps</option></select>
+        <select id="sl-hours" aria-label="Zeitraum"><option value="1">1 Stunde</option><option value="24" selected>24 Stunden</option><option value="168">7 Tage</option><option value="720">30 Tage</option></select>
+        <input id="sl-q" type="search" placeholder="Suchen: Text, Programm …">
+        <label class="inline"><input type="checkbox" id="sl-live" checked> live</label></div>
+      <span class="muted small" id="sl-count"></span></div>
+    <div id="sl-setup"></div>
+    <div class="card table-wrap"><table class="log-table"><thead><tr><th>Zeit</th><th>Gerät</th><th>Stufe</th><th>Programm</th><th>Meldung</th></tr></thead>
+      <tbody id="sl-body"><tr><td colspan="5"><div class="empty">Lade …</div></td></tr></tbody></table></div>`;
+
+  let items = [];
+  const matches = (m) => (!f.device || String(m.device_id) === f.device) && m.severity <= Number(f.severity)
+    && (!f.source || (f.source === 'trap') === (m.app === 'snmp-trap'))
+    && (!f.q || `${m.message} ${m.app || ''} ${m.host || ''}`.toLowerCase().includes(f.q.toLowerCase()));
+  const paint = () => {
+    $('#sl-body').innerHTML = items.length ? logRows(items) : `<tr><td colspan="5">${empty('Keine Meldungen im Zeitraum.', 'file-text')}</td></tr>`;
+    $('#sl-count').textContent = `${items.length} Meldungen`;
+  };
+  const load = async () => {
+    const qs = new URLSearchParams({ severity: f.severity, hours: f.hours, limit: '1000' });
+    if (f.device) qs.set('device', f.device);
+    if (f.q) qs.set('q', f.q);
+    if (f.source) qs.set('source', f.source);
+    const r = await api(`/remote-logs?${qs}`);
+    items = r.items;
+    $('#sl-setup').innerHTML = r.last_hour ? '' : `<div class="notice info">${icon('file-text')}<span>
+      Noch keine Meldungen empfangen. So schicken Geräte ihre Protokolle an NetPulse (IP-Adresse des NetPulse-Hosts eintragen):<br>
+      <b>OPNsense:</b> System → Einstellungen → Protokollierung → Remote → Ziel hinzufügen: UDP, Port <b>${esc(r.syslog_port)}</b><br>
+      <b>UniFi:</b> Einstellungen → Control Plane → Integrations/System → „Remote Syslog Server“, Port ${esc(r.syslog_port)}<br>
+      <b>Synology:</b> Protokoll-Center → Protokolle senden · <b>Linux:</b> rsyslog <code>*.* @IP:${esc(r.syslog_port)}</code><br>
+      <b>SNMP-Traps:</b> Trap-Ziel = NetPulse, Port <b>${esc(r.trap_port)}</b> (v1/v2c).</span></div>`;
+    paint();
+  };
+  let debounce;
+  const on = (sel, key, ev = 'change') => $(sel).addEventListener(ev, (e) => {
+    f[key] = e.target.value.trim();
+    clearTimeout(debounce);
+    debounce = setTimeout(load, ev === 'input' ? 300 : 0);
+  });
+  on('#sl-device', 'device'); on('#sl-sev', 'severity'); on('#sl-src', 'source'); on('#sl-hours', 'hours'); on('#sl-q', 'q', 'input');
+  await load();
+  onLive((msg) => {
+    if (msg.type !== 'syslog' || !$('#sl-live').checked) return;
+    const fresh = msg.items.map((m) => {
+      const d = devices.find((x) => x.ip === m.source);
+      return { ...m, device_id: d ? d.id : null, device_label: d ? deviceLabel(d) : null };
+    }).filter(matches);
+    if (!fresh.length) return;
+    items = [...fresh, ...items].slice(0, 1000);
+    paint();
   });
 }

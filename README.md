@@ -31,6 +31,13 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
   Dashboard-Widgets **„Stromverbrauch live“** (mit Verlauf) und **„Smart Home live“** (Kacheln mit Schaltzustand),
   Live-Tab je Gerät, Statuswechsel und **Alarme erscheinen sofort als Hinweis** in der Oberfläche.
 - **Such-Zeitplan:** neue Geräte täglich zu festen Uhrzeiten, im festen Abstand oder nur manuell suchen – kein Scan bei jedem Neustart.
+- **Dienste** (wie Uptime Kuma): Webseiten mit Suchwort, TLS-Zertifikate (Ablauf, Vertrauen), TCP-Ports, DNS –
+  Heartbeat-Balken, Verfügbarkeit 24 h/7/30 Tage, Alarme bei Ausfall oder ablaufendem Zertifikat.
+- **Protokolle:** Empfang von **Syslog** (UDP 5514, RFC 3164/5424) und **SNMP-Traps** (UDP 1162, v1/v2c, Namen aus der
+  MIB-Datenbank), durchsuchbar, live, Alarmregel „Protokollmeldung“ (z. B. „Failed password“).
+- **Wartungsfenster** (einmalig/wöchentlich) und **Abhängigkeiten** (ein Alarm für den Switch statt vieler für die
+  Geräte dahinter; automatisch aus UniFi), **Netzwerkkarte** und **öffentliche Statusseite** über geheimen Link.
+- **Alarm-Zustellung:** zentraler E-Mail-Server, HTML-Mails mit Vorlagen, Erinnerungen, Sammelmeldungen, Ruhezeiten.
 - **Fehlersuche:** Tab **„Diagnose“** je Gerät (jeder Abfrageschritt: SNMP, SSH, Shelly – mit Ursache) und Seite **„System-Log“**.
 - **UniFi-Controller** (UniFi OS Server, Dream Machine, Cloud Key) per **API-Schlüssel – auch bei aktiver 2FA**:
   alle Access Points/Switches mit Status, CPU/RAM, Clients, Uplink; Namen und Werte landen automatisch bei den Geräten.
@@ -200,6 +207,10 @@ sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (
 | `INITIAL_ADMIN_USER` / `_PASSWORD` | `admin` / zufällig | Erstes Admin-Konto |
 | `DISCOVERY_INTERVAL_MIN` | 15 | Vorgabe für den Modus „regelmäßig“; der Such-Zeitplan selbst wird unter **Netzwerke** eingestellt (Standard: täglich 03:00, kein Scan beim Neustart) |
 | `PROXY_LISTEN` | http://127.0.0.1:18081 | Eingang für einen vorgeschalteten Reverse-Proxy (z. B. `http://:18081` für Nginx Proxy Manager) |
+| `SYSLOG_PORT` | 5514 | Syslog-Empfang (UDP), 0 = aus |
+| `TRAP_PORT` | 1162 | SNMP-Trap-Empfang (UDP), 0 = aus |
+| `TRAP_COMMUNITY` | – | nur Traps mit dieser Community annehmen (mehrere mit Komma) |
+| `RETENTION_SYSLOG_DAYS` | 30 | Aufbewahrung der Protokollmeldungen |
 | `TZ` | Europe/Berlin | Zeitzone für die Uhrzeiten im Such-Zeitplan |
 | `MONITOR_INTERVAL_SEC` | 60 | Abstand der Erreichbarkeitsprüfungen in Sekunden |
 | `RETENTION_METRICS_DAYS` | 90 | Aufbewahrung der Messwerte |
