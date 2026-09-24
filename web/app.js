@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.1#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -1058,6 +1058,48 @@ async function refreshShell() {
   } catch { /* egal */ }
 }
 
+// ----- App-Installation -----
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (ev) => {
+  // Chrome/Edge/Android: eigenen Knopf zeigen statt der versteckten Browser-Leiste
+  ev.preventDefault();
+  installPrompt = ev;
+  $$('[data-install]').forEach((b) => { b.hidden = false; });
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  $$('[data-install]').forEach((b) => { b.hidden = true; });
+  toast('NetPulse ist jetzt als App installiert');
+});
+
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+/** Hinweis passend zum Browser, wie NetPulse installiert wird */
+function installHint() {
+  const ua = navigator.userAgent;
+  if (isStandalone()) return { ok: true, text: 'NetPulse läuft bereits als installierte App.' };
+  if (location.protocol !== 'https:') {
+    return { ok: false, text: 'Installieren geht nur über HTTPS mit gültigem Zertifikat – also über deine eigene Adresse (z. B. https://monitoring.buschehome.de), nicht über die IP-Adresse.' };
+  }
+  if (/iPhone|iPad/.test(ua)) return { ok: true, text: 'iPhone/iPad: in Safari unten auf „Teilen“ tippen → „Zum Home-Bildschirm“.' };
+  if (/Firefox\//.test(ua) && !/Android/.test(ua)) {
+    return { ok: false, text: 'Firefox am PC kann Web-Apps nicht installieren. Bitte die Seite in Chrome oder Edge öffnen – dort erscheint „App installieren“.' };
+  }
+  if (/Android/.test(ua)) return { ok: true, text: 'Android: Browser-Menü (⋮) → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.' };
+  if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) return { ok: true, text: 'Safari am Mac: Menü „Ablage“ → „Zum Dock hinzufügen“.' };
+  return { ok: true, text: 'Chrome/Edge: Symbol „App installieren“ rechts in der Adressleiste oder Menü → „App installieren“.' };
+}
+
+async function installApp() {
+  if (installPrompt) {
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    if (outcome === 'accepted') installPrompt = null;
+    return;
+  }
+  toast(installHint().text, !installHint().ok);
+}
+
 /** Service Worker: macht NetPulse als App installierbar und empfängt Push-Nachrichten (nur über HTTPS) */
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
@@ -1087,6 +1129,8 @@ function startApp() {
 }
 
 function init() {
+  registerServiceWorker();
+  $$('[data-install]').forEach((b) => b.addEventListener('click', () => installApp().catch(() => {})));
   let theme = null;
   try { theme = localStorage.getItem('np-theme'); } catch { /* privater Modus */ }
   applyTheme(theme);

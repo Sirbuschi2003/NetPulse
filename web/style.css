@@ -575,3 +575,7 @@ body.status-page { background: var(--bg); color: var(--text); }
 tr.sev-row-bad td:first-child { box-shadow: inset 3px 0 0 var(--down); }
 tr.sev-row-warn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 .badge.sev-warn { background: var(--warn-soft); color: var(--warn); }
+
+.install-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-bottom: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.install-btn { white-space: nowrap; }

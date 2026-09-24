@@ -922,12 +922,16 @@ async function renderPush() {
       : `<p class="muted">Alarme erscheinen als Nachricht auf diesem Gerät – auch wenn NetPulse geschlossen ist.</p>
          <button type="button" id="push-on">${icon('bell')}Push auf diesem Gerät aktivieren</button>`;
   }
-  box.innerHTML = `${status}
+  const hint = installHint();
+  const install = `<div class="install-row"><div><b>App installieren</b><div class="muted small">${esc(hint.text)}</div></div>
+    ${!isStandalone() ? `<button type="button" class="ghost" id="install-now"${hint.ok ? '' : ' disabled'}>${icon('device-mobile')}Installieren</button>` : ''}</div>`;
+  box.innerHTML = `${install}${status}
     <p class="muted small">Damit Alarme als Push kommen: unter <b>Benachrichtigungen</b> einen Kanal „NetPulse-App“ anlegen und in den Alarmregeln auswählen.</p>
     ${devices.length ? `<h3 class="sub">Angemeldete Geräte</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
       <span>${esc(d.device || 'Gerät')}${sub && d.endpoint === sub.endpoint ? ' <span class="badge accent">dieses</span>' : ''}</span></span>
       <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ''}
       <button class="ghost sm" type="button" data-unsub="${d.id}" title="Abmelden">${icon('x', 'i-sm')}</button></span></li>`).join('')}</ul>` : ''}`;
+  $('#install-now')?.addEventListener('click', () => installApp().catch(() => {}));
   $('#push-on')?.addEventListener('click', () => attempt(async () => {
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') throw new Error('Benachrichtigungen wurden nicht erlaubt');
