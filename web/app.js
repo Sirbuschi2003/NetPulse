@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.5#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.6#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -203,7 +203,7 @@ const statusBadge = (d) =>
   d.monitored === false
     ? '<span class="badge plain">nicht überwacht</span>'
     : `<span class="badge st-${esc(d.status)}"><span class="dot ${esc(d.status)}"></span>${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
-const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel',
+const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', added: 'angelegt', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel',
   check_down: 'Dienst aus', check_up: 'Dienst ok', check_warn: 'Dienst-Warnung' };
 const eventBadge = (kind) => `<span class="badge ev-${esc(kind)}">${esc(EVENT_LABEL[kind] || kind)}</span>`;
 const deviceLabel = (d) => d.name || d.reported_name || d.hostname || d.ip;

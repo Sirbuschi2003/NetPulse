@@ -42,7 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/push/test", post(session::push_test))
         // Geräte & Status
         .route("/summary", get(devices::summary))
-        .route("/devices", get(devices::list))
+        .route("/devices", get(devices::list).post(devices::create))
         .route("/devices/{id}", get(devices::detail).patch(devices::update).delete(devices::remove))
         .route("/devices/{id}/credentials", put(devices::set_credentials))
         .route("/devices/{id}/poll", post(devices::poll_now))

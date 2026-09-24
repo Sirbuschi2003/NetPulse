@@ -223,7 +223,7 @@ async fn scan_network(state: &AppState, pinger: &Arc<Pinger>, network_id: i64, q
     Ok(())
 }
 
-async fn store_device(state: &AppState, ip: Ipv4Addr, rtt: Option<Duration>, mac: Option<String>) -> Result<()> {
+pub(crate) async fn store_device(state: &AppState, ip: Ipv4Addr, rtt: Option<Duration>, mac: Option<String>) -> Result<()> {
     let ports: Vec<i32> = net::scan_ports(ip).await.into_iter().map(i32::from).collect();
     // Namen aus DNS, mDNS/Bonjour und NetBIOS parallel abfragen; Shelly an Port 80 erkennen
     let shelly_probe = async {

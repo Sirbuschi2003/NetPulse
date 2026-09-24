@@ -572,3 +572,159 @@ pub async fn diagnose_now(State(st): State<AppState>, _admin: AdminUser, Path(id
     }
     diagnose_view(&st, id).await
 }
+
+#[derive(Deserialize)]
+pub struct NewDevice {
+    /// IPv4-Adresse oder Hostname (wird aufgelöst)
+    address: String,
+    name: Option<String>,
+    device_type: Option<String>,
+    notes: Option<String>,
+    monitored: Option<bool>,
+    #[serde(default)]
+    credential_ids: Vec<i64>,
+}
+
+/// Adresse prüfen bzw. Hostnamen auflösen; nur sinnvolle Unicast-Adressen
+async fn resolve_address(input: &str) -> ApiResult<std::net::Ipv4Addr> {
+    let input = input.trim();
+    if input.is_empty() || input.len() > 253 {
+        return Err(ApiError::BadRequest(
+            "Bitte eine IP-Adresse oder einen Hostnamen angeben.".into(),
+        ));
+    }
+    let ip = if let Ok(ip) = input.parse::<std::net::Ipv4Addr>() {
+        ip
+    } else if input.parse::<std::net::IpAddr>().is_ok() {
+        return Err(ApiError::BadRequest(
+            "IPv6 wird noch nicht unterstützt – bitte die IPv4-Adresse angeben.".into(),
+        ));
+    } else {
+        if !input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(ApiError::BadRequest("Ungültiger Hostname.".into()));
+        }
+        let lookup = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host((input, 0)),
+        )
+        .await;
+        let found = match lookup {
+            Ok(Ok(addrs)) => addrs
+                .filter_map(|a| match a.ip() {
+                    std::net::IpAddr::V4(v4) => Some(v4),
+                    _ => None,
+                })
+                .next(),
+            _ => None,
+        };
+        found.ok_or_else(|| {
+            ApiError::BadRequest(format!("Hostname „{input}“ konnte nicht aufgelöst werden."))
+        })?
+    };
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_link_local()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "{ip} kann nicht überwacht werden."
+        )));
+    }
+    Ok(ip)
+}
+
+/// Gerät von Hand anlegen – auch außerhalb der Scan-Netze (VPN, Internet, andere Subnetze)
+pub async fn create(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Json(req): Json<NewDevice>,
+) -> ApiResult<Json<Value>> {
+    let ip = resolve_address(&req.address).await?;
+    let clean = |v: &Option<String>, max: usize| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(max).collect::<String>())
+    };
+    let name = clean(&req.name, 100);
+    let notes = clean(&req.notes, 2000);
+    let kind = req
+        .device_type
+        .as_deref()
+        .filter(|k| *k != "auto" && !k.is_empty());
+    if let Some(k) = kind {
+        if !classify::TYPES.contains(&k) {
+            return Err(ApiError::BadRequest("Unbekannter Gerätetyp".into()));
+        }
+    }
+    // Eingegebener Hostname bleibt als Name erhalten, wenn kein eigener Name gesetzt ist
+    let hostname = (req.address.trim().parse::<std::net::Ipv4Addr>().is_err())
+        .then(|| req.address.trim().to_lowercase());
+
+    let inserted: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO devices (ip, name, hostname, notes, monitored, device_type, device_type_manual, status)
+         VALUES ($1::inet, $2, $3, $4, $5, $6, $7, 'unknown')
+         ON CONFLICT (ip) DO NOTHING RETURNING id",
+    )
+    .bind(ip.to_string())
+    .bind(&name)
+    .bind(&hostname)
+    .bind(&notes)
+    .bind(req.monitored.unwrap_or(true))
+    .bind(kind)
+    .bind(kind.is_some())
+    .fetch_optional(&st.db)
+    .await?;
+    let Some((id,)) = inserted else {
+        let (existing,): (i64,) = sqlx::query_as("SELECT id FROM devices WHERE ip = $1::inet")
+            .bind(ip.to_string())
+            .fetch_one(&st.db)
+            .await?;
+        return Ok(Json(json!({ "ok": false, "exists": true, "id": existing,
+            "error": format!("Ein Gerät mit der Adresse {ip} gibt es schon.") })));
+    };
+    if !req.credential_ids.is_empty() {
+        sqlx::query(
+            "INSERT INTO device_credentials (device_id, credential_id)
+             SELECT $1, c.id FROM credentials c WHERE c.id = ANY($2) ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(&req.credential_ids)
+        .execute(&st.db)
+        .await?;
+    }
+    let label = name
+        .clone()
+        .or(hostname.clone())
+        .unwrap_or_else(|| ip.to_string());
+    sqlx::query("INSERT INTO events (device_id, kind, message) VALUES ($1, 'added', $2)")
+        .bind(id)
+        .bind(format!(
+            "Gerät von Hand angelegt: {label} ({ip}) von {}",
+            user.username
+        ))
+        .execute(&st.db)
+        .await?;
+    audit::by(
+        &st.db,
+        &user,
+        "device_add",
+        json!({ "device_id": id, "ip": ip.to_string(), "name": name }),
+    )
+    .await;
+
+    // Im Hintergrund wie beim Scan untersuchen (Ports, Namen, Hersteller, Shelly) und danach tief abfragen
+    let state = st.clone();
+    tokio::spawn(async move {
+        let mac = crate::scanner::net::read_arp_table().get(&ip).cloned();
+        if let Err(e) = crate::scanner::discovery::store_device(&state, ip, None, mac).await {
+            tracing::warn!("Untersuchung von {ip} fehlgeschlagen: {e:#}");
+        }
+        let _ = state.poll_tx.send(id);
+    });
+    Ok(Json(json!({ "ok": true, "id": id, "ip": ip.to_string() })))
+}

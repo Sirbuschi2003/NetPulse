@@ -12,6 +12,54 @@ function writePref(key, value) {
 // Geräteliste
 // ---------------------------------------------------------------------------
 
+/** Gerät von Hand anlegen – z. B. außerhalb der Scan-Netze, per VPN oder im Internet */
+async function addDeviceDialog() {
+  const credentials = await api('/credentials').catch(() => []);
+  const kindLabel = { snmp_v2c: 'SNMP v2c', snmp_v3: 'SNMP v3', ssh_password: 'SSH (Passwort)', ssh_key: 'SSH (Schlüssel)', http: 'HTTP / Shelly', unifi: 'UniFi' };
+  const dlg = openModal('Gerät hinzufügen', `<form class="form" id="add-dev-form">
+      <label>IP-Adresse oder Hostname<input name="address" required autofocus maxlength="253" placeholder="z. B. 192.168.1.20 oder nas.fritz.box"></label>
+      <label>Name (optional)<input name="name" maxlength="100" placeholder="z. B. NAS im Keller"></label>
+      <label>Gerätetyp<select name="device_type"><option value="auto">Automatisch erkennen</option>
+        ${Object.entries(TYPES).filter(([k]) => k !== 'unknown').sort((a, b) => a[1].label.localeCompare(b[1].label))
+          .map(([k, t]) => `<option value="${k}">${esc(t.label)}</option>`).join('')}</select></label>
+      ${credentials.length ? `<fieldset><legend>Zugangsdaten für tiefe Abfragen (optional)</legend><div class="stack-v">
+        ${credentials.map((c) => `<label class="inline"><input type="checkbox" name="cred" value="${c.id}">
+          <span>${esc(c.name)} <span class="muted small">· ${esc(kindLabel[c.kind] || c.kind)}${c.username ? ` · ${esc(c.username)}` : ''}</span></span></label>`).join('')}
+        </div></fieldset>` : ''}
+      <label>Notizen (optional)<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
+      <label class="inline"><input type="checkbox" name="monitored" checked> Erreichbarkeit überwachen</label>
+      <p class="hint">NetPulse untersucht das Gerät gleich danach wie beim Scan (offene Ports, Name, Hersteller, Shelly)
+        und fragt es mit den gewählten Zugangsdaten ab. Das Gerät muss nicht in einem freigegebenen Netz liegen.</p>
+      <div class="actions"><button type="submit">${icon('plus')}Hinzufügen</button></div></form>`);
+  const form = $('#add-dev-form', dlg);
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = form.elements;
+    const body = {
+      address: e.address.value.trim(),
+      name: e.name.value.trim() || null,
+      device_type: e.device_type.value,
+      notes: e.notes.value.trim() || null,
+      monitored: e.monitored.checked,
+      credential_ids: $$('input[name="cred"]:checked', form).map((c) => Number(c.value)),
+    };
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    attempt(async () => {
+      const r = await api('/devices', { method: 'POST', body });
+      if (r.exists) {
+        toast(r.error, true);
+        dlg.close();
+        location.hash = `#/device/${r.id}`;
+        return;
+      }
+      dlg.close();
+      toast(`Gerät ${r.ip} angelegt – wird jetzt untersucht …`);
+      location.hash = `#/device/${r.id}`;
+    }).finally(() => { btn.disabled = false; });
+  });
+}
+
 async function viewDevices(_arg, params) {
   let devices = await api('/devices');
   const filters = { q: (params.get('q') || '').toLowerCase(), status: params.get('status') || '', type: params.get('type') || '' };
@@ -30,6 +78,7 @@ async function viewDevices(_arg, params) {
           ${typesPresent.map((t) => `<option value="${esc(t)}">${esc(typeInfo(t).label)}</option>`).join('')}</select>
       </div>
       <div class="actions"><span class="muted" id="count"></span>
+        <button type="button" id="dev-add" class="admin-only">${icon('plus')}Gerät hinzufügen</button>
         <div class="seg"><button type="button" data-mode="cards" title="Karten">${icon('layout-grid')}</button>
         <button type="button" data-mode="table" title="Tabelle">${icon('list')}</button></div></div>
     </div>
@@ -76,7 +125,7 @@ async function viewDevices(_arg, params) {
     $$('.seg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
     $('#count').textContent = `${shown.length} von ${devices.length} Geräten`;
     if (!shown.length) {
-      $('#dev-list').innerHTML = `<div class="card">${empty(devices.length ? 'Keine Geräte passen zum Filter.' : 'Noch keine Geräte – unter „Netzwerke“ ein Netz freigeben.', 'devices')}</div>`;
+      $('#dev-list').innerHTML = `<div class="card">${empty(devices.length ? 'Keine Geräte passen zum Filter.' : 'Noch keine Geräte – unter „Netzwerke“ ein Netz freigeben oder oben „Gerät hinzufügen“.', 'devices')}</div>`;
     } else if (mode === 'cards') {
       $('#dev-list').innerHTML = `<div class="dev-grid">${shown.map(card).join('')}</div>`;
     } else {
@@ -90,6 +139,8 @@ async function viewDevices(_arg, params) {
   $('#status-filter').addEventListener('change', (ev) => { filters.status = ev.target.value; render(); });
   $('#type-filter').addEventListener('change', (ev) => { filters.type = ev.target.value; render(); });
   $$('.seg button').forEach((b) => b.addEventListener('click', () => { mode = b.dataset.mode; writePref('np-dev-view', mode); render(); }));
+  $('#dev-add').addEventListener('click', addDeviceDialog);
+  if (params.get('add') === '1' && isAdmin()) addDeviceDialog();
   $('#dev-list').addEventListener('click', (ev) => {
     const tr = ev.target.closest('tr[data-id]');
     if (tr) location.hash = `#/device/${tr.dataset.id}`;
@@ -1063,7 +1114,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.8.5#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.8.6#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;
