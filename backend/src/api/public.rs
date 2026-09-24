@@ -141,9 +141,9 @@ pub async fn public_status(State(st): State<AppState>, headers: HeaderMap) -> Ap
     if !page.enabled || token.len() < 20 || !same(token, &page.token) {
         return Err(ApiError::NotFound);
     }
-    // 30 s zwischenspeichern: schützt die Datenbank vor vielen Aufrufen
+    // 15 s zwischenspeichern: schützt Datenbank und Geräte vor vielen Aufrufen
     if let Some((at, value)) = cache().lock().unwrap().as_ref() {
-        if at.elapsed() < std::time::Duration::from_secs(30) {
+        if at.elapsed() < std::time::Duration::from_secs(15) {
             return Ok(Json(value.clone()));
         }
     }
@@ -221,13 +221,36 @@ pub async fn public_status(State(st): State<AppState>, headers: HeaderMap) -> Ap
             .fetch_all(&st.db)
             .await?;
             let latest = |pick: fn(&Point) -> Option<f64>| points.iter().rev().find_map(pick);
+            // Aktuelle Datenrate live vom Gerät (dieselbe Abfrage wie im Dashboard; wegen des Zwischenspeichers
+            // höchstens alle 15 s, und nur für freigegebene Geräte mit Details)
+            let (mut rx_now, mut tx_now, mut is_live) = (latest(|p| p.2), latest(|p| p.3), false);
+            if item.kind == "device" {
+                // Box::pin: die Live-Abfrage (SNMP/SSH) ist ein großer Future – auf den Heap statt auf den Stack
+                let live = Box::pin(crate::collect::live::live(&st, item.id));
+                if let Ok(Ok(v)) = tokio::time::timeout(std::time::Duration::from_secs(4), live).await {
+                    let ifs = v["interfaces"].as_array().cloned().unwrap_or_default();
+                    let pick = |i: &Value| (i["rx_bps"].as_f64(), i["tx_bps"].as_f64());
+                    let rates = match v["wan"].as_str() {
+                        Some(w) => ifs.iter().find(|i| i["name"] == w).map(pick).unwrap_or((None, None)),
+                        None => {
+                            let rx: Vec<f64> = ifs.iter().filter_map(|i| i["rx_bps"].as_f64()).collect();
+                            let tx: Vec<f64> = ifs.iter().filter_map(|i| i["tx_bps"].as_f64()).collect();
+                            ((!rx.is_empty()).then(|| rx.iter().sum()), (!tx.is_empty()).then(|| tx.iter().sum()))
+                        }
+                    };
+                    if rates.0.is_some() || rates.1.is_some() {
+                        (rx_now, tx_now, is_live) = (rates.0.map(f64::round), rates.1.map(f64::round), true);
+                    }
+                }
+            }
             entry["details"] = json!({
                 "traffic_label": if wan { "Internet" } else { "Netzwerk" },
                 "rtt": points.iter().map(|p| p.1.map(|v| (v * 10.0).round() / 10.0)).collect::<Vec<_>>(),
                 "rx": points.iter().map(|p| p.2.map(f64::round)).collect::<Vec<_>>(),
                 "tx": points.iter().map(|p| p.3.map(f64::round)).collect::<Vec<_>>(),
-                "rx_now": latest(|p| p.2),
-                "tx_now": latest(|p| p.3),
+                "rx_now": rx_now,
+                "tx_now": tx_now,
+                "live": is_live,
             });
         }
         items.push(entry);

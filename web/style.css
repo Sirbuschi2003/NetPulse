@@ -652,3 +652,8 @@ svg.st-chart .grid-line { stroke: var(--border); stroke-dasharray: 3 4; vector-e
 /* Suchfeld über langen Auswahllisten */
 .select-search { margin-bottom: 6px; }
 select[size]:not([size="0"]):not([size="1"]) { padding: 4px; }
+
+.st-live { display: inline-flex; align-items: center; gap: 6px; color: var(--up); font-weight: 600; }
+.st-live.off { color: var(--warn); }
+.st-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up); margin-right: 6px; animation: blink 1.4s infinite; }
+.st-live.off .st-live-dot { background: var(--warn); animation: none; }

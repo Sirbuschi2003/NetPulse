@@ -5,7 +5,7 @@
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 const $ = (s) => document.querySelector(s);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.3#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.4#i-${name}"/></svg>`;
 
 const LABEL = { ok: 'Funktioniert', degraded: 'Eingeschränkt', down: 'Störung', unknown: 'Unbekannt' };
 const OVERALL = {
@@ -66,7 +66,7 @@ function details(d, item) {
       <div class="st-panel"><div class="st-panel-head"><span>${icon('activity', 'i-sm')} Antwortzeit</span><strong>${esc(fmtMs(item.latency_ms))}</strong></div>
         ${chart([{ values: d.rtt }], fmtMs)}</div>
       ${traffic ? `<div class="st-panel"><div class="st-panel-head"><span>${icon(d.traffic_label === 'Internet' ? 'world-www' : 'arrows-exchange', 'i-sm')} ${esc(d.traffic_label)}</span>
-        <strong>↓ ${esc(fmtBps(d.rx_now))} · ↑ ${esc(fmtBps(d.tx_now))}</strong></div>
+        <strong>${d.live ? '<span class="st-live-dot" title="live"></span>' : ''}↓ ${esc(fmtBps(d.rx_now))} · ↑ ${esc(fmtBps(d.tx_now))}</strong></div>
         ${chart([{ values: d.rx }, { values: d.tx }], fmtBps)}
         <div class="legend small"><span><i class="bgc0"></i>Download</span><span><i class="bgc1"></i>Upload</span></div></div>` : ''}
     </div>`;
@@ -83,6 +83,8 @@ function itemHtml(i) {
       ${details(i.details, i)}
     </article>`;
 }
+
+let lastOk = 0;
 
 async function load() {
   const token = location.hash.slice(1);
@@ -111,13 +113,30 @@ async function load() {
         ${g.key ? `<h2>${esc(g.key)}</h2>` : ''}<div class="card">${g.items.map(itemHtml).join('')}</div></section>`).join('')
       : '<div class="card"><p class="muted">Keine Einträge.</p></div>';
     $('#st-updated').textContent = new Date(s.updated).toLocaleString('de-DE');
+    lastOk = Date.now();
+    $('#st-live').classList.remove('off');
   } catch (e) {
+    // Kurzer Aussetzer (z. B. WLAN): alte Anzeige stehen lassen, nur markieren
+    if (lastOk && Date.now() - lastOk < 5 * 60000) {
+      $('#st-live').classList.add('off');
+      return;
+    }
     $('#st-overall').className = 'status-overall unknown';
     $('#st-overall').textContent = e.message;
     $('#st-items').innerHTML = '';
   }
 }
 
+/** „aktualisiert vor X s“ – zeigt, dass die Seite lebt */
+function tick() {
+  const el = $('#st-age');
+  if (!lastOk) return;
+  const s = Math.round((Date.now() - lastOk) / 1000);
+  el.textContent = s < 5 ? 'gerade eben' : `vor ${s} s`;
+}
+
 load();
-setInterval(load, 60000);
+setInterval(() => { if (!document.hidden) load(); }, 15000);
+setInterval(tick, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 window.addEventListener('hashchange', load);
