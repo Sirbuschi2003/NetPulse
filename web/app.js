@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.4#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.5#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -606,11 +606,15 @@ function powerModel(summary, widget = {}) {
     list = list.filter((p) => include.has(p.id) || p.id === widget.main_id);
   }
   const main = widget.main_id ? list.find((p) => p.id === widget.main_id) || null : null;
-  return { list: list.filter((p) => p !== main), main };
+  const rest = list.filter((p) => p !== main);
+  // Was misst der Hauptzähler? „net“ = Netzbezug (PV schon abgezogen), „gross“ = Gesamtverbrauch.
+  // Ohne Angabe: mit Erzeugern im Haus ist es fast immer der Netzbezug.
+  const mode = widget.main_mode || (rest.some((p) => p.role === 'producer') ? 'net' : 'gross');
+  return { list: rest, main, mode };
 }
 
 /** Verbrauch, Erzeugung, Netz, Bilanz und „Sonstiges“ (Hauptzähler minus Einzelmessungen) */
-function modelFigures({ list, main }) {
+function modelFigures({ list, main, mode }) {
   const role = (p) => p.role || 'consumer';
   const sum = (r) => list.filter((p) => role(p) === r).reduce((a, p) => a + Math.abs(p.power_w), 0);
   const has = (r) => list.some((p) => role(p) === r);
@@ -626,8 +630,8 @@ function modelFigures({ list, main }) {
   }
   let other = null;
   if (main) {
-    if (role(main) === 'grid') {
-      // Netz-Zähler am Hausanschluss: Hausverbrauch = Bezug − Einspeisung + eigene Erzeugung
+    if (role(main) === 'grid' || mode === 'net') {
+      // Zähler am Hausanschluss misst den Netzbezug (PV schon abgezogen): Hausverbrauch = Bezug − Einspeisung + eigene Erzeugung
       gridImport = Math.max(0, main.power_w);
       gridExport = Math.max(0, -main.power_w);
       consumption = Math.max(0, main.power_w + (production || 0));
@@ -655,13 +659,16 @@ function energyHead(f) {
   const parts = [`<div class="en-fig"><span class="inet-dir">${icon('bolt', 'i-sm')} ${f.main ? 'Verbrauch gesamt' : 'Verbrauch'}</span><span class="power-total" data-en="consumption" data-value="${f.consumption || 0}">${esc(fmtWatt(f.consumption))}</span></div>`];
   if (f.production != null) {
     parts.push(`<div class="en-fig"><span class="inet-dir">${icon('sun', 'i-sm')} Erzeugung</span><span class="power-total prod" data-en="production" data-value="${f.production}">${esc(fmtWatt(f.production))}</span></div>`);
+  }
+  if (f.production != null && f.gridImport == null) {
     const surplus = f.balance < 0;
     parts.push(`<div class="en-fig"><span class="inet-dir">${icon('arrows-exchange', 'i-sm')} ${surplus ? 'Überschuss' : 'Bilanz'}</span>
       <span class="en-balance ${surplus ? 'plus' : ''}" data-en="balance">${esc(fmtWatt(Math.abs(f.balance)))}</span></div>`);
   }
   if (f.gridImport != null) {
-    parts.push(`<div class="en-fig"><span class="inet-dir">${icon('plug-connected', 'i-sm')} Netz</span>
-      <span class="en-balance ${f.gridExport > 0 ? 'plus' : ''}" data-en="grid">${f.gridExport > 0 ? `↑ ${esc(fmtWatt(f.gridExport))}` : `↓ ${esc(fmtWatt(f.gridImport))}`}</span></div>`);
+    const exporting = f.gridExport > 0;
+    parts.push(`<div class="en-fig"><span class="inet-dir">${icon('plug-connected', 'i-sm')} ${exporting ? 'Einspeisung' : 'Netzbezug'}</span>
+      <span class="en-balance ${exporting ? 'plus' : ''}" data-en="grid">${esc(fmtWatt(exporting ? f.gridExport : f.gridImport))}</span></div>`);
   }
   return parts.join('');
 }
@@ -680,11 +687,11 @@ function wPower({ summary }, widget = {}) {
   const figures = modelFigures(model);
   const today = (summary && summary.energy_today) || {};
   const configured = Array.isArray(widget.include) || widget.main_id;
-  return `<div class="power-live" data-live-power data-include="${esc(Array.isArray(widget.include) ? widget.include.join(',') : '')}" data-main="${esc(widget.main_id || '')}">
+  return `<div class="power-live" data-live-power data-include="${esc(Array.isArray(widget.include) ? widget.include.join(',') : '')}" data-main="${esc(widget.main_id || '')}" data-main-mode="${esc(widget.main_mode || '')}">
     <div class="power-head"><div class="en-figs" data-en-head>${energyHead(figures)}</div>
       <span class="actions"><span class="live-tag">LIVE</span>
       <button type="button" class="ghost sm icon-only" data-power-config title="Einstellen: welche Geräte, Hauptzähler">${icon('settings', 'i-sm')}</button></span></div>
-    ${model.main ? `<p class="muted small">gemessen am Hauptzähler „${esc(model.main.label)}“ – darunter die Aufschlüsselung</p>` : ''}
+    ${model.main ? `<p class="muted small">Hauptzähler „${esc(model.main.label)}“ (${model.mode === 'net' || model.main.role === 'grid' ? 'misst Netzbezug, Erzeugung wird addiert' : 'misst Gesamtverbrauch'}) – darunter die Aufschlüsselung</p>` : ''}
     <div data-spark>${energySpark([], [])}</div>
     ${today.consumed_kwh != null || today.produced_kwh != null ? `<p class="muted small">Heute: ${today.consumed_kwh != null ? `${esc(fmtKwh(today.consumed_kwh))} verbraucht` : ''}
       ${today.produced_kwh != null ? ` · <span class="role-producer">☀ ${esc(fmtKwh(today.produced_kwh))} erzeugt</span>` : ''} (ca.)</p>` : ''}
@@ -712,6 +719,11 @@ function powerWidgetDialog(widget = {}) {
             ${[['consumer', 'Verbrauch'], ['producer', 'Erzeugung'], ['grid', 'Netz-Zähler']].map(([v, l]) => `<option value="${v}"${(d.role || 'consumer') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></td>
           <td><input type="radio" name="main" value="${d.id}"${widget.main_id === d.id ? ' checked' : ''}></td></tr>`).join('')}
       </tbody></table></div>
+      <fieldset id="pw-mode"><legend>Was misst der Hauptzähler?</legend><div class="checks">
+        <label class="inline"><input type="radio" name="mode" value="net"${(widget.main_mode || 'net') === 'net' ? ' checked' : ''}>
+          Netzbezug – PV/Balkonkraftwerk ist schon abgezogen (Zähler am Hausanschluss)</label>
+        <label class="inline"><input type="radio" name="mode" value="gross"${widget.main_mode === 'gross' ? ' checked' : ''}>
+          Gesamtverbrauch des Hauses (ohne Abzug der Erzeugung)</label></div></fieldset>
       <p class="hint">Die Rolle gilt für das ganze System (auch Summen und Statusseite); Anzeigen und Hauptzähler nur für dieses Widget.
         Neue Geräte erscheinen automatisch, solange alle Häkchen gesetzt sind.</p>
       <div class="actions"><button type="submit">${icon('check')}Übernehmen</button></div></form>`);
@@ -734,7 +746,7 @@ function powerWidgetDialog(widget = {}) {
         }
       }
       dlg.close();
-      resolve({ include: checked.length === devices.length ? null : checked, main_id: main });
+      resolve({ include: checked.length === devices.length ? null : checked, main_id: main, main_mode: form.elements.mode.value });
     });
     dlg.addEventListener('close', () => resolve(null), { once: true });
   });
@@ -781,6 +793,7 @@ function mountStreamWidgets(root) {
     const widget = {
       include: el.dataset.include ? el.dataset.include.split(',').map(Number) : null,
       main_id: el.dataset.main ? Number(el.dataset.main) : null,
+      main_mode: el.dataset.mainMode || null,
     };
     const history = { consumed: [], produced: [] };
     const card = el.closest('.widget');
