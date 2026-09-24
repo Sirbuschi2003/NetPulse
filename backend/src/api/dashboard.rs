@@ -13,11 +13,14 @@ use crate::{
 fn default_layout() -> Value {
     json!([
         { "type": "summary", "size": 3 },
+        { "type": "alerts", "size": 1 },
         { "type": "down", "size": 1 },
+        { "type": "types", "size": 1 },
         { "type": "events", "size": 2 },
         { "type": "status_chart", "size": 1 },
         { "type": "services", "size": 1 },
-        { "type": "new", "size": 1 }
+        { "type": "new", "size": 1 },
+        { "type": "slowest", "size": 1 }
     ])
 }
 

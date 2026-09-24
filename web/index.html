@@ -4,27 +4,54 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
   <title>NetPulse</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M5 18h5l3-8 5 14 3-6h6' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header id="topbar" hidden>
-    <a class="brand" href="#/dashboard">NetPulse</a>
-    <nav id="nav">
-      <a href="#/dashboard">Dashboard</a>
-      <a href="#/devices">Geräte</a>
-      <a href="#/events">Ereignisse</a>
-      <a href="#/networks" class="admin-only">Netzwerke</a>
-      <a href="#/users" class="admin-only">Benutzer</a>
-      <a href="#/audit" class="admin-only">Audit-Log</a>
-    </nav>
-    <div class="user">
-      <a href="#/account" id="user-name" title="Mein Konto"></a>
-      <button id="logout" class="ghost" type="button">Abmelden</button>
+  <div id="app" class="shell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#/dashboard">
+        <img src="favicon.svg" alt="" width="30" height="30">
+        <span>Net<b>Pulse</b></span>
+      </a>
+      <nav id="nav">
+        <p class="nav-label">Übersicht</p>
+        <a href="#/dashboard"><svg class="i"><use href="icons.svg#i-layout-dashboard"/></svg>Dashboard</a>
+        <a href="#/devices"><svg class="i"><use href="icons.svg#i-devices"/></svg>Geräte</a>
+        <a href="#/alerts"><svg class="i"><use href="icons.svg#i-bell"/></svg>Alarme<span class="nav-badge" id="alert-badge" hidden></span></a>
+        <a href="#/events"><svg class="i"><use href="icons.svg#i-list-details"/></svg>Ereignisse</a>
+        <p class="nav-label admin-only">Verwaltung</p>
+        <a href="#/networks" class="admin-only"><svg class="i"><use href="icons.svg#i-topology-star-3"/></svg>Netzwerke</a>
+        <a href="#/credentials" class="admin-only"><svg class="i"><use href="icons.svg#i-key"/></svg>Zugangsdaten</a>
+        <a href="#/channels" class="admin-only"><svg class="i"><use href="icons.svg#i-send"/></svg>Benachrichtigungen</a>
+        <a href="#/users" class="admin-only"><svg class="i"><use href="icons.svg#i-users"/></svg>Benutzer</a>
+        <a href="#/audit" class="admin-only"><svg class="i"><use href="icons.svg#i-shield-lock"/></svg>Audit-Log</a>
+      </nav>
+      <div class="scan-mini" id="scan-mini" hidden></div>
+      <div class="sidebar-foot">
+        <a href="#/account" class="user-chip" id="user-chip"><svg class="i"><use href="icons.svg#i-user"/></svg><span id="user-name"></span></a>
+        <button class="icon-btn" id="theme-toggle" type="button" title="Hell/Dunkel umschalten"><svg class="i"><use href="icons.svg#i-moon"/></svg></button>
+        <button class="icon-btn" id="logout" type="button" title="Abmelden"><svg class="i"><use href="icons.svg#i-logout"/></svg></button>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menu-toggle" type="button" title="Menü"><svg class="i"><use href="icons.svg#i-menu-2"/></svg></button>
+        <h1 id="page-title">Dashboard</h1>
+        <div class="search">
+          <svg class="i"><use href="icons.svg#i-search"/></svg>
+          <input id="global-search" type="search" placeholder="Gerät suchen: Name, IP, MAC, Hersteller …" aria-label="Gerät suchen">
+        </div>
+      </header>
+      <main id="view"></main>
     </div>
-  </header>
-  <main id="view"></main>
+  </div>
+  <div id="login-view"></div>
+  <dialog id="modal"></dialog>
   <script src="app.js"></script>
+  <script src="devices.js"></script>
+  <script src="admin.js"></script>
 </body>
 </html>

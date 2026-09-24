@@ -20,6 +20,14 @@ pub struct Config {
     pub initial_admin_user: Option<String>,
     pub initial_admin_password: Option<String>,
     pub initial_networks: Vec<String>,
+    /// Ablage für den Tresor-Schlüssel (Docker-Volume)
+    pub data_dir: String,
+    /// Tresor-Schlüssel direkt vorgeben (64 Hex-Zeichen); sonst wird er in `data_dir` erzeugt
+    pub secret_key: Option<String>,
+    /// Abstand der tiefen Abfragen (SNMP/SSH)
+    pub inventory_interval: Duration,
+    /// Öffentliche Adresse der Oberfläche – für Links in Benachrichtigungen
+    pub public_url: Option<String>,
 }
 
 impl Config {
@@ -40,6 +48,12 @@ impl Config {
             initial_networks: optional("SCAN_NETWORKS")
                 .map(|s| s.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
                 .unwrap_or_default(),
+            data_dir: string("DATA_DIR", "/data"),
+            secret_key: optional("SECRET_KEY"),
+            inventory_interval: Duration::from_secs(60 * number::<u64>("INVENTORY_INTERVAL_MIN", 5)?.max(1)),
+            public_url: optional("PUBLIC_URL")
+                .or_else(|| optional("SITE_ADDRESS"))
+                .map(|u| u.trim_end_matches('/').to_string()),
         })
     }
 }

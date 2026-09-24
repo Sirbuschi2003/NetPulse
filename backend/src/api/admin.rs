@@ -11,9 +11,10 @@ use sqlx::FromRow;
 
 use crate::{
     audit,
-    auth::{self, AdminUser},
+    auth::{self, AdminUser, CurrentUser},
     error::{ApiError, ApiResult},
-    scanner, AppState,
+    scanner::{self, ScanRequest},
+    AppState,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,15 +28,20 @@ pub struct Network {
     name: String,
     enabled: bool,
     created_at: DateTime<Utc>,
+    last_scan_at: Option<DateTime<Utc>>,
+    last_scan_found: Option<i32>,
+    last_scan_duration_s: Option<i32>,
+    device_count: i64,
 }
 
+const NETWORK_SELECT: &str = "SELECT n.id, n.cidr::text AS cidr, n.name, n.enabled, n.created_at,
+                                     n.last_scan_at, n.last_scan_found, n.last_scan_duration_s,
+                                     (SELECT count(*) FROM devices d WHERE d.ip << n.cidr) AS device_count
+                                FROM networks n";
+
 pub async fn list_networks(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<Network>>> {
-    let networks = sqlx::query_as::<_, Network>(
-        "SELECT id, cidr::text AS cidr, name, enabled, created_at FROM networks ORDER BY cidr",
-    )
-    .fetch_all(&st.db)
-    .await?;
-    Ok(Json(networks))
+    let sql = format!("{NETWORK_SELECT} ORDER BY n.cidr");
+    Ok(Json(sqlx::query_as::<_, Network>(&sql).fetch_all(&st.db).await?))
 }
 
 #[derive(Deserialize)]
@@ -56,10 +62,8 @@ pub async fn add_network(
         return Err(ApiError::BadRequest("Bitte einen Namen (max. 100 Zeichen) angeben".into()));
     }
     let cidr = format!("{addr}/{prefix}");
-    let network = sqlx::query_as::<_, Network>(
-        "INSERT INTO networks (cidr, name) VALUES ($1::cidr, $2)
-         ON CONFLICT (cidr) DO NOTHING
-         RETURNING id, cidr::text AS cidr, name, enabled, created_at",
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO networks (cidr, name) VALUES ($1::cidr, $2) ON CONFLICT (cidr) DO NOTHING RETURNING id",
     )
     .bind(&cidr)
     .bind(name)
@@ -68,8 +72,10 @@ pub async fn add_network(
     .ok_or_else(|| ApiError::BadRequest(format!("Netz {cidr} ist bereits eingetragen")))?;
 
     audit::by(&st.db, &user, "network_add", json!({ "cidr": cidr, "name": name })).await;
-    st.scan_trigger.notify_one();
-    Ok(Json(network))
+    // Neues Netz sofort scannen – hat Vorrang vor einem laufenden Durchlauf
+    let _ = st.scan_tx.send(ScanRequest::Network(id));
+    let sql = format!("{NETWORK_SELECT} WHERE n.id = $1");
+    Ok(Json(sqlx::query_as::<_, Network>(&sql).bind(id).fetch_one(&st.db).await?))
 }
 
 pub async fn delete_network(
@@ -87,9 +93,23 @@ pub async fn delete_network(
 }
 
 pub async fn trigger_scan(State(st): State<AppState>, AdminUser(user): AdminUser) -> ApiResult<Json<Value>> {
-    st.scan_trigger.notify_one();
+    let _ = st.scan_tx.send(ScanRequest::All);
     audit::by(&st.db, &user, "scan_trigger", json!({})).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn scan_network(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
+    let _ = st.scan_tx.send(ScanRequest::Network(id));
+    audit::by(&st.db, &user, "scan_trigger", json!({ "network_id": id })).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn scan_status(State(st): State<AppState>, _user: CurrentUser) -> Json<Value> {
+    Json(st.scan_progress.snapshot())
 }
 
 // ---------------------------------------------------------------------------

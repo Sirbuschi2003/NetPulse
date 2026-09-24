@@ -18,7 +18,8 @@ Nutzt du NetPulse ausschließlich für dein eigenes Heimnetz, greift in der Rege
 |---|---|---|
 | IP- und MAC-Adresse, Hostname (z. B. `laptop-mmueller`) | ja, wenn einer Person zuordenbar | `devices` |
 | Online-/Offline-Zeiten eines Arbeitsplatzrechners | **ja**: lässt Rückschlüsse auf Anwesenheit zu | `device_metrics`, `events` |
-| Benutzernamen und Anmeldezeiten der netpulse-Nutzer | ja | `users`, `audit_log` |
+| Benutzernamen und Anmeldezeiten der NetPulse-Nutzer | ja | `users`, `audit_log` |
+| Inventar aus SNMP/SSH: Rechnername, Seriennummer, Auslastung eines Arbeitsplatzrechners | ja, wenn einer Person zuordenbar | `devices.inventory`, `device_stats` |
 
 ### Rechtsgrundlage und Pflichten (DSGVO)
 
@@ -42,6 +43,8 @@ Arbeitsplatzrechnern erfüllen das in der Regel.
 
 - Gescannt werden nur ausdrücklich freigegebene Netze.
 - Es gibt keine Inhaltsdaten: NetPulse liest keinen Datenverkehr, keine Dateien, keine Prozesse und keine angemeldeten Benutzer.
+  Tiefe Abfragen (SNMP/SSH) erfassen nur technische Kennzahlen (Hardware, Auslastung, Speicher) und nur bei Geräten,
+  denen ein Admin Zugangsdaten zugeordnet hat.
 - Die Überwachung lässt sich je Gerät abschalten.
 - Automatische Löschfristen.
 - Keine Telemetrie: TimescaleDB-Telemetrie ist abgeschaltet, keine externen CDNs oder Tracker.
@@ -53,6 +56,7 @@ Arbeitsplatzrechnern erfüllen das in der Regel.
 |---|---|
 | Verschlüsselung im Transport | HTTPS (TLS 1.2/1.3), HSTS |
 | Zugriffskontrolle | Login, Rollen, Argon2id, Sitzungsablauf, Brute-Force-Sperre |
+| Schutz von Zugangsdaten | AES-256-GCM-Verschlüsselung, Schlüssel getrennt von der Datenbank, keine Anzeige in der Oberfläche |
 | Protokollierung | Audit-Log für Anmeldungen und Änderungen |
 | Härtung | nicht-root, schreibgeschütztes Dateisystem, minimale Capabilities, DB nur lokal |
 | Web-Sicherheit | CSP, CSRF-Schutz, SameSite-Cookies, konsequentes Escaping |

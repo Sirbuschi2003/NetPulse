@@ -4,24 +4,33 @@
 //! - `api`     : REST-API für die Weboberfläche (axum)
 //! - `auth`    : Login, Sitzungen, Passwort-Hashing, Rollen
 //! - `scanner` : Geräteerkennung (Discovery) und Statusprüfung (Monitor)
+//! - `collect` : tiefe Abfragen über SNMP und SSH (Inventar, Auslastung)
+//! - `alerts`  : Alarmregeln und Benachrichtigungen
+//! - `classify`: Gerätetyp-Erkennung, `oui`: Hersteller aus der MAC-Adresse
+//! - `vault`   : verschlüsselte Ablage für Zugangsdaten
 //! - `audit`   : Protokoll, wer wann was getan hat
 //! - `config`  : Einstellungen aus Umgebungsvariablen
 
+mod alerts;
 mod api;
 mod audit;
 mod auth;
+mod classify;
+mod collect;
 mod config;
 mod error;
+mod oui;
 mod scanner;
+mod vault;
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::{config::Config, scanner::ScanRequest, vault::Vault};
 
 /// Gemeinsamer Zustand, den jeder Request-Handler und jeder Hintergrund-Task bekommt.
 /// `Clone` ist billig: Alles darin ist ein Zeiger mit Referenzzählung (`Arc`, `PgPool`).
@@ -29,8 +38,12 @@ use crate::config::Config;
 pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
-    /// Weckt die Discovery sofort auf („Jetzt scannen“ in der Oberfläche)
-    pub scan_trigger: Arc<Notify>,
+    /// Aufträge an die Discovery („Jetzt scannen“, neues Netz)
+    pub scan_tx: mpsc::UnboundedSender<ScanRequest>,
+    pub scan_progress: Arc<scanner::ScanProgress>,
+    /// Geräte-IDs für eine sofortige tiefe Abfrage
+    pub poll_tx: mpsc::UnboundedSender<i64>,
+    pub vault: Arc<Vault>,
     pub login_limiter: Arc<auth::LoginLimiter>,
 }
 
@@ -52,17 +65,26 @@ async fn main() -> Result<()> {
     apply_retention(&db, &config).await?;
     bootstrap(&db, &config).await?;
 
+    let vault = Vault::open(&config.data_dir, config.secret_key.as_deref())
+        .context("Tresor für Zugangsdaten konnte nicht geöffnet werden")?;
+    let (scan_tx, scan_rx) = mpsc::unbounded_channel();
+    let (poll_tx, poll_rx) = mpsc::unbounded_channel();
     let state = AppState {
         db,
         config: config.clone(),
-        scan_trigger: Arc::new(Notify::new()),
+        scan_tx,
+        scan_progress: Arc::new(scanner::ScanProgress::default()),
+        poll_tx,
+        vault: Arc::new(vault),
         login_limiter: Arc::new(auth::LoginLimiter::default()),
     };
 
     // Hintergrund-Tasks: laufen parallel zum Webserver
     let pinger = Arc::new(scanner::net::Pinger::new());
-    tokio::spawn(scanner::discovery::run(state.clone(), pinger.clone()));
+    tokio::spawn(scanner::discovery::run(state.clone(), pinger.clone(), scan_rx));
     tokio::spawn(scanner::monitor::run(state.clone(), pinger));
+    tokio::spawn(collect::run(state.clone(), poll_rx));
+    tokio::spawn(alerts::run(state.clone()));
     tokio::spawn(maintenance(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
@@ -110,6 +132,13 @@ async fn apply_retention(db: &PgPool, config: &Config) -> Result<()> {
         .execute(db)
         .await?;
     sqlx::query("SELECT add_retention_policy('device_metrics', make_interval(days => $1))")
+        .bind(config.metrics_retention_days)
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT remove_retention_policy('device_stats', if_exists => true)")
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT add_retention_policy('device_stats', make_interval(days => $1))")
         .bind(config.metrics_retention_days)
         .execute(db)
         .await?;
@@ -180,6 +209,10 @@ async fn maintenance(state: AppState) {
                 .execute(&state.db)
                 .await?;
             sqlx::query("DELETE FROM events WHERE time < now() - make_interval(days => $1)")
+                .bind(config.events_retention_days)
+                .execute(&state.db)
+                .await?;
+            sqlx::query("DELETE FROM alerts WHERE resolved_at < now() - make_interval(days => $1)")
                 .bind(config.events_retention_days)
                 .execute(&state.db)
                 .await?;

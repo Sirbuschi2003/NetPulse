@@ -35,6 +35,9 @@ Raspberry Pi einfach und sparsam: etwa 10–30 MB RAM für NetPulse selbst.
 | `dashboards` | Widget-Layout je Benutzer (JSON) |
 | `audit_log` | Wer hat wann was getan |
 | `settings` | Schlüssel/Wert, z. B. Ergebnis des letzten Scans |
+| `credentials`, `device_credentials` | Zugangsdaten (Geheimnisse verschlüsselt) und ihre Zuordnung zu Geräten |
+| `device_stats` | **Hypertable**: CPU, RAM, Speicher, Temperatur, Datenrate aus SNMP/SSH |
+| `notification_channels`, `alert_rules`, `alerts` | Kanäle (Konfiguration verschlüsselt), Regeln, ausgelöste Alarme |
 
 Das Schema liegt in `backend/migrations/` und wird beim Start automatisch angewendet.
 Neue Änderungen kommen immer als **neue** Datei hinzu (`0002_…sql`); bestehende Migrationen werden nie geändert.
@@ -68,23 +71,27 @@ Zielgerät einmalig aktiviert und mit einem Konto mit Leserechten versehen werde
 
 ## Roadmap
 
-**Phase 2: Tiefe Abfragen und Zugangsdaten-Tresor**
-- Zugangsdaten verschlüsselt speichern (AES-256-GCM oder `age`, Schlüssel außerhalb der Datenbank)
-- SNMP v2c/v3: Systemname, Uptime, Schnittstellen, Traffic, Fehler, Drucker-Toner, USV-Akku
-- SSH (Linux): CPU, RAM, Festplatten, Dienste, Updates, Hardware (`/proc`, `lsblk`, `dmidecode`, `systemctl`)
-- WinRM (Windows): Hardware, Software, Updates, Dienste und Ereignisprotokoll über CIM/WMI-Abfragen
-- Redfish: Temperaturen, Lüfter, Netzteile, RAID
-- Herstellererkennung über die MAC-Adresse (OUI-Datenbank), Namen über mDNS/NetBIOS
+**✅ Phase 1: Erkennung und Erreichbarkeit** (Version 0.1)
 
-**Phase 3: Alarmierung**
-- Regeln wie „offline länger als 5 Minuten“, „Festplatte über 90 %“ oder „Zertifikat läuft in 14 Tagen ab“
-- Benachrichtigung per E-Mail, Microsoft Teams, Webhook oder ntfy/Gotify (Push aufs Handy)
-- Wartungsfenster und Bestätigen von Alarmen
+**✅ Phase 2: Tiefe Abfragen und Zugangsdaten-Tresor**
+- Zugangsdaten AES-256-GCM-verschlüsselt, Schlüssel in `/data/secret.key` außerhalb der Datenbank
+- SNMP v2c/v3: System, Schnittstellen und Datenverkehr, CPU, RAM, Speicher, Drucker, USV, Synology, ENTITY, LLDP
+- SSH: Linux, NAS, Proxmox, Raspberry Pi und Windows (OpenSSH + PowerShell/CIM), Host-Schlüssel nach „Trust on first use“
+- Automatisches Ausprobieren von Zugangsdaten (SNMP, SSH-Schlüssel), Treffer werden fest zugeordnet
+- Herstellererkennung über die MAC-Adresse (IEEE-OUI-Liste), automatische Erkennung des Gerätetyps
+
+**✅ Phase 3: Alarmierung**
+- Regeln: offline länger als X Minuten, neues Gerät, MAC-/SSH-Schlüssel geändert, Speicher, CPU, RAM, Temperatur
+- Kanäle: E-Mail, ntfy, Gotify, Telegram, Discord, Microsoft Teams, Webhook; Entwarnung beim Beheben
 
 **Phase 4: Weitere Datenquellen**
-- Syslog-Empfang, NetFlow/sFlow (wer spricht mit wem)
+- WinRM (HTTPS) als Alternative zu SSH für Windows
+- FRITZ!Box über TR-064 (Bandbreite, verbundene Geräte, DSL-Werte)
+- Redfish für Server-Hardware (iDRAC, iLO)
+- mDNS/NetBIOS-Namen, Syslog-Empfang, NetFlow/sFlow
 - HTTP- und TLS-Prüfungen (Antwortzeit, Statuscode, Zertifikatslaufzeit)
-- Netzwerk-Topologie über LLDP/CDP als Grafik
+- Netzwerkkarte (Topologie) aus den LLDP-Nachbarn
+- Wartungsfenster und Bestätigen von Alarmen
 
 **Phase 5: Firmeneinsatz**
 - Anmeldung über OIDC/SSO (Entra ID, Keycloak) und TOTP-Zwei-Faktor

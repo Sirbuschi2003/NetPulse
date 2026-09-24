@@ -95,6 +95,8 @@ async fn check_all(state: &AppState, pinger: &Arc<Pinger>) -> Result<()> {
     .await?;
     sqlx::query(
         "UPDATE devices d SET
+             status_since = CASE WHEN d.status = (CASE WHEN u.up THEN 'up' ELSE 'down' END)
+                                 THEN COALESCE(d.status_since, now()) ELSE now() END,
              status      = CASE WHEN u.up THEN 'up' ELSE 'down' END,
              last_rtt_ms = u.rtt,
              last_check  = now(),
@@ -135,7 +137,7 @@ async fn check_all(state: &AppState, pinger: &Arc<Pinger>) -> Result<()> {
 
 /// Erst Ping; antwortet das Gerät nicht, werden bekannte offene Ports per TCP geprüft.
 async fn check_device(pinger: &Pinger, ip: Ipv4Addr, open_ports: &[i32]) -> Option<Duration> {
-    if let Some(rtt) = pinger.ping(ip, Duration::from_secs(1)).await {
+    if let Some(rtt) = pinger.ping(ip, Duration::from_secs(1), 2).await {
         return Some(rtt);
     }
     let known: Vec<u16> = open_ports.iter().filter_map(|&p| u16::try_from(p).ok()).take(3).collect();

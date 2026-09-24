@@ -78,13 +78,13 @@ impl Pinger {
         Self { client, next_id: AtomicU16::new(1) }
     }
 
-    /// Sendet bis zu zwei Pings. Liefert die Antwortzeit oder `None`.
-    pub async fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> Option<Duration> {
+    /// Sendet bis zu `tries` Pings. Liefert die Antwortzeit oder `None`.
+    pub async fn ping(&self, ip: Ipv4Addr, timeout: Duration, tries: u16) -> Option<Duration> {
         let client = self.client.as_ref()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut pinger = client.pinger(IpAddr::V4(ip), PingIdentifier(id)).await;
         pinger.timeout(timeout);
-        for seq in 0..2u16 {
+        for seq in 0..tries {
             if let Ok((_, rtt)) = pinger.ping(PingSequence(seq), &[0u8; 32]).await {
                 return Some(rtt);
             }

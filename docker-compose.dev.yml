@@ -38,7 +38,11 @@ services:
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       DISCOVERY_INTERVAL_MIN: ${DISCOVERY_INTERVAL_MIN:-15}
       MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-60}
+      PUBLIC_URL: https://localhost:8443
       RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # Enthält den Tresor-Schlüssel (secret.key) für gespeicherte Zugangsdaten – mitsichern!
+      - dev-app-data:/data
     cap_drop: [ALL]
     cap_add: [NET_RAW]
     read_only: true
@@ -58,4 +62,5 @@ services:
 
 volumes:
   dev-db-data:
+  dev-app-data:
   dev-caddy-data:

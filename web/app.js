@@ -1,10 +1,12 @@
 'use strict';
 /*
  * NetPulse – Weboberfläche (ohne Build-Schritt, ohne externe Bibliotheken).
+ * Aufteilung: app.js (Grundfunktionen, Navigation, Dashboard), devices.js (Geräte),
+ * admin.js (Alarme, Netze, Zugangsdaten, Benachrichtigungen, Benutzer, Konto).
  *
  * Sicherheit:
  * - Alle Daten aus der API werden mit esc() maskiert, bevor sie ins HTML kommen (XSS-Schutz).
- *   Hostnamen stammen z. B. aus DNS und sind damit nicht vertrauenswürdig.
+ *   Hostnamen stammen z. B. aus DNS/SNMP und sind damit nicht vertrauenswürdig.
  * - Keine Inline-Skripte oder -Styles (die Content-Security-Policy verbietet sie).
  * - Jede Anfrage schickt den Header X-NetPulse-Csrf mit (CSRF-Schutz).
  */
@@ -17,8 +19,9 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg#i-${name}"/></svg>`;
 
-const state = { user: null, refreshTimer: null };
+const state = { user: null, refreshTimer: null, globalTimer: null, summary: null };
 
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch('/api' + path, {
@@ -38,13 +41,15 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 const view = () => $('#view');
+const isAdmin = () => state.user && state.user.role === 'admin';
 
 function toast(message, isError = false) {
   const el = document.createElement('div');
   el.className = 'toast' + (isError ? ' error' : '');
-  el.textContent = message;
+  el.innerHTML = `${icon(isError ? 'alert-triangle' : 'circle-check')}<span></span>`;
+  el.querySelector('span').textContent = message;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  setTimeout(() => el.remove(), 4500);
 }
 
 /** Führt eine Aktion aus und zeigt Fehler als Hinweis an */
@@ -52,15 +57,32 @@ async function attempt(fn, successMessage) {
   try {
     await fn();
     if (successMessage) toast(successMessage);
+    return true;
   } catch (e) {
     toast(e.message, true);
+    return false;
   }
 }
 
 /** Breiten von Balken setzen (per JavaScript, weil die CSP Inline-Styles verbietet) */
 function applyWidths(root = document) {
-  $$('[data-w]', root).forEach((el) => { el.style.width = `${el.dataset.w}%`; });
+  $$('[data-w]', root).forEach((el) => { el.style.width = `${Math.max(0, Math.min(100, Number(el.dataset.w)))}%`; });
 }
+
+/** Modaler Dialog; liefert das <dialog>-Element */
+function openModal(title, bodyHtml) {
+  const dialog = $('#modal');
+  dialog.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>
+    <button class="icon-btn" type="button" data-close title="Schließen">${icon('x')}</button></div>
+    <div class="dlg-body">${bodyHtml}</div>`;
+  dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
+  dialog.showModal();
+  return dialog;
+}
+
+// ---------------------------------------------------------------------------
+// Formatierung
+// ---------------------------------------------------------------------------
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('de-DE') : '–');
 function fmtAgo(iso) {
@@ -77,14 +99,75 @@ function fmtMs(v) {
   if (v < 1) return `${v.toFixed(2)} ms`;
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ms`;
 }
+function fmtBytes(b) {
+  if (b == null || Number.isNaN(b)) return '–';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let i = 0;
+  let v = Number(b);
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+function fmtBps(b) {
+  if (b == null) return '–';
+  const units = ['bit/s', 'kbit/s', 'Mbit/s', 'Gbit/s'];
+  let i = 0;
+  let v = Number(b);
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i += 1; }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+function fmtDuration(seconds) {
+  if (seconds == null) return '–';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d} T. ${h} Std.`;
+  if (h > 0) return `${h} Std. ${m} Min.`;
+  return `${m} Min.`;
+}
+const fmtPct = (v) => (v == null ? '–' : `${Math.round(v)} %`);
 const pct = (part, total) => (total ? Math.round((part / total) * 1000) / 10 : 0);
 
+// ---------------------------------------------------------------------------
+// Gerätetypen, Status, Ports
+// ---------------------------------------------------------------------------
+
+const TYPES = {
+  router: { label: 'Router', icon: 'router', tone: 't-network' },
+  switch: { label: 'Switch', icon: 'switch-horizontal', tone: 't-network' },
+  access_point: { label: 'Access Point', icon: 'access-point', tone: 't-network' },
+  firewall: { label: 'Firewall', icon: 'wall', tone: 't-network' },
+  network: { label: 'Netzwerkgerät', icon: 'network', tone: 't-network' },
+  server: { label: 'Server', icon: 'server', tone: 't-server' },
+  hypervisor: { label: 'Hypervisor', icon: 'stack-2', tone: 't-server' },
+  linux: { label: 'Linux', icon: 'server-2', tone: 't-server' },
+  nas: { label: 'NAS', icon: 'database', tone: 't-storage' },
+  raspberry_pi: { label: 'Raspberry Pi', icon: 'cpu', tone: 't-server' },
+  windows: { label: 'Windows-PC', icon: 'brand-windows', tone: 't-client' },
+  apple: { label: 'Mac', icon: 'brand-apple', tone: 't-client' },
+  computer: { label: 'Computer', icon: 'device-desktop', tone: 't-client' },
+  printer: { label: 'Drucker', icon: 'printer', tone: 't-media' },
+  camera: { label: 'Kamera', icon: 'device-cctv', tone: 't-media' },
+  phone: { label: 'Smartphone', icon: 'device-mobile', tone: 't-mobile' },
+  tablet: { label: 'Tablet', icon: 'device-tablet', tone: 't-mobile' },
+  tv: { label: 'TV / Streaming', icon: 'device-tv', tone: 't-media' },
+  speaker: { label: 'Lautsprecher / Assistent', icon: 'device-speaker', tone: 't-media' },
+  console: { label: 'Spielekonsole', icon: 'device-gamepad-2', tone: 't-mobile' },
+  ups: { label: 'USV', icon: 'battery-charging', tone: 't-power' },
+  iot: { label: 'Smart Home / IoT', icon: 'bulb', tone: 't-iot' },
+  unknown: { label: 'Unbekannt', icon: 'help-circle', tone: 't-unknown' },
+};
+const typeInfo = (t) => TYPES[t] || TYPES.unknown;
+const devIcon = (d, size = '') => {
+  const t = typeInfo(d.device_type);
+  return `<span class="dev-icon ${size} ${t.tone}" title="${esc(t.label)}">${icon(t.icon)}</span>`;
+};
+
 const STATUS_LABEL = { up: 'online', down: 'offline', unknown: 'unbekannt' };
-const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert' };
 const statusBadge = (d) =>
   d.monitored === false
-    ? '<span class="badge st-unknown">nicht überwacht</span>'
-    : `<span class="badge st-${esc(d.status)}">${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
+    ? '<span class="badge plain">nicht überwacht</span>'
+    : `<span class="badge st-${esc(d.status)}"><span class="dot ${esc(d.status)}"></span>${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
+const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel' };
 const eventBadge = (kind) => `<span class="badge ev-${esc(kind)}">${esc(EVENT_LABEL[kind] || kind)}</span>`;
 const deviceLabel = (d) => d.name || d.hostname || d.ip;
 
@@ -95,56 +178,69 @@ const PORT_NAMES = {
   5985: 'WinRM', 5986: 'WinRM-TLS', 8006: 'Proxmox', 8080: 'HTTP-Alt', 8443: 'HTTPS-Alt', 9100: 'Drucker',
 };
 const portLabel = (p) => (PORT_NAMES[p] ? `${p} ${PORT_NAMES[p]}` : String(p));
-const portChips = (list) => (list && list.length ? list.map((p) => `<span class="chip">${esc(portLabel(p))}</span>`).join(' ') : '–');
+const portChips = (list) => (list && list.length ? list.map((p) => `<span class="chip">${esc(portLabel(p))}</span>`).join('') : '<span class="muted">–</span>');
+const empty = (text, iconName = 'circle-check') => `<div class="empty">${icon(iconName)}<span>${esc(text)}</span></div>`;
 
-function lastDiscoveryLine(summary) {
-  const d = summary.last_discovery;
-  if (!d) return '<p class="info-line">Noch kein Scan durchgeführt.</p>';
-  return `<p class="info-line">Letzter Scan ${esc(fmtAgo(d.time))}: ${esc(d.found)} aktive Geräte in ${esc(d.scanned)} Adressen (${esc(d.duration_s)} s)</p>`;
+function meter(value, { warn = 80, crit = 90 } = {}) {
+  const cls = value >= crit ? 'crit' : value >= warn ? 'warn' : '';
+  return `<div class="meter ${cls}"><span data-w="${Number(value) || 0}"></span></div>`;
 }
 
 // ---------------------------------------------------------------------------
-// Latenz-Diagramm (SVG, ohne Bibliothek)
+// Diagramme (SVG, ohne Bibliothek)
 // ---------------------------------------------------------------------------
 
-function latencyChart(points, height = 170) {
-  if (!points.length) return '<p class="muted">Noch keine Messwerte vorhanden.</p>';
-  const W = 640;
+/**
+ * Liniendiagramm. `series`: [{ key, label }] – Farbe über CSS-Klasse c0…c4.
+ * `outages`: optional, markiert Zeitfenster mit Verfügbarkeit < 100 % rot.
+ */
+function lineChart(points, { series, format = (v) => String(Math.round(v)), height = 180, width = 680, maxValue = null, outages = false } = {}) {
+  const usable = points.filter((p) => series.some((s) => p[s.key] != null));
+  if (!usable.length) return empty('Noch keine Messwerte vorhanden', 'activity');
+  const W = width;
   const H = height;
-  const P = { l: 46, r: 8, t: 10, b: 22 };
+  const P = { l: 58, r: 10, t: 12, b: 24 };
   const times = points.map((p) => new Date(p.bucket).getTime());
   const t0 = times[0];
   const t1 = Math.max(times[times.length - 1], t0 + 60000);
-  const values = points.map((p) => p.rtt_ms).filter((v) => v != null);
-  const max = Math.max(1, ...values) * 1.15;
+  const values = points.flatMap((p) => series.map((s) => p[s.key])).filter((v) => v != null);
+  const max = maxValue ?? Math.max(1e-9, ...values) * 1.15;
   const x = (t) => P.l + ((t - t0) / (t1 - t0)) * (W - P.l - P.r);
-  const y = (v) => P.t + (1 - v / max) * (H - P.t - P.b);
+  const y = (v) => P.t + (1 - Math.min(v, max) / max) * (H - P.t - P.b);
+  const fmtT = (t) => new Date(t).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-  // Linie unterbrechen, wo keine Werte vorliegen (Gerät offline)
-  let path = '';
-  let penDown = false;
-  points.forEach((p, i) => {
-    if (p.rtt_ms == null) { penDown = false; return; }
-    path += `${penDown ? 'L' : 'M'}${x(times[i]).toFixed(1)},${y(p.rtt_ms).toFixed(1)} `;
-    penDown = true;
+  let svg = '';
+  for (let i = 0; i <= 3; i += 1) {
+    const v = (max / 3) * i;
+    svg += `<line class="grid-line" x1="${P.l}" x2="${W - P.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
+      <text class="lbl" x="${P.l - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${esc(format(v))}</text>`;
+  }
+  if (outages) {
+    const slot = Math.max(3, (W - P.l - P.r) / points.length);
+    points.forEach((p, i) => {
+      if (p.availability != null && p.availability < 1) {
+        svg += `<rect class="outage" x="${(x(times[i]) - slot / 2).toFixed(1)}" y="${P.t}" width="${slot.toFixed(1)}" height="${H - P.t - P.b}" opacity="${(0.2 + 0.6 * (1 - p.availability)).toFixed(2)}"><title>Ausfall ${Math.round((1 - p.availability) * 100)} %</title></rect>`;
+      }
+    });
+  }
+  series.forEach((s, si) => {
+    let path = '';
+    let pen = false;
+    points.forEach((p, i) => {
+      const v = p[s.key];
+      if (v == null) { pen = false; return; }
+      path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(1)},${y(v).toFixed(1)} `;
+      pen = true;
+    });
+    svg += `<path class="line c${si}" d="${path}"/>`;
   });
-  const slot = Math.max(3, (W - P.l - P.r) / points.length);
-  const outages = points
-    .map((p, i) => (p.availability != null && p.availability < 1
-      ? `<rect class="outage" x="${(x(times[i]) - slot / 2).toFixed(1)}" y="${P.t}" width="${slot.toFixed(1)}" height="${H - P.t - P.b}" opacity="${(0.25 + 0.6 * (1 - p.availability)).toFixed(2)}"><title>Ausfall ${Math.round((1 - p.availability) * 100)} %</title></rect>`
-      : ''))
-    .join('');
-  const fmt = (t) => new Date(t).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Verlauf der Antwortzeit">
-    ${outages}
-    <line class="axis" x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}"/>
-    <line class="axis" x1="${P.l}" y1="${P.t}" x2="${P.l}" y2="${H - P.b}"/>
-    <text class="lbl" x="${P.l - 6}" y="${P.t + 9}" text-anchor="end">${max < 10 ? max.toFixed(1) : Math.round(max)} ms</text>
-    <text class="lbl" x="${P.l - 6}" y="${H - P.b}" text-anchor="end">0</text>
-    <text class="lbl" x="${P.l}" y="${H - 6}">${esc(fmt(t0))}</text>
-    <text class="lbl" x="${W - P.r}" y="${H - 6}" text-anchor="end">${esc(fmt(t1))}</text>
-    <path class="line" d="${path}"/>
-  </svg>`;
+  svg += `<line class="axis" x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}"/>
+    <text class="lbl" x="${P.l}" y="${H - 6}">${esc(fmtT(t0))}</text>
+    <text class="lbl" x="${W - P.r}" y="${H - 6}" text-anchor="end">${esc(fmtT(t1))}</text>`;
+  const legend = series.length > 1
+    ? `<div class="legend">${series.map((s, i) => `<span><i class="bgc${i}"></i>${esc(s.label)}</span>`).join('')}</div>`
+    : '';
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${svg}</svg>${legend}`;
 }
 
 function availability(points) {
@@ -154,69 +250,89 @@ function availability(points) {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard-Widgets. Jedes Widget bekommt die geladenen Daten (ctx) und seine Einstellungen.
+// Dashboard
 // ---------------------------------------------------------------------------
 
 const WIDGETS = {
-  summary: { title: 'Status-Übersicht', render: wSummary },
-  down: { title: 'Nicht erreichbar', render: wDown },
-  events: { title: 'Letzte Ereignisse', render: wEvents },
-  status_chart: { title: 'Verteilung', render: wStatusChart },
-  services: { title: 'Dienste im Netz', render: wServices },
-  new: { title: 'Neu entdeckt (7 Tage)', render: wNew },
-  slowest: { title: 'Langsamste Antwortzeiten', render: wSlowest },
-  device: { title: 'Gerät', render: wDevice, perDevice: true },
+  summary: { title: 'Übersicht', icon: 'gauge', render: wSummary },
+  alerts: { title: 'Offene Alarme', icon: 'bell', render: wAlerts },
+  down: { title: 'Nicht erreichbar', icon: 'alert-triangle', render: wDown },
+  types: { title: 'Gerätetypen', icon: 'category', render: wTypes },
+  events: { title: 'Letzte Ereignisse', icon: 'list-details', render: wEvents },
+  status_chart: { title: 'Verteilung', icon: 'activity', render: wStatusChart },
+  services: { title: 'Dienste im Netz', icon: 'plug-connected', render: wServices },
+  new: { title: 'Neu entdeckt (7 Tage)', icon: 'radar', render: wNew },
+  slowest: { title: 'Langsamste Antwortzeiten', icon: 'clock', render: wSlowest },
+  device: { title: 'Gerät', icon: 'activity', render: wDevice, perDevice: true },
 };
+
+function kpi(label, value, iconName, tone, href) {
+  return `<a class="kpi" href="${href}"><span class="kpi-icon ${tone}">${icon(iconName)}</span>
+    <span><div class="kpi-value">${esc(value)}</div><div class="kpi-label">${esc(label)}</div></span></a>`;
+}
 
 function wSummary({ summary }) {
   const s = summary.devices;
-  const tile = (label, value, cls, href) =>
-    `<a class="tile ${cls}" href="${href}"><span class="tile-value">${esc(value)}</span><span class="tile-label">${esc(label)}</span></a>`;
-  return `<div class="tiles">
-    ${tile('Geräte gesamt', s.total, '', '#/devices')}
-    ${tile('Online', s.up, 'st-up', '#/devices?status=up')}
-    ${tile('Offline', s.down, 'st-down', '#/devices?status=down')}
-    ${tile('Unbekannt', s.unknown, 'st-unknown', '#/devices?status=unknown')}
-    ${tile('Nicht überwacht', s.unmonitored, '', '#/devices?status=unmonitored')}
-    ${tile('Neu (24 h)', s.new_24h, '', '#/devices?status=new')}
+  return `<div class="kpis">
+    ${kpi('Geräte', s.total, 'devices', 'tone-accent', '#/devices')}
+    ${kpi('Online', s.up, 'circle-check', 'tone-up', '#/devices?status=up')}
+    ${kpi('Offline', s.down, 'circle-x', 'tone-down', '#/devices?status=down')}
+    ${kpi('Offene Alarme', summary.open_alerts, 'bell', summary.open_alerts ? 'tone-warn' : 'tone-muted', '#/alerts')}
+    ${kpi('Neu (24 h)', s.new_24h, 'radar', 'tone-info', '#/devices?status=new')}
   </div>`;
+}
+
+function deviceRow(d, meta) {
+  return `<li><a class="lead" href="#/device/${d.id}">${devIcon(d, 'sm')}<span class="ellipsis">${esc(deviceLabel(d))}</span></a>
+    <span class="meta">${meta}</span></li>`;
 }
 
 function wDown({ devices }) {
   const down = devices.filter((d) => d.monitored && d.status === 'down');
-  if (!down.length) return '<p class="muted">Alle überwachten Geräte sind erreichbar ✓</p>';
-  return `<ul class="list">${down.map((d) => `
-    <li><a href="#/device/${d.id}">${esc(deviceLabel(d))}</a>
-        <span class="meta">${esc(d.ip)} · zuletzt ${esc(fmtAgo(d.last_seen))}</span></li>`).join('')}</ul>`;
+  if (!down.length) return empty('Alle überwachten Geräte sind erreichbar');
+  return `<ul class="list">${down.map((d) => deviceRow(d, `${esc(d.ip)} · seit ${esc(fmtAgo(d.status_since))}`)).join('')}</ul>`;
+}
+
+function wAlerts({ alerts }) {
+  if (!alerts.length) return empty('Keine offenen Alarme');
+  return `<ul class="list">${alerts.slice(0, 8).map((a) => `
+    <li><span class="lead">${icon('alert-triangle')}<span class="ellipsis">${a.device_id ? `<a href="#/device/${a.device_id}">${esc(a.message)}</a>` : esc(a.message)}</span></span>
+    <span class="meta">${esc(fmtAgo(a.opened_at))}</span></li>`).join('')}</ul>`;
 }
 
 function eventList(events) {
-  if (!events.length) return '<p class="muted">Keine Ereignisse.</p>';
+  if (!events.length) return empty('Keine Ereignisse', 'list-details');
   return `<ul class="list">${events.map((e) => `
-    <li><span>${eventBadge(e.kind)} ${e.device_id ? `<a href="#/device/${e.device_id}">${esc(e.message)}</a>` : esc(e.message)}</span>
+    <li><span class="lead">${eventBadge(e.kind)}<span class="ellipsis">${e.device_id ? `<a href="#/device/${e.device_id}">${esc(e.message)}</a>` : esc(e.message)}</span></span>
         <span class="meta" title="${esc(fmtTime(e.time))}">${esc(fmtAgo(e.time))}</span></li>`).join('')}</ul>`;
 }
 
 function wEvents({ events }) {
-  return eventList(events.slice(0, 12));
+  return eventList(events.slice(0, 10));
 }
 
 function wStatusChart({ summary }) {
   const s = summary.devices;
-  const parts = [
-    ['up', 'Online', s.up], ['down', 'Offline', s.down],
-    ['unknown', 'Unbekannt', s.unknown], ['off', 'Nicht überwacht', s.unmonitored],
-  ];
-  if (!s.total) return '<p class="muted">Noch keine Geräte.</p>';
+  const parts = [['up', 'Online', s.up], ['down', 'Offline', s.down], ['unknown', 'Unbekannt', s.unknown], ['off', 'Nicht überwacht', s.unmonitored]];
+  if (!s.total) return empty('Noch keine Geräte', 'devices');
   return `<div class="stack">${parts.map(([k, , v]) => (v ? `<span class="bg-${k}" data-w="${pct(v, s.total)}"></span>` : '')).join('')}</div>
-    <div class="legend">${parts.map(([k, label, v]) => `<span><i class="bg-${k}"></i>${esc(label)}: ${v} (${pct(v, s.total)} %)</span>`).join('')}</div>`;
+    <div class="legend">${parts.map(([k, label, v]) => `<span><i class="bg-${k}"></i>${esc(label)}: ${v}</span>`).join('')}</div>`;
+}
+
+function wTypes({ summary }) {
+  const types = summary.types || [];
+  if (!types.length) return empty('Noch keine Geräte', 'devices');
+  const max = Math.max(...types.map((t) => t.count));
+  return `<ul class="list">${types.slice(0, 9).map((t) => `
+    <li><a class="lead" href="#/devices?type=${esc(t.type)}">${devIcon({ device_type: t.type }, 'sm')}<span>${esc(typeInfo(t.type).label)}</span></a>
+      <span class="meta">${t.count}</span></li>`).join('')}</ul>${max ? '' : ''}`;
 }
 
 function wServices({ devices }) {
   const counts = new Map();
   devices.forEach((d) => (d.open_ports || []).forEach((p) => counts.set(p, (counts.get(p) || 0) + 1)));
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-  if (!top.length) return '<p class="muted">Noch keine offenen Ports gefunden.</p>';
+  if (!top.length) return empty('Noch keine offenen Ports gefunden', 'plug-connected');
   const max = top[0][1];
   return `<div class="bars">${top.map(([port, n]) => `
     <span>${esc(portLabel(port))}</span><span class="bar" data-w="${pct(n, max)}"></span><span class="muted">${n}</span>`).join('')}</div>`;
@@ -224,43 +340,47 @@ function wServices({ devices }) {
 
 function wNew({ devices }) {
   const limit = Date.now() - 7 * 86400000;
-  const fresh = devices
-    .filter((d) => new Date(d.first_seen).getTime() > limit)
-    .sort((a, b) => new Date(b.first_seen) - new Date(a.first_seen))
-    .slice(0, 10);
-  if (!fresh.length) return '<p class="muted">Keine neuen Geräte.</p>';
-  return `<ul class="list">${fresh.map((d) => `
-    <li><a href="#/device/${d.id}">${esc(deviceLabel(d))}</a><span class="meta">${esc(d.ip)} · ${esc(fmtAgo(d.first_seen))}</span></li>`).join('')}</ul>`;
+  const fresh = devices.filter((d) => new Date(d.first_seen).getTime() > limit)
+    .sort((a, b) => new Date(b.first_seen) - new Date(a.first_seen)).slice(0, 8);
+  if (!fresh.length) return empty('Keine neuen Geräte', 'radar');
+  return `<ul class="list">${fresh.map((d) => deviceRow(d, esc(fmtAgo(d.first_seen)))).join('')}</ul>`;
 }
 
 function wSlowest({ devices }) {
-  const slow = devices
-    .filter((d) => d.monitored && d.status === 'up' && d.last_rtt_ms != null)
-    .sort((a, b) => b.last_rtt_ms - a.last_rtt_ms)
-    .slice(0, 8);
-  if (!slow.length) return '<p class="muted">Keine Messwerte.</p>';
-  return `<ul class="list">${slow.map((d) => `
-    <li><a href="#/device/${d.id}">${esc(deviceLabel(d))}</a><span class="meta">${esc(fmtMs(d.last_rtt_ms))}</span></li>`).join('')}</ul>`;
+  const slow = devices.filter((d) => d.monitored && d.status === 'up' && d.last_rtt_ms != null)
+    .sort((a, b) => b.last_rtt_ms - a.last_rtt_ms).slice(0, 8);
+  if (!slow.length) return empty('Keine Messwerte', 'clock');
+  return `<ul class="list">${slow.map((d) => deviceRow(d, esc(fmtMs(d.last_rtt_ms)))).join('')}</ul>`;
 }
 
 async function wDevice(_ctx, widget) {
   const data = await api(`/devices/${encodeURIComponent(widget.device_id)}?hours=24`);
   const d = data.device;
   const avail = availability(data.points);
-  return `<p>${statusBadge(d)} <a href="#/device/${d.id}">${esc(deviceLabel(d))}</a>
-      <span class="muted">· ${esc(d.ip)} · ${esc(fmtMs(d.last_rtt_ms))}${avail != null ? ` · ${avail} % verfügbar (24 h)` : ''}</span></p>
-    ${latencyChart(data.points, 140)}`;
+  return `<div class="cell-dev">${devIcon(d, 'sm')}<a href="#/device/${d.id}">${esc(deviceLabel(d))}</a> ${statusBadge(d)}</div>
+    <p class="muted small">${esc(d.ip)} · ${esc(fmtMs(d.last_rtt_ms))}${avail != null ? ` · ${avail} % verfügbar (24 h)` : ''}</p>
+    ${lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, height: 170, width: 440, outages: true })}`;
 }
 
 function widgetTitle(widget, ctx) {
   if (widget.type !== 'device') return WIDGETS[widget.type].title;
   const d = ctx.devices.find((x) => x.id === widget.device_id);
-  return d ? `Gerät: ${deviceLabel(d)}` : 'Gerät (gelöscht)';
+  return d ? deviceLabel(d) : 'Gerät (gelöscht)';
 }
 
-// ---------------------------------------------------------------------------
-// Ansichten
-// ---------------------------------------------------------------------------
+function scanBanner(scan) {
+  if (!scan || !scan.running) return '';
+  return `<div class="notice info">${icon('radar')}<div>Scan läuft: <strong>${esc(scan.network)}</strong> –
+    ${scan.done.toLocaleString('de-DE')} von ${scan.total.toLocaleString('de-DE')} Adressen, ${scan.found} Geräte gefunden
+    ${scan.queued ? ` · ${scan.queued} weitere Netze in der Warteschlange` : ''}
+    <div class="progress"><span data-w="${pct(scan.done, scan.total)}"></span></div></div></div>`;
+}
+
+function lastDiscoveryLine(summary) {
+  const d = summary.last_discovery;
+  if (!d) return '<p class="info-line">Noch kein Scan abgeschlossen.</p>';
+  return `<p class="info-line">Letzter Scan ${esc(fmtAgo(d.time))}${d.network ? ` (${esc(d.network)})` : ''}: ${esc(d.found)} aktive Geräte in ${esc(Number(d.scanned).toLocaleString('de-DE'))} Adressen, ${esc(d.duration_s)} s</p>`;
+}
 
 async function viewDashboard() {
   let layout = await api('/dashboard');
@@ -268,8 +388,10 @@ async function viewDashboard() {
   let editing = false;
 
   const load = async () => {
-    const [summary, devices, events] = await Promise.all([api('/summary'), api('/devices'), api('/events?limit=15')]);
-    ctx = { summary, devices, events };
+    const [summary, devices, events, alerts] = await Promise.all([
+      api('/summary'), api('/devices'), api('/events?limit=15'), api('/alerts?open=true&limit=20'),
+    ]);
+    ctx = { summary, devices, events, alerts };
   };
 
   const render = async () => {
@@ -277,37 +399,33 @@ async function viewDashboard() {
       const def = WIDGETS[widget.type];
       if (!def) return '';
       let body;
-      try {
-        body = await def.render(ctx, widget);
-      } catch (e) {
-        body = `<p class="error">${esc(e.message)}</p>`;
-      }
+      try { body = await def.render(ctx, widget); } catch (e) { body = `<p class="error">${esc(e.message)}</p>`; }
       const size = [1, 2, 3].includes(widget.size) ? widget.size : 1;
       const tools = editing ? `<div class="widget-tools">
-          <button class="ghost" data-act="left" data-idx="${i}" title="Nach vorne">◀</button>
-          <button class="ghost" data-act="right" data-idx="${i}" title="Nach hinten">▶</button>
+          <button class="ghost" data-act="left" data-idx="${i}" title="Nach vorne">${icon('chevron-left', 'i-sm')}</button>
+          <button class="ghost" data-act="right" data-idx="${i}" title="Nach hinten">${icon('chevron-right', 'i-sm')}</button>
           <button class="ghost" data-act="size" data-idx="${i}" title="Breite ändern">${size}/3</button>
-          <button class="ghost" data-act="remove" data-idx="${i}" title="Entfernen">✕</button></div>` : '';
+          <button class="ghost" data-act="remove" data-idx="${i}" title="Entfernen">${icon('x', 'i-sm')}</button></div>` : '';
       return `<section class="card widget span-${size}" data-idx="${i}" draggable="${editing}">
-          <header><h2>${esc(widgetTitle(widget, ctx))}</h2>${tools}</header>
+          <header><h2>${icon(def.icon)}${esc(widgetTitle(widget, ctx))}</h2>${tools}</header>
           <div class="widget-body">${body}</div></section>`;
     }));
 
     const addOptions = `<option value="">+ Widget hinzufügen …</option>
       ${Object.entries(WIDGETS).filter(([, def]) => !def.perDevice).map(([key, def]) => `<option value="${key}">${esc(def.title)}</option>`).join('')}
-      <optgroup label="Einzelnes Gerät (Latenz-Verlauf)">
+      <optgroup label="Einzelnes Gerät (Antwortzeit)">
         ${ctx.devices.map((d) => `<option value="device:${d.id}">${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}
       </optgroup>`;
     const actions = editing
       ? `<select id="add-widget">${addOptions}</select>
-         <button id="save-dash" type="button">Speichern</button>
+         <button id="save-dash" type="button">${icon('check')}Speichern</button>
          <button id="cancel-dash" class="ghost" type="button">Abbrechen</button>`
-      : '<button id="edit-dash" class="ghost" type="button">Anpassen</button>';
+      : `<button id="edit-dash" class="ghost" type="button">${icon('layout-grid')}Anpassen</button>`;
 
     view().innerHTML = `
-      <div class="page-head"><h1>Dashboard</h1><div class="actions">${actions}</div></div>
-      ${lastDiscoveryLine(ctx.summary)}
-      <div class="grid${editing ? ' editing' : ''}">${cards.join('') || '<p class="muted">Keine Widgets – über „Anpassen“ hinzufügen.</p>'}</div>`;
+      <div class="page-head"><div>${lastDiscoveryLine(ctx.summary)}</div><div class="actions">${actions}</div></div>
+      ${scanBanner(ctx.summary.scan)}
+      <div class="grid${editing ? ' editing' : ''}">${cards.join('') || empty('Keine Widgets – über „Anpassen“ hinzufügen.', 'layout-grid')}</div>`;
     applyWidths(view());
     bindEditing();
   };
@@ -320,11 +438,7 @@ async function viewDashboard() {
 
   function bindEditing() {
     $('#edit-dash')?.addEventListener('click', () => { editing = true; render(); });
-    $('#cancel-dash')?.addEventListener('click', async () => {
-      editing = false;
-      layout = await api('/dashboard');
-      render();
-    });
+    $('#cancel-dash')?.addEventListener('click', async () => { editing = false; layout = await api('/dashboard'); render(); });
     $('#save-dash')?.addEventListener('click', () => attempt(async () => {
       layout = await api('/dashboard', { method: 'PUT', body: layout });
       editing = false;
@@ -345,7 +459,6 @@ async function viewDashboard() {
       if (btn.dataset.act === 'remove') layout.splice(i, 1);
       render();
     }));
-    // Ziehen & Ablegen zum Umsortieren
     if (!editing) return;
     let dragIdx = null;
     $$('.widget').forEach((card) => {
@@ -362,301 +475,27 @@ async function viewDashboard() {
 
   await load();
   await render();
-  autoRefresh(async () => {
-    if (editing) return;
-    await load();
-    await render();
-  });
-}
-
-async function viewDevices(_arg, params) {
-  let devices = await api('/devices');
-  const filters = { q: '', status: params.get('status') || '' };
-
-  view().innerHTML = `
-    <div class="page-head"><h1>Geräte</h1>
-      <div class="actions">
-        <input id="q" type="search" placeholder="Suchen: Name, IP, MAC, Port …" aria-label="Suchen">
-        <select id="status-filter" aria-label="Status">
-          <option value="">Alle</option><option value="up">Online</option><option value="down">Offline</option>
-          <option value="unknown">Unbekannt</option><option value="unmonitored">Nicht überwacht</option>
-          <option value="new">Neu (24 h)</option>
-        </select>
-      </div></div>
-    <div class="card table-wrap"><table>
-      <thead><tr><th>Status</th><th>Name</th><th>IP</th><th>MAC</th><th>Dienste</th><th>Antwortzeit</th><th>Zuletzt gesehen</th></tr></thead>
-      <tbody id="rows"></tbody></table></div>
-    <p class="muted" id="count"></p>`;
-  $('#status-filter').value = filters.status;
-
-  const matches = (d) => {
-    if (filters.status === 'unmonitored' && d.monitored) return false;
-    if (filters.status === 'new' && Date.now() - new Date(d.first_seen).getTime() > 86400000) return false;
-    if (['up', 'down', 'unknown'].includes(filters.status) && (!d.monitored || d.status !== filters.status)) return false;
-    if (!filters.q) return true;
-    const haystack = [d.name, d.hostname, d.ip, d.mac, d.notes, ...(d.open_ports || []).map(portLabel)].join(' ').toLowerCase();
-    return haystack.includes(filters.q);
-  };
-
-  const renderRows = () => {
-    const shown = devices.filter(matches);
-    $('#rows').innerHTML = shown.map((d) => `
-      <tr class="clickable${d.monitored ? '' : ' unmonitored'}" data-id="${d.id}">
-        <td>${statusBadge(d)}</td>
-        <td>${esc(deviceLabel(d))}${d.name && d.hostname ? `<br><span class="muted">${esc(d.hostname)}</span>` : ''}</td>
-        <td class="mono">${esc(d.ip)}</td>
-        <td class="mono">${esc(d.mac || '–')}</td>
-        <td>${portChips(d.open_ports)}</td>
-        <td>${esc(fmtMs(d.last_rtt_ms))}</td>
-        <td title="${esc(fmtTime(d.last_seen))}">${esc(fmtAgo(d.last_seen))}</td>
-      </tr>`).join('') || '<tr><td colspan="7" class="muted">Keine Geräte gefunden.</td></tr>';
-    $('#count').textContent = `${shown.length} von ${devices.length} Geräten`;
-  };
-
-  $('#q').addEventListener('input', (ev) => { filters.q = ev.target.value.trim().toLowerCase(); renderRows(); });
-  $('#status-filter').addEventListener('change', (ev) => { filters.status = ev.target.value; renderRows(); });
-  $('#rows').addEventListener('click', (ev) => {
-    const row = ev.target.closest('tr[data-id]');
-    if (row) location.hash = `#/device/${row.dataset.id}`;
-  });
-  renderRows();
-  autoRefresh(async () => { devices = await api('/devices'); renderRows(); });
-}
-
-async function viewDevice(id) {
-  let hours = 24;
-  const isAdmin = state.user.role === 'admin';
-  let data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
-  const d0 = data.device;
-
-  view().innerHTML = `
-    <div class="page-head">
-      <h1 id="dev-title"></h1>
-      <div class="actions"><a href="#/devices">← Alle Geräte</a></div>
-    </div>
-    <div class="grid">
-      <section class="card span-1"><header><h2>Details</h2></header><div id="dev-details"></div></section>
-      <section class="card span-2">
-        <header><h2>Antwortzeit &amp; Verfügbarkeit</h2>
-          <select id="range" aria-label="Zeitraum">
-            <option value="24">24 Stunden</option><option value="168">7 Tage</option><option value="720">30 Tage</option><option value="2160">90 Tage</option>
-          </select></header>
-        <div id="dev-chart"></div>
-      </section>
-      ${isAdmin ? `<section class="card span-1"><header><h2>Bearbeiten</h2></header>
-        <form class="form" id="dev-form">
-          <label>Anzeigename<input name="name" maxlength="200" value="${esc(d0.name || '')}" placeholder="${esc(d0.hostname || d0.ip)}"></label>
-          <label>Notizen<textarea name="notes" maxlength="5000">${esc(d0.notes || '')}</textarea></label>
-          <label class="inline"><input type="checkbox" name="monitored"${d0.monitored ? ' checked' : ''}> Erreichbarkeit überwachen</label>
-          <div class="actions"><button type="submit">Speichern</button>
-            <button type="button" class="danger" id="dev-delete">Gerät löschen</button></div>
-        </form></section>` : ''}
-      <section class="card ${isAdmin ? 'span-2' : 'span-3'}"><header><h2>Ereignisse</h2></header><div id="dev-events"></div></section>
-    </div>`;
-
-  const update = () => {
-    const d = data.device;
-    const avail = availability(data.points);
-    $('#dev-title').innerHTML = `${esc(deviceLabel(d))} ${statusBadge(d)}`;
-    $('#dev-details').innerHTML = `<dl class="details">
-      <dt>IP-Adresse</dt><dd class="mono">${esc(d.ip)}</dd>
-      <dt>MAC-Adresse</dt><dd class="mono">${esc(d.mac || '–')}</dd>
-      <dt>Hostname</dt><dd>${esc(d.hostname || '–')}</dd>
-      <dt>Antwortzeit</dt><dd>${esc(fmtMs(d.last_rtt_ms))}</dd>
-      <dt>Dienste</dt><dd>${portChips(d.open_ports)}</dd>
-      <dt>Erstmals gesehen</dt><dd>${esc(fmtTime(d.first_seen))}</dd>
-      <dt>Zuletzt gesehen</dt><dd>${esc(fmtTime(d.last_seen))}</dd>
-      <dt>Letzte Prüfung</dt><dd>${esc(fmtTime(d.last_check))}</dd>
-      ${d.notes ? `<dt>Notizen</dt><dd>${esc(d.notes)}</dd>` : ''}
-    </dl>`;
-    $('#dev-chart').innerHTML = `
-      <p class="muted">${avail != null ? `Verfügbarkeit im Zeitraum: <strong>${avail} %</strong> · ` : ''}Auflösung ${esc(data.bucket_minutes)} Min.</p>
-      ${latencyChart(data.points)}`;
-    $('#dev-events').innerHTML = eventList(data.events);
-  };
-
-  const reload = async () => {
-    data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
-    update();
-  };
-
-  $('#range').addEventListener('change', (ev) => { hours = Number(ev.target.value); reload(); });
-  $('#dev-form')?.addEventListener('submit', (ev) => {
-    ev.preventDefault();
-    const f = new FormData(ev.target);
-    attempt(async () => {
-      data.device = await api(`/devices/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: { name: f.get('name'), notes: f.get('notes'), monitored: f.get('monitored') === 'on' },
-      });
-      update();
-    }, 'Gespeichert');
-  });
-  $('#dev-delete')?.addEventListener('click', () => {
-    if (!confirm('Gerät mit allen Messwerten und Ereignissen löschen? Wird es beim nächsten Scan wieder gefunden, taucht es neu auf.')) return;
-    attempt(async () => {
-      await api(`/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      location.hash = '#/devices';
-    }, 'Gerät gelöscht');
-  });
-  update();
-  autoRefresh(reload, 60);
-}
-
-async function viewEvents() {
-  const render = async () => {
-    const events = await api('/events?limit=300');
-    view().innerHTML = `<div class="page-head"><h1>Ereignisse</h1></div>
-      <div class="card table-wrap"><table>
-        <thead><tr><th>Zeit</th><th>Art</th><th>Meldung</th></tr></thead>
-        <tbody>${events.map((e) => `<tr>
-          <td>${esc(fmtTime(e.time))}</td><td>${eventBadge(e.kind)}</td>
-          <td>${e.device_id ? `<a href="#/device/${e.device_id}">${esc(e.message)}</a>` : esc(e.message)}</td></tr>`).join('')
-          || '<tr><td colspan="3" class="muted">Keine Ereignisse.</td></tr>'}</tbody></table></div>`;
-  };
-  await render();
-  autoRefresh(render);
-}
-
-async function viewNetworks() {
-  const render = async () => {
-    const [networks, summary] = await Promise.all([api('/networks'), api('/summary')]);
-    view().innerHTML = `
-      <div class="page-head"><h1>Netzwerke</h1>
-        <div class="actions"><button id="scan-now" type="button">Jetzt scannen</button></div></div>
-      ${lastDiscoveryLine(summary)}
-      <div class="notice">Nur eigene oder ausdrücklich freigegebene Netze eintragen. Das Scannen fremder Netze
-        kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /16 (65.534 Adressen), kleinere Netze werden schneller gescannt.</div>
-      <div class="grid">
-        <section class="card span-2"><header><h2>Freigegebene Netze</h2></header>
-          <div class="table-wrap"><table><thead><tr><th>Netz</th><th>Name</th><th>Angelegt</th><th></th></tr></thead>
-          <tbody>${networks.map((n) => `<tr><td class="mono">${esc(n.cidr)}</td><td>${esc(n.name)}</td>
-            <td>${esc(fmtTime(n.created_at))}</td>
-            <td><button class="ghost" data-del="${n.id}" data-cidr="${esc(n.cidr)}" type="button">Entfernen</button></td></tr>`).join('')
-            || '<tr><td colspan="4" class="muted">Noch keine Netze – rechts eines hinzufügen.</td></tr>'}</tbody></table></div>
-        </section>
-        <section class="card span-1"><header><h2>Netz hinzufügen</h2></header>
-          <form class="form" id="net-form">
-            <label>Netz (CIDR)<input name="cidr" placeholder="192.168.178.0/24" required></label>
-            <label>Name<input name="name" placeholder="Heimnetz" maxlength="100" required></label>
-            <button type="submit">Hinzufügen &amp; scannen</button>
-          </form></section>
-      </div>`;
-
-    $('#scan-now').addEventListener('click', () => attempt(() => api('/scan', { method: 'POST' }), 'Scan gestartet – Ergebnisse erscheinen in wenigen Minuten'));
-    $('#net-form').addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      const f = new FormData(ev.target);
-      attempt(async () => {
-        await api('/networks', { method: 'POST', body: { cidr: f.get('cidr'), name: f.get('name') } });
-        await render();
-      }, 'Netz hinzugefügt, Scan läuft');
-    });
-    $$('[data-del]').forEach((btn) => btn.addEventListener('click', () => {
-      if (!confirm(`Netz ${btn.dataset.cidr} entfernen? Bereits gefundene Geräte bleiben erhalten.`)) return;
-      attempt(async () => { await api(`/networks/${btn.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Netz entfernt');
-    }));
-  };
-  await render();
-}
-
-async function viewUsers() {
-  const render = async () => {
-    const users = await api('/users');
-    view().innerHTML = `
-      <div class="page-head"><h1>Benutzer</h1></div>
-      <div class="grid">
-        <section class="card span-2"><div class="table-wrap"><table>
-          <thead><tr><th>Benutzer</th><th>Rolle</th><th>Angelegt</th><th>Letzte Anmeldung</th><th></th></tr></thead>
-          <tbody>${users.map((u) => `<tr><td>${esc(u.username)}</td>
-            <td>${u.role === 'admin' ? 'Administrator' : 'Nur lesen'}</td>
-            <td>${esc(fmtTime(u.created_at))}</td><td>${esc(fmtTime(u.last_login))}</td>
-            <td>${u.id === state.user.id ? '<span class="muted">(du)</span>' : `<button class="ghost" data-del="${u.id}" data-name="${esc(u.username)}" type="button">Löschen</button>`}</td></tr>`).join('')}
-          </tbody></table></div></section>
-        <section class="card span-1"><header><h2>Benutzer anlegen</h2></header>
-          <form class="form" id="user-form">
-            <label>Benutzername<input name="username" required minlength="3" maxlength="32" autocomplete="off"></label>
-            <label>Passwort (mind. 12 Zeichen)<input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
-            <label>Rolle<select name="role"><option value="viewer">Nur lesen</option><option value="admin">Administrator</option></select></label>
-            <button type="submit">Anlegen</button>
-          </form></section>
-      </div>`;
-    $('#user-form').addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      const f = new FormData(ev.target);
-      attempt(async () => {
-        await api('/users', { method: 'POST', body: { username: f.get('username'), password: f.get('password'), role: f.get('role') } });
-        await render();
-      }, 'Benutzer angelegt');
-    });
-    $$('[data-del]').forEach((btn) => btn.addEventListener('click', () => {
-      if (!confirm(`Benutzer „${btn.dataset.name}“ löschen?`)) return;
-      attempt(async () => { await api(`/users/${btn.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Benutzer gelöscht');
-    }));
-  };
-  await render();
-}
-
-const AUDIT_LABEL = {
-  login: 'Anmeldung', login_failed: 'Fehlgeschlagene Anmeldung', password_change: 'Passwort geändert',
-  device_update: 'Gerät geändert', device_delete: 'Gerät gelöscht', network_add: 'Netz hinzugefügt',
-  network_delete: 'Netz entfernt', scan_trigger: 'Scan gestartet', user_add: 'Benutzer angelegt', user_delete: 'Benutzer gelöscht',
-};
-
-async function viewAudit() {
-  const entries = await api('/audit?limit=500');
-  view().innerHTML = `<div class="page-head"><h1>Audit-Log</h1></div>
-    <div class="card table-wrap"><table>
-      <thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Details</th></tr></thead>
-      <tbody>${entries.map((e) => `<tr><td>${esc(fmtTime(e.time))}</td><td>${esc(e.username || '–')}</td>
-        <td>${esc(AUDIT_LABEL[e.action] || e.action)}</td>
-        <td class="mono">${Object.keys(e.detail || {}).length ? esc(JSON.stringify(e.detail)) : ''}</td></tr>`).join('')
-        || '<tr><td colspan="4" class="muted">Keine Einträge.</td></tr>'}</tbody></table></div>`;
-}
-
-async function viewAccount() {
-  view().innerHTML = `
-    <div class="page-head"><h1>Mein Konto</h1></div>
-    <div class="grid">
-      <section class="card span-1"><header><h2>Angemeldet als</h2></header>
-        <dl class="details"><dt>Benutzer</dt><dd>${esc(state.user.username)}</dd>
-          <dt>Rolle</dt><dd>${state.user.role === 'admin' ? 'Administrator' : 'Nur lesen'}</dd></dl></section>
-      <section class="card span-1"><header><h2>Passwort ändern</h2></header>
-        <form class="form" id="pw-form">
-          <label>Aktuelles Passwort<input name="old" type="password" required autocomplete="current-password"></label>
-          <label>Neues Passwort (mind. 12 Zeichen)<input name="new" type="password" required minlength="12" autocomplete="new-password"></label>
-          <label>Neues Passwort wiederholen<input name="repeat" type="password" required minlength="12" autocomplete="new-password"></label>
-          <button type="submit">Passwort ändern</button>
-          <p class="muted">Alle anderen Sitzungen werden dabei abgemeldet.</p>
-        </form></section>
-    </div>`;
-  $('#pw-form').addEventListener('submit', (ev) => {
-    ev.preventDefault();
-    const f = new FormData(ev.target);
-    if (f.get('new') !== f.get('repeat')) { toast('Die neuen Passwörter stimmen nicht überein', true); return; }
-    attempt(async () => {
-      await api('/me/password', { method: 'POST', body: { old_password: f.get('old'), new_password: f.get('new') } });
-      ev.target.reset();
-    }, 'Passwort geändert');
-  });
+  autoRefresh(async () => { if (editing) return; await load(); await render(); });
 }
 
 // ---------------------------------------------------------------------------
-// Anmeldung & Navigation
+// Anmeldung, Navigation, Rahmen
 // ---------------------------------------------------------------------------
 
 function showLogin() {
   state.user = null;
   clearInterval(state.refreshTimer);
-  $('#topbar').hidden = true;
-  view().innerHTML = `
-    <form class="card login" id="login-form">
-      <h1>NetPulse</h1>
+  clearInterval(state.globalTimer);
+  $('#app').hidden = true;
+  $('#login-view').innerHTML = `
+    <div class="login-wrap"><form class="card login" id="login-form">
+      <div class="brand"><img src="favicon.svg" alt="" width="36" height="36"><span>Net<b>Pulse</b></span></div>
+      <p class="muted">Netzwerk-Monitoring</p>
       <label>Benutzername<input name="username" autocomplete="username" required autofocus></label>
       <label>Passwort<input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">Anmelden</button>
       <p class="error" id="login-error"></p>
-    </form>`;
+    </form></div>`;
   $('#login-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
@@ -670,16 +509,18 @@ function showLogin() {
 }
 
 const ROUTES = {
-  dashboard: viewDashboard,
-  devices: viewDevices,
-  device: viewDevice,
-  events: viewEvents,
-  networks: viewNetworks,
-  users: viewUsers,
-  audit: viewAudit,
-  account: viewAccount,
+  dashboard: { title: 'Dashboard', view: () => viewDashboard() },
+  devices: { title: 'Geräte', view: (a, p) => viewDevices(a, p) },
+  device: { title: 'Gerät', view: (a, p) => viewDevice(a, p), nav: 'devices' },
+  alerts: { title: 'Alarme', view: (a, p) => viewAlerts(a, p) },
+  events: { title: 'Ereignisse', view: () => viewEvents() },
+  networks: { title: 'Netzwerke', view: () => viewNetworks(), admin: true },
+  credentials: { title: 'Zugangsdaten', view: () => viewCredentials(), admin: true },
+  channels: { title: 'Benachrichtigungen', view: () => viewChannels(), admin: true },
+  users: { title: 'Benutzer', view: () => viewUsers(), admin: true },
+  audit: { title: 'Audit-Log', view: () => viewAudit(), admin: true },
+  account: { title: 'Mein Konto', view: () => viewAccount() },
 };
-const ADMIN_ROUTES = ['networks', 'users', 'audit'];
 
 function autoRefresh(fn, seconds = 30) {
   clearInterval(state.refreshTimer);
@@ -689,40 +530,93 @@ function autoRefresh(fn, seconds = 30) {
 async function route() {
   if (!state.user) return;
   clearInterval(state.refreshTimer);
+  $('#sidebar').classList.remove('open');
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
   const [name, arg] = path.split('/');
   const key = ROUTES[name] ? name : 'dashboard';
-  $$('#nav a').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === `#/${key === 'device' ? 'devices' : key}`));
-  if (ADMIN_ROUTES.includes(key) && state.user.role !== 'admin') {
-    view().innerHTML = '<p class="error">Keine Berechtigung.</p>';
+  const r = ROUTES[key];
+  $('#page-title').textContent = r.title;
+  document.title = `${r.title} · NetPulse`;
+  $$('#nav a').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === `#/${r.nav || key}`));
+  if (r.admin && !isAdmin()) {
+    view().innerHTML = empty('Keine Berechtigung für diese Seite.', 'lock');
     return;
   }
+  view().innerHTML = '<div class="empty">Lade …</div>';
   try {
-    await ROUTES[key](arg, new URLSearchParams(query || ''));
+    await r.view(arg, new URLSearchParams(query || ''));
   } catch (e) {
-    if (state.user) view().innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    if (state.user) view().innerHTML = `<div class="notice">${icon('alert-triangle')}<span>${esc(e.message)}</span></div>`;
   }
 }
 
+/** Alarm-Zähler und Scan-Fortschritt in der Seitenleiste aktualisieren */
+async function refreshShell() {
+  try {
+    const summary = await api('/summary');
+    state.summary = summary;
+    const badge = $('#alert-badge');
+    badge.hidden = !summary.open_alerts;
+    badge.textContent = summary.open_alerts;
+    const scan = summary.scan;
+    const mini = $('#scan-mini');
+    mini.hidden = !(scan && scan.running);
+    if (scan && scan.running) {
+      mini.innerHTML = `${icon('radar', 'i-sm')} Scan <strong>${esc(scan.network)}</strong><br>
+        <span class="muted">${pct(scan.done, scan.total)} % · ${scan.found} Geräte</span>
+        <div class="progress"><span data-w="${pct(scan.done, scan.total)}"></span></div>`;
+      applyWidths(mini);
+    }
+  } catch { /* egal */ }
+}
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  const dark = theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+  $('#theme-toggle').innerHTML = icon(dark ? 'sun' : 'moon');
+}
+
 function startApp() {
-  $('#topbar').hidden = false;
-  document.body.classList.toggle('is-admin', state.user.role === 'admin');
+  $('#login-view').innerHTML = '';
+  $('#app').hidden = false;
+  document.body.classList.toggle('is-admin', isAdmin());
   $('#user-name').textContent = state.user.username;
+  refreshShell();
+  clearInterval(state.globalTimer);
+  state.globalTimer = setInterval(refreshShell, 10000);
   if (!location.hash || location.hash === '#/') location.hash = '#/dashboard';
   else route();
 }
 
-window.addEventListener('hashchange', route);
-$('#logout').addEventListener('click', async () => {
-  try { await api('/logout', { method: 'POST' }); } catch { /* egal – lokal trotzdem abmelden */ }
-  showLogin();
-});
-
-(async () => {
-  try {
-    state.user = await api('/me');
-    startApp();
-  } catch {
+function init() {
+  let theme = null;
+  try { theme = localStorage.getItem('np-theme'); } catch { /* privater Modus */ }
+  applyTheme(theme);
+  $('#theme-toggle').addEventListener('click', () => {
+    const dark = document.documentElement.dataset.theme === 'dark'
+      || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+    const next = dark ? 'light' : 'dark';
+    try { localStorage.setItem('np-theme', next); } catch { /* egal */ }
+    applyTheme(next);
+  });
+  $('#menu-toggle').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  $('#global-search').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') location.hash = `#/devices?q=${encodeURIComponent(ev.target.value.trim())}`;
+  });
+  window.addEventListener('hashchange', route);
+  $('#logout').addEventListener('click', async () => {
+    try { await api('/logout', { method: 'POST' }); } catch { /* lokal trotzdem abmelden */ }
     showLogin();
-  }
-})();
+  });
+  (async () => {
+    try {
+      state.user = await api('/me');
+      startApp();
+    } catch {
+      showLogin();
+    }
+  })();
+}
+
+window.addEventListener('DOMContentLoaded', init);

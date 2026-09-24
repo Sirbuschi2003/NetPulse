@@ -11,13 +11,24 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
 | Weboberfläche | HTML/CSS/JavaScript ohne Build-Schritt und ohne externe Abhängigkeiten |
 | HTTPS | Caddy mit eigener lokaler Zertifizierungsstelle |
 
-**Was Version 0.1 kann:** Geräteerkennung (Ping, TCP, ARP, Reverse-DNS, 28 typische Ports),
-minütliche Erreichbarkeitsprüfung mit Antwortzeit, Ereignisse (neu, offline, wieder online,
-MAC geändert), Verlaufsdiagramme bis 90 Tage, persönliches Dashboard mit Drag & Drop,
-Benutzer mit Rollen (Admin / Nur lesen), Audit-Log.
+## Funktionen
 
-Wie es weitergeht (SNMP, SSH, WinRM, Redfish, Alarme …): siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
-Hinweise zu Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md).
+- **Geräteerkennung:** Ping, TCP, ARP, Reverse-DNS, 28 typische Ports, **Hersteller aus der MAC-Adresse**
+  (IEEE-Liste mit über 40.000 Einträgen) und **automatische Erkennung des Gerätetyps** (Router, Switch, NAS, Drucker,
+  Windows-PC, Smartphone, Kamera, Smart Home …) mit passenden Icons.
+- **Überwachung:** minütliche Erreichbarkeitsprüfung mit Antwortzeit, Verlauf bis 90 Tage.
+- **Tiefe Abfragen ohne Agent** ([Einrichtung](docs/ABFRAGEN.md)):
+  - **SNMP v2c/v3:** Schnittstellen und Datenverkehr, CPU, RAM, Speicher, Modell/Seriennummer, Drucker-Füllstände,
+    USV-Akku, Synology-Temperatur, LLDP-Nachbarn
+  - **SSH (Linux, NAS, Proxmox, Raspberry Pi, Windows mit OpenSSH):** Betriebssystem, Kernel, CPU, RAM, Festplatten,
+    Temperaturen, Netzwerk, fehlgeschlagene Dienste, Container, Windows-Updates, Neustart nötig
+- **Alarme** mit Entwarnung: Gerät offline, neues Gerät im Netz, MAC-/SSH-Schlüssel geändert, Speicher voll,
+  CPU/RAM/Temperatur hoch. Versand über **ntfy (Handy-Push), E-Mail, Telegram, Gotify, Discord, Microsoft Teams, Webhook**.
+- **Weboberfläche:** modernes Design (hell/dunkel), Geräte als Karten oder Tabelle, Detailseiten mit Diagrammen,
+  frei anpassbares Dashboard, Live-Fortschritt beim Scannen, Handy-tauglich.
+- **Sicherheit:** Rollen (Admin / Nur lesen), Audit-Log, Zugangsdaten AES-256-verschlüsselt, siehe unten.
+
+Aufbau und Roadmap: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) · Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md)
 
 ---
 
@@ -50,6 +61,9 @@ Wer es automatisch mag, schaltet im Stack **GitOps updates** ein.
 Ist ein Port schon vergeben, einfach eine zusätzliche Variable setzen:
 `APP_PORT` (Standard 18080), `DB_PORT` (Standard 5433) oder für die Weboberfläche
 einen anderen Port in `SITE_ADDRESS`.
+
+**Wichtig – Backup:** Das Volume `app-data` enthält den Tresor-Schlüssel `secret.key`. Ohne ihn sind gespeicherte
+Zugangsdaten nach einer Neuinstallation nicht mehr lesbar. Also mitsichern (oder `SECRET_KEY` fest vorgeben).
 
 **Stammzertifikat für den Browser** (gegen die Zertifikatswarnung): In Portainer den Container
 `netpulse-proxy` öffnen → **Console** → *Connect* → `cat /data/caddy/pki/authorities/local/root.crt`
@@ -148,6 +162,9 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 | `RETENTION_METRICS_DAYS` | 90 | Aufbewahrung der Messwerte |
 | `RETENTION_EVENTS_DAYS` | 180 | Aufbewahrung der Ereignisse |
 | `RETENTION_AUDIT_DAYS` | 365 | Aufbewahrung des Audit-Logs |
+| `INVENTORY_INTERVAL_MIN` | 5 | Abstand der tiefen Abfragen (SNMP/SSH) |
+| `PUBLIC_URL` | = `SITE_ADDRESS` | Adresse für Links in Benachrichtigungen |
+| `SECRET_KEY` | – (wird erzeugt) | Tresor-Schlüssel (64 Hex-Zeichen), falls nicht aus `/data/secret.key` |
 | `DB_PORT` / `APP_PORT` | 5433 / 18080 | Interne Ports auf dem Host (nur 127.0.0.1) |
 
 ## Sicherheit auf einen Blick
@@ -155,6 +172,9 @@ docker run --rm -v "${PWD}/backend:/src" -w /src rust:1-bookworm cargo test
 - Von außen erreichbar ist nur HTTPS (Caddy); Datenbank und App lauschen nur auf `127.0.0.1`.
 - Die App läuft ohne root-Rechte, mit schreibgeschütztem Dateisystem und nur der Capability `NET_RAW` (für Ping).
 - Passwörter werden mit Argon2id gespeichert, Sitzungs-Tokens nur als SHA-256-Hash.
+- Zugangsdaten (SNMP, SSH) und Kanal-Geheimnisse werden AES-256-GCM-verschlüsselt gespeichert; der Schlüssel liegt außerhalb der Datenbank.
+- SSH-Host-Schlüssel werden beim ersten Kontakt gemerkt, Änderungen stoppen die Abfrage (Schutz vor Man-in-the-Middle).
+- SSH-Passwörter werden nie „auf Verdacht“ an fremde Geräte gesendet.
 - Cookies sind `HttpOnly`, `Secure` und `SameSite=Strict`; dazu kommt ein CSRF-Header und nach 5 Fehlversuchen eine Login-Sperre.
 - Strenge Content-Security-Policy, HSTS und keine externen Skripte oder CDNs.
 - Gescannt werden nur Netze, die ein Admin ausdrücklich freigegeben hat (höchstens /16 je Eintrag).
@@ -173,9 +193,12 @@ backend/            Rust-Quellcode
   migrations/       Datenbankschema (wird beim Start automatisch angewendet)
   src/api/          REST-API (Login, Geräte, Dashboard, Verwaltung)
   src/scanner/      Discovery und Statusprüfung
+  src/collect/      Tiefe Abfragen (SNMP, SSH)
+  src/alerts/       Alarmregeln und Benachrichtigungen
+  data/oui.tsv      Herstellerliste (IEEE)
   src/auth.rs       Passwörter, Sitzungen, Rollen, Brute-Force-Schutz
 web/                Weboberfläche (index.html, app.js, style.css)
-docs/               Architektur, Datenschutz, Roadmap
+docs/               Architektur, Datenschutz, Einrichtung der Abfragen, Roadmap
 deploy/             Stack-Datei für Portainer (fertige Images)
 proxy/              Caddy-Image mit eingebauter Konfiguration
 .github/workflows/  Automatische Tests und Image-Builds

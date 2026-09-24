@@ -53,8 +53,14 @@ services:
       RETENTION_METRICS_DAYS: ${RETENTION_METRICS_DAYS:-90}
       RETENTION_EVENTS_DAYS: ${RETENTION_EVENTS_DAYS:-180}
       RETENTION_AUDIT_DAYS: ${RETENTION_AUDIT_DAYS:-365}
+      INVENTORY_INTERVAL_MIN: ${INVENTORY_INTERVAL_MIN:-5}
+      # Für Links in Benachrichtigungen (Standard: SITE_ADDRESS)
+      PUBLIC_URL: ${PUBLIC_URL:-${SITE_ADDRESS:-}}
       RUST_LOG: ${RUST_LOG:-info}
     # Minimale Rechte: nur NET_RAW für ICMP-Ping, Dateisystem schreibgeschützt
+    volumes:
+      # Enthält den Tresor-Schlüssel (secret.key) für gespeicherte Zugangsdaten – mitsichern!
+      - app-data:/data
     cap_drop: [ALL]
     cap_add: [NET_RAW]
     read_only: true
@@ -77,5 +83,6 @@ services:
 
 volumes:
   db-data:
+  app-data:
   caddy-data:
   caddy-config:
