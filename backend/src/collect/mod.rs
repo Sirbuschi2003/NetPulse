@@ -10,6 +10,7 @@ pub mod live;
 pub mod shelly;
 pub mod snmp;
 pub mod ssh;
+pub mod unifi;
 
 use std::{net::Ipv4Addr, time::Duration};
 
@@ -346,18 +347,50 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
         }
     }
 
+    // UniFi-Controller: nur mit fest zugeordneten Zugangsdaten – API-Schlüssel und Passwort gehen nie an fremde Geräte
+    for cred in credentials.iter().filter(|c| c.kind == "unifi") {
+        if !cred.linked {
+            trace.add(None, format!("UniFi „{}“ übersprungen – wird nur bei fester Zuordnung zum Controller genutzt", cred.name));
+            continue;
+        }
+        let how = if cred.username.as_deref().is_some_and(|u| !u.trim().is_empty()) { "lokales Konto" } else { "API-Schlüssel" };
+        match unifi::collect(addr, cred).await {
+            Ok(data) => {
+                trace.add(
+                    Some(true),
+                    format!(
+                        "UniFi-Controller mit „{}“ ({how}, Port {}, Version {}): {} Geräte ({} online), {} Clients",
+                        cred.name,
+                        data["port"],
+                        data["version"].as_str().unwrap_or("?"),
+                        data["devices_total"],
+                        data["devices_online"],
+                        data["clients_total"]
+                    ),
+                );
+                inventory.insert("unifi".into(), data);
+                break;
+            }
+            Err(e) => {
+                trace.add(Some(false), format!("UniFi mit „{}“ ({how}): {e:#}", cred.name));
+                errors.push(format!("UniFi: {e:#}"));
+            }
+        }
+    }
+
+    // HTTP-Zugangsdaten gelten nur für erkannte Shellys – sagen, warum sie hier nicht versucht wurden
+    if integration.as_deref() != Some("shelly") {
+        for cred in credentials.iter().filter(|c| c.kind == "http") {
+            trace.add(None, format!("„{}“ (HTTP) nicht versucht – gilt nur für Geräte, die sich als Shelly ausgewiesen haben", cred.name));
+        }
+    }
+
     if inventory.is_empty() {
         // Nur bei fest zugeordneten Zugangsdaten ist ein Fehlschlag eine Meldung wert;
         // dass automatische Versuche nicht passen, ist der Normalfall.
         let error = if has_linked || integration.is_some() { errors.join(" · ") } else { String::new() };
-        trace.add(
-            (!error.is_empty()).then_some(false),
-            if credentials.is_empty() && integration.is_none() {
-                "Keine Daten: dem Gerät sind keine Zugangsdaten zugeordnet".to_string()
-            } else {
-                "Keine Daten erhalten".to_string()
-            },
-        );
+        trace.add((!error.is_empty()).then_some(false), "Ergebnis: keine Detaildaten (Erreichbarkeit wird trotzdem überwacht)");
+        trace.add(None, advice(&open_ports, has_linked));
         sqlx::query(
             "UPDATE devices SET inventory_at = now(), inventory_error = NULLIF($2, ''), inventory_log = $3 WHERE id = $1",
         )
@@ -399,7 +432,7 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     .bind(&wan)
     .bind(derived.reported_name)
     .bind({
-        let sources: Vec<&str> = ["snmp", "ssh", "shelly"].into_iter().filter(|k| inventory.get(*k).is_some()).collect();
+        let sources: Vec<&str> = ["snmp", "ssh", "shelly", "unifi"].into_iter().filter(|k| inventory.get(*k).is_some()).collect();
         trace.add(Some(true), format!("Gespeichert ({})", sources.join(" + ").to_uppercase()));
         trace.to_json()
     })
@@ -437,7 +470,116 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
         .execute(&state.db)
         .await?;
     }
+    if let Some(unifi) = inventory.get("unifi") {
+        if let Err(e) = apply_unifi(state, unifi).await {
+            tracing::warn!("UniFi-Daten konnten nicht übernommen werden: {e:#}");
+        }
+    }
     scanner::reclassify(&state.db, device_id).await?;
+    Ok(())
+}
+
+/// Verständlicher Hinweis, warum keine Detaildaten kamen und was man tun kann
+fn advice(open_ports: &[i32], has_linked: bool) -> String {
+    let has = |p: i32| open_ports.contains(&p);
+    let ports = if open_ports.is_empty() {
+        "keine offenen Dienste gefunden".to_string()
+    } else {
+        format!("offene Ports: {}", open_ports.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+    };
+    let mut tips = Vec::new();
+    if has(22) {
+        tips.push("SSH ist offen → SSH-Zugangsdaten (am besten mit Schlüssel) zuordnen");
+    }
+    if has(11443) || has(8443) {
+        tips.push("sieht nach UniFi-Controller aus → Zugangsart „UniFi-Controller“ mit API-Schlüssel zuordnen");
+    }
+    if has(5985) || has(5986) || has(3389) {
+        tips.push("Windows → OpenSSH-Server aktivieren oder SNMP-Dienst einrichten");
+    }
+    if tips.is_empty() && (has(80) || has(443)) {
+        tips.push("nur eine Weboberfläche – falls das Gerät SNMP kann, dort aktivieren und SNMP-Zugangsdaten zuordnen");
+    }
+    if tips.is_empty() {
+        tips.push("typisch für Handys, TVs und viele IoT-Geräte: sie bieten keine Abfrage an – das ist normal, Online-Status und Antwortzeit werden trotzdem überwacht");
+    }
+    format!(
+        "Bedeutung: {}. {ports}. Tipp: {}",
+        if has_linked { "die zugeordneten Zugangsdaten haben nicht funktioniert (siehe oben)" } else { "es gibt für dieses Gerät keine passende Abfragemöglichkeit" },
+        tips.join("; ")
+    )
+}
+
+/// UniFi-Controller-Daten auf die Geräte in NetPulse übertragen (Zuordnung über die MAC-Adresse):
+/// Namen und Modelle der UniFi-Geräte, Auslastung als Messwerte, Client-Namen als Gerätenamen.
+async fn apply_unifi(state: &AppState, unifi: &Value) -> Result<()> {
+    let devices = unifi["devices"].as_array().cloned().unwrap_or_default();
+    let mut macs = Vec::new();
+    let mut names = Vec::new();
+    let mut models = Vec::new();
+    let mut types = Vec::new();
+    let (mut cpu, mut mem, mut rx, mut tx, mut clients) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for d in &devices {
+        let Some(mac) = d["mac"].as_str() else { continue };
+        macs.push(mac.to_lowercase());
+        names.push(d["name"].as_str().map(str::to_string));
+        let model = d["model"].as_str().map(str::to_string);
+        types.push(model.as_deref().and_then(unifi::device_type).map(str::to_string));
+        models.push(model);
+        cpu.push(d["cpu_pct"].as_f64().map(|v| v as f32));
+        mem.push(d["mem_pct"].as_f64().map(|v| v as f32));
+        rx.push(d["rx_bps"].as_f64());
+        tx.push(d["tx_bps"].as_f64());
+        clients.push(d["clients"].as_f64().map(|v| v as f32));
+    }
+    if !macs.is_empty() {
+        sqlx::query(
+            "UPDATE devices d SET reported_name = COALESCE(u.name, d.reported_name), model = COALESCE(u.model, d.model),
+                    device_type = CASE WHEN d.device_type_manual OR u.kind IS NULL THEN d.device_type ELSE u.kind END,
+                    vendor = COALESCE(d.vendor, 'Ubiquiti')
+               FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS u(mac, name, model, kind)
+              WHERE lower(d.mac) = u.mac",
+        )
+        .bind(&macs)
+        .bind(&names)
+        .bind(&models)
+        .bind(&types)
+        .execute(&state.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO device_stats (time, device_id, cpu_pct, mem_pct, rx_bps, tx_bps, clients)
+             SELECT now(), d.id, u.cpu, u.mem, u.rx, u.tx, u.clients
+               FROM UNNEST($1::text[], $2::real[], $3::real[], $4::float8[], $5::float8[], $6::real[]) AS u(mac, cpu, mem, rx, tx, clients)
+               JOIN devices d ON lower(d.mac) = u.mac
+              WHERE u.cpu IS NOT NULL OR u.mem IS NOT NULL OR u.rx IS NOT NULL OR u.clients IS NOT NULL",
+        )
+        .bind(&macs)
+        .bind(&cpu)
+        .bind(&mem)
+        .bind(&rx)
+        .bind(&tx)
+        .bind(&clients)
+        .execute(&state.db)
+        .await?;
+    }
+    // Client-Namen aus dem Controller für Geräte ohne eigenen Namen
+    let (client_macs, client_names): (Vec<String>, Vec<String>) = unifi["clients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| Some((c["mac"].as_str()?.to_lowercase(), c["name"].as_str().filter(|n| !n.trim().is_empty())?.to_string())))
+        .unzip();
+    if !client_macs.is_empty() {
+        sqlx::query(
+            "UPDATE devices d SET reported_name = u.name
+               FROM UNNEST($1::text[], $2::text[]) AS u(mac, name)
+              WHERE lower(d.mac) = u.mac AND d.reported_name IS NULL",
+        )
+        .bind(&client_macs)
+        .bind(&client_names)
+        .execute(&state.db)
+        .await?;
+    }
     Ok(())
 }
 

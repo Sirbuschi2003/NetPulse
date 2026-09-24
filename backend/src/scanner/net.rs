@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 /// (z. B. 9100 = Drucker, 8006 = Proxmox, 5000/5001 = Synology, 3389 = Windows-RDP).
 pub const COMMON_PORTS: &[u16] = &[
     21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 548, 554, 631, 993, 1883, 3306, 3389, 5000, 5001,
-    5432, 5900, 5985, 5986, 8006, 8080, 8443, 9100,
+    5432, 5900, 5985, 5986, 8006, 8080, 8443, 9100, 11443,
 ];
 
 /// Ports für die Erreichbarkeitsprüfung, wenn ein Gerät nicht auf Ping antwortet

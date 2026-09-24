@@ -18,7 +18,7 @@ use crate::{
     AppState,
 };
 
-const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key", "http"];
+const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key", "http", "unifi"];
 
 #[derive(Serialize, FromRow)]
 pub struct CredentialInfo {
@@ -56,6 +56,11 @@ pub struct CredentialInput {
 fn validate(kind: &str, auto: bool) -> ApiResult<()> {
     if !KINDS.contains(&kind) {
         return Err(ApiError::BadRequest("Unbekannte Zugangsart".into()));
+    }
+    if auto && kind == "unifi" {
+        return Err(ApiError::BadRequest(
+            "UniFi-Zugangsdaten werden nur dem Controller fest zugeordnet und nie automatisch ausprobiert.".into(),
+        ));
     }
     if auto && kind == "ssh_password" {
         return Err(ApiError::BadRequest(

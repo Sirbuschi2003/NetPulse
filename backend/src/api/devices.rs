@@ -224,6 +224,23 @@ pub async fn detail(
             .fetch_all(&st.db)
             .await?;
 
+    // Was der UniFi-Controller über dieses Gerät weiß (als UniFi-Gerät oder als Client)
+    let (unifi_device, unifi_client) = match device.mac.as_deref() {
+        Some(mac) => {
+            let find = |list: &'static str| {
+                format!(
+                    "SELECT e || jsonb_build_object('controller_id', c.id) FROM devices c,
+                            jsonb_array_elements(c.inventory->'unifi'->'{list}') e
+                      WHERE c.inventory ? 'unifi' AND e->>'mac' = lower($1) LIMIT 1"
+                )
+            };
+            let dev: Option<(Value,)> = sqlx::query_as(&find("devices")).bind(mac).fetch_optional(&st.db).await?;
+            let cli: Option<(Value,)> = sqlx::query_as(&find("clients")).bind(mac).fetch_optional(&st.db).await?;
+            (dev.map(|v| v.0), cli.map(|v| v.0))
+        }
+        None => (None, None),
+    };
+
     let sql = format!("{EVENT_SELECT} WHERE e.device_id = $1 ORDER BY e.time DESC LIMIT 50");
     let events = sqlx::query_as::<_, Event>(&sql).bind(id).fetch_all(&st.db).await?;
 
@@ -236,6 +253,8 @@ pub async fn detail(
         "credential_ids": credential_ids.into_iter().map(|c| c.0).collect::<Vec<_>>(),
         "events": events,
         "bucket_minutes": bucket_minutes,
+        "unifi_device": unifi_device,
+        "unifi_client": unifi_client,
     })))
 }
 

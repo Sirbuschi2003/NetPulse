@@ -32,7 +32,9 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
   Live-Tab je Gerät, Statuswechsel und **Alarme erscheinen sofort als Hinweis** in der Oberfläche.
 - **Such-Zeitplan:** neue Geräte täglich zu festen Uhrzeiten, im festen Abstand oder nur manuell suchen – kein Scan bei jedem Neustart.
 - **Fehlersuche:** Tab **„Diagnose“** je Gerät (jeder Abfrageschritt: SNMP, SSH, Shelly – mit Ursache) und Seite **„System-Log“**.
-- **Gerätenamen** aus mDNS/Bonjour, NetBIOS, SNMP, SSH und DNS.
+- **UniFi-Controller** (UniFi OS Server, Dream Machine, Cloud Key) per **API-Schlüssel – auch bei aktiver 2FA**:
+  alle Access Points/Switches mit Status, CPU/RAM, Clients, Uplink; Namen und Werte landen automatisch bei den Geräten.
+- **Gerätenamen** aus mDNS/Bonjour, NetBIOS, SNMP, SSH, DNS und dem UniFi-Controller.
 - **SNMP-Explorer** mit Namen aus ~4.800 MIBs (knapp 960.000 benannte Werte).
 - **Alarme** mit Entwarnung: Gerät offline, neues Gerät im Netz, MAC-/SSH-Schlüssel geändert, Speicher voll,
   CPU/RAM/Temperatur hoch. Versand über **ntfy (Handy-Push), E-Mail, Telegram, Gotify, Discord, Microsoft Teams, Webhook**.

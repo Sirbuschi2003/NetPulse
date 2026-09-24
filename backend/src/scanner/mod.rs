@@ -91,13 +91,14 @@ struct ClassifyRow {
     vendor: Option<String>,
     mac: Option<String>,
     inventory: Option<Value>,
+    model: Option<String>,
     device_type_manual: bool,
 }
 
 /// Gerätetyp neu bestimmen (außer er wurde von Hand gesetzt)
 pub async fn reclassify(db: &PgPool, device_id: i64) -> sqlx::Result<()> {
     let row: Option<ClassifyRow> = sqlx::query_as(
-        "SELECT host(ip) AS ip, open_ports, hostname, vendor, mac, inventory, device_type_manual
+        "SELECT host(ip) AS ip, open_ports, hostname, vendor, mac, inventory, model, device_type_manual
            FROM devices WHERE id = $1",
     )
     .bind(device_id)
@@ -114,6 +115,7 @@ pub async fn reclassify(db: &PgPool, device_id: i64) -> sqlx::Result<()> {
         vendor: row.vendor.as_deref(),
         random_mac: row.mac.as_deref().is_some_and(oui::is_random),
         inventory: row.inventory.as_ref(),
+        model: row.model.as_deref(),
     });
     sqlx::query("UPDATE devices SET device_type = $2 WHERE id = $1 AND device_type IS DISTINCT FROM $2")
         .bind(device_id)

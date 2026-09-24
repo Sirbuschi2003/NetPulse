@@ -99,6 +99,16 @@ async fn check(cred: &Credential, t: &Target) -> Result<String> {
             let power = data["power_w"].as_f64().map(|w| format!(" · {w} W")).unwrap_or_default();
             Ok(format!("Shelly ok – {}{power}", data["name"].as_str().or(info.model.as_deref()).unwrap_or("Shelly")))
         }
+        "unifi" => {
+            let data = super::unifi::collect(ip, cred).await?;
+            Ok(format!(
+                "UniFi ok – Version {}, {} Geräte ({} online), {} Clients",
+                data["version"].as_str().unwrap_or("?"),
+                data["devices_total"],
+                data["devices_online"],
+                data["clients_total"]
+            ))
+        }
         other => bail!("unbekannte Zugangsart {other}"),
     }
 }
@@ -149,6 +159,7 @@ pub async fn start_scan(state: &AppState, credential_id: i64, device_ids: Option
                 "snmp_v2c" | "snmp_v3" => "status = 'up'".to_string(),
                 "ssh_key" => format!("status = 'up' AND {} = ANY(open_ports)", cred.port.unwrap_or(22)),
                 "http" => "status = 'up' AND integration = 'shelly'".to_string(),
+                "unifi" => bail!("UniFi-Zugangsdaten bitte gezielt dem Controller zuordnen (Gerät auswählen)"),
                 _ => bail!("SSH-Passwörter werden nur an ausgewählte Geräte gesendet – bitte Geräte auswählen"),
             };
             sqlx::query_as(&format!("{TARGET_SELECT} WHERE {filter} ORDER BY ip")).fetch_all(&state.db).await?

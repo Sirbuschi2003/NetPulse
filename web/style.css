@@ -477,3 +477,4 @@ ol.diag li.info .i { color: var(--muted); }
 @keyframes glow { 50% { box-shadow: var(--shadow-lg), 0 0 0 4px color-mix(in srgb, var(--down) 35%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .alert-pop { animation: none; } }
 #sched-area { margin-top: 18px; }
+.gap-top { margin-top: 18px; }

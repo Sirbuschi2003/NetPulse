@@ -137,7 +137,7 @@ async function viewDevice(id) {
     // Live: Shelly über den Echtzeit-Stream, sonst Datenraten per SNMP/SSH (Netzwerk-Schnittstellen)
     if (isShelly()) list.push(['live', 'Live']);
     else if (data.device.has_credentials && (inv.snmp || inv.ssh)) list.push(['live', 'Live']);
-    if (inv.ssh || inv.snmp || inv.shelly) list.push(['system', 'System']);
+    if (inv.ssh || inv.snmp || inv.shelly || inv.unifi || data.unifi_device || data.unifi_client) list.push(['system', 'System']);
     if ((inv.ssh && inv.ssh.interfaces && inv.ssh.interfaces.length) || (inv.snmp && inv.snmp.interfaces)) list.push(['interfaces', 'Schnittstellen']);
     if ((inv.ssh && inv.ssh.disks && inv.ssh.disks.length) || (inv.snmp && inv.snmp.storage && inv.snmp.storage.length)) list.push(['storage', 'Speicher']);
     list.push(['history', 'Verlauf']);
@@ -412,7 +412,7 @@ async function viewDevice(id) {
   function tabDiagnose() {
     return `<section class="card"><header><h2>${icon('stethoscope')}Protokoll der letzten Abfrage</h2>
         ${isAdmin() ? `<button type="button" id="diag-run">${icon('player-play')}Jetzt abfragen und protokollieren</button>` : ''}</header>
-      <p class="muted small">Zeigt Schritt für Schritt, welche Abfragen (SNMP, SSH, Shelly-API) versucht wurden und woran es gescheitert ist.
+      <p class="muted small">Zeigt Schritt für Schritt, welche Abfragen (SNMP, SSH, Shelly-API, UniFi) versucht wurden und woran es gescheitert ist.
         Passwörter erscheinen hier nie.</p>
       <div id="diag-body"><div class="empty">Lade …</div></div></section>`;
   }
@@ -449,6 +449,54 @@ async function viewDevice(id) {
         btn.disabled = false;
       }
     });
+  }
+
+  // ----- UniFi -----
+  function unifiCards() {
+    const u = (data.inventory || {}).unifi;
+    const ud = data.unifi_device;
+    const uc = data.unifi_client;
+    let html = '';
+    const state = (s) => (s === 'online' || s === 'connected'
+      ? '<span class="badge st-up">online</span>' : `<span class="badge st-down">${esc(s || 'unbekannt')}</span>`);
+    if (u) {
+      const devs = [...(u.devices || [])].sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
+      html += `<section class="card"><header><h2>${icon('access-point')}UniFi-Controller</h2>
+          <span class="badge plain">${esc(u.api === 'integration' ? 'API-Schlüssel' : 'lokales Konto')} · Port ${esc(u.port)}</span></header>
+        <div class="kpis">
+          ${kpi('UniFi-Geräte', `${u.devices_online}/${u.devices_total}`, 'router', u.devices_online < u.devices_total ? 'tone-warn' : 'tone-up', '#/devices?q=ubiquiti')}
+          ${kpi('Clients', u.clients_total, 'devices', 'tone-accent', '#/devices')}
+          ${kpi('Sites', (u.sites || []).length, 'topology-star-3', 'tone-info', '#')}
+          ${kpi('Version', u.version || '–', 'box', 'tone-muted', '#')}
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Gerät</th><th>Status</th><th>Modell</th><th>IP</th><th>Clients</th><th>CPU</th><th>RAM</th><th>Uplink ↓/↑</th><th>Laufzeit</th><th>Firmware</th></tr></thead>
+        <tbody>${devs.map((d) => `<tr><td>${esc(d.name || d.mac)}</td><td>${state(d.state)}</td><td>${esc(d.model || '')}</td>
+          <td class="mono">${esc(d.ip || '')}</td><td>${esc(d.clients ?? '')}</td><td>${esc(fmtPct(d.cpu_pct))}</td><td>${esc(fmtPct(d.mem_pct))}</td>
+          <td class="small">${d.rx_bps != null || d.tx_bps != null ? `${esc(fmtBps(d.rx_bps))} / ${esc(fmtBps(d.tx_bps))}` : ''}</td>
+          <td class="small">${d.uptime_s != null ? esc(fmtDuration(d.uptime_s)) : ''}</td><td class="small">${esc(d.firmware || '')}</td></tr>`).join('')
+          || `<tr><td colspan="10">${empty('Keine UniFi-Geräte gemeldet', 'router')}</td></tr>`}</tbody></table></div>
+        <p class="muted small">Namen, Modelle und Auslastung werden automatisch auf die passenden Geräte in NetPulse übertragen
+          (Zuordnung über die MAC-Adresse); Client-Namen ergänzen Geräte ohne eigenen Namen.</p></section>`;
+    }
+    if (ud) {
+      html += `<section class="card"><header><h2>${icon('access-point')}Laut UniFi-Controller</h2>${state(ud.state)}</header>
+        <div class="gauges">${ud.cpu_pct != null ? `<div><span class="muted small">CPU</span>${meter(ud.cpu_pct)}</div>` : ''}
+          ${ud.mem_pct != null ? `<div><span class="muted small">RAM</span>${meter(ud.mem_pct)}</div>` : ''}</div>
+        <dl class="details">
+          <dt>Name</dt><dd>${esc(ud.name || '–')}</dd><dt>Modell</dt><dd>${esc(ud.model || '–')}</dd>
+          <dt>Firmware</dt><dd>${esc(ud.firmware || '–')}</dd><dt>Site</dt><dd>${esc(ud.site || '–')}</dd>
+          <dt>Verbundene Clients</dt><dd>${esc(ud.clients ?? '–')}</dd>
+          <dt>Uplink ↓ / ↑</dt><dd>${ud.rx_bps != null ? `${esc(fmtBps(ud.rx_bps))} / ${esc(fmtBps(ud.tx_bps))}` : '–'}</dd>
+          <dt>Laufzeit</dt><dd>${ud.uptime_s != null ? esc(fmtDuration(ud.uptime_s)) : '–'}</dd></dl>
+        <p class="muted small"><a href="#/device/${ud.controller_id}">Zum Controller</a></p></section>`;
+    }
+    if (uc && !ud) {
+      html += `<section class="card"><header><h2>${icon(uc.type === 'wired' ? 'plug-connected' : 'wifi')}Im UniFi-Netz</h2></header>
+        <dl class="details"><dt>Name im Controller</dt><dd>${esc(uc.name || '–')}</dd>
+          <dt>Verbindung</dt><dd>${esc(uc.type === 'wired' ? 'Kabel' : uc.type === 'wireless' ? 'WLAN' : uc.type || '–')}</dd>
+          ${uc.connected_at ? `<dt>Verbunden seit</dt><dd>${esc(fmtTime(uc.connected_at))}</dd>` : ''}</dl></section>`;
+    }
+    return html;
   }
 
   // ----- System -----
@@ -504,6 +552,7 @@ async function viewDevice(id) {
       add('WLAN', shelly.rssi != null ? `${shelly.ssid ? `${shelly.ssid}, ` : ''}${shelly.rssi} dBm` : null);
       add('Firmware-Update verfügbar', shelly.update);
     }
+    const unifiHtml = unifiCards();
     let extra = '';
     if (shelly) {
       const kindLabel = { switch: 'Schalter', light: 'Licht', cover: 'Rollladen', em: 'Energiezähler', em1: 'Energiezähler', pm1: 'Strommesser' };
@@ -573,8 +622,11 @@ async function viewDevice(id) {
         <dt>Seriennummer</dt><dd>${esc(s.serial || '–')}</dd><dt>Temperatur</dt><dd>${s.temp_c != null ? `${esc(s.temp_c)} °C` : '–'}</dd>
         <dt>Systemstatus</dt><dd>${s.status_ok ? '<span class="badge st-up">normal</span>' : '<span class="badge sev-critical">Fehler</span>'}</dd></dl></section>`;
     }
-    return `<div class="grid"><section class="span-2"><dl class="details">${rows.join('') || '<dd>Keine Angaben</dd>'}</dl></section>
-      <div class="stack-v span-1">${extra}</div></div>`;
+    // UniFi-Controller-Übersicht über die volle Breite; leere Bereiche weglassen
+    const top = rows.length || extra
+      ? `<div class="grid">${rows.length ? `<section class="${extra ? 'span-2' : 'span-3'}"><dl class="details">${rows.join('')}</dl></section>` : ''}
+        ${extra ? `<div class="stack-v ${rows.length ? 'span-1' : 'span-3'}">${extra}</div>` : ''}</div>` : '';
+    return `${top}${unifiHtml ? `<div class="stack-v${top ? ' gap-top' : ''}">${unifiHtml}</div>` : ''}` || empty('Keine Angaben', 'box');
   }
 
   // ----- Schnittstellen -----

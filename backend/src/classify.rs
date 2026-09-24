@@ -20,10 +20,13 @@ pub struct Hints<'a> {
     pub vendor: Option<&'a str>,
     pub random_mac: bool,
     pub inventory: Option<&'a Value>,
+    /// Modellbezeichnung (z. B. aus dem UniFi-Controller)
+    pub model: Option<&'a str>,
 }
 
 pub fn classify(h: &Hints) -> &'static str {
     from_inventory(h)
+        .or_else(|| from_model(h))
         .or_else(|| from_hostname(h))
         .or_else(|| from_vendor_and_ports(h))
         .unwrap_or("unknown")
@@ -93,6 +96,15 @@ fn from_inventory(h: &Hints) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// UniFi-Modellkürzel (U6-Pro, USW-Lite-8-PoE …), nur bei Ubiquiti-Geräten
+fn from_model(h: &Hints) -> Option<&'static str> {
+    let vendor = h.vendor?.to_lowercase();
+    if !vendor.contains("ubiquiti") {
+        return None;
+    }
+    crate::collect::unifi::device_type(h.model?)
 }
 
 /// 2. Sprechende Hostnamen („DESKTOP-4F2K“, „iPhone-von-Anna“, „diskstation“ …)
@@ -207,7 +219,7 @@ mod tests {
     use serde_json::json;
 
     fn hints<'a>(ip: &'a str, ports: &'a [i32], host: Option<&'a str>, vendor: Option<&'a str>) -> Hints<'a> {
-        Hints { ip, open_ports: ports, hostname: host, vendor, random_mac: false, inventory: None }
+        Hints { ip, open_ports: ports, hostname: host, vendor, random_mac: false, inventory: None, model: None }
     }
 
     #[test]

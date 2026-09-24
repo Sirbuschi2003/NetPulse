@@ -119,6 +119,27 @@ Schaltzustand, **Leistung (W)**, Zählerstand (kWh), Spannung, Temperatur, WLAN-
 
 Die aktuelle Leistung aller Shellys zeigt das Dashboard-Widget **„Stromverbrauch“**.
 
+## UniFi (UniFi OS Server, Cloud Key, Dream Machine, Cloud Gateway)
+
+NetPulse liest den **UniFi-Controller** aus: alle Access Points, Switches und Gateways mit Status, Modell, Firmware,
+CPU/RAM, Uplink-Datenrate, Laufzeit und Anzahl der Clients – plus die Liste der Clients. Die Werte werden automatisch
+auf die passenden Geräte in NetPulse übertragen (Zuordnung über die MAC-Adresse): Access Points und Switches bekommen
+Namen, Modell, Gerätetyp und Verlaufsdiagramme, Clients ohne eigenen Namen bekommen den Namen aus dem Controller.
+
+**Empfohlen – API-Schlüssel (funktioniert auch mit Zwei-Faktor-Anmeldung):**
+1. UniFi Network öffnen → **Einstellungen → Control Plane → Integrations** → **Create API Key**.
+2. In NetPulse unter **Zugangsdaten** → Art **„UniFi-Controller (API-Schlüssel)“**, Benutzername leer lassen,
+   den Schlüssel ins Feld „API-Schlüssel“ einfügen.
+3. Die Zugangsdaten **dem Controller-Gerät zuordnen** (im Zuordnen-Dialog vorausgewählt: Geräte mit Port 11443/8443).
+
+**Alternative – lokales Konto ohne 2FA:** In UniFi OS unter *Admins & Users* ein lokales Konto mit der Rolle
+„Nur anzeigen“ anlegen (ohne Zwei-Faktor, *Restrict to local access only*). In NetPulse Benutzername + Passwort eintragen.
+Ist beim Konto 2FA aktiv, meldet NetPulse das ausdrücklich – ein 2FA-Code kann nicht automatisch eingegeben werden.
+
+Ports: UniFi OS Server **11443**, UniFi-OS-Konsolen **443**, ältere Network Application **8443** – ohne Angabe probiert
+NetPulse alle drei. Der Controller nutzt meist ein selbst signiertes Zertifikat; NetPulse prüft es deshalb nicht.
+Die Zugangsdaten werden nie automatisch ausprobiert, sondern nur an das fest zugeordnete Gerät gesendet.
+
 ## Gerätenamen
 
 NetPulse fragt jeden gefundenen Gerätenamen aus mehreren Quellen ab (der erste Treffer zählt):

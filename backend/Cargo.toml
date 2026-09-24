@@ -22,7 +22,7 @@ hex = "0.4"
 # E-Mail-Versand (SMTP mit TLS über rustls/ring – kein OpenSSL nötig)
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "hostname"] }
 # HTTP-Client für Push-Dienste (ntfy, Gotify, Telegram, Discord, Teams, Webhooks)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 # SSH-Client für Linux-, NAS- und Windows-Abfragen (ring statt aws-lc: einfacher Cross-Build)
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
 serde = { version = "1", features = ["derive"] }
