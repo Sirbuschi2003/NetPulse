@@ -48,6 +48,9 @@ pub fn router(state: AppState) -> Router {
         // Zugangsdaten
         .route("/credentials", get(credentials::list).post(credentials::create))
         .route("/credentials/{id}", axum::routing::patch(credentials::update).delete(credentials::remove))
+        .route("/credentials/{id}/test", post(credentials::test))
+        .route("/credentials/{id}/scan", post(credentials::scan).get(credentials::scan_status))
+        .route("/credentials/{id}/devices", get(credentials::devices).put(credentials::set_devices))
         // Alarmierung
         .route("/channels", get(alerts::list_channels).post(alerts::create_channel))
         .route("/channels/{id}", axum::routing::patch(alerts::update_channel).delete(alerts::delete_channel))

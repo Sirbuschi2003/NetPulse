@@ -186,3 +186,97 @@ pub async fn remove(
     audit::by(&st.db, &user, "credential_delete", json!({ "id": id, "name": name })).await;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ---------------------------------------------------------------------------
+// Testen, Suchlauf, Zuordnung
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct TestRequest {
+    device_id: i64,
+}
+
+/// Zugangsdaten gegen ein Gerät testen (ohne Zuordnung) – mit verständlicher Rückmeldung
+pub async fn test(
+    State(st): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<TestRequest>,
+) -> ApiResult<Json<crate::collect::check::CheckResult>> {
+    crate::collect::check::test_one(&st, id, req.device_id)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))
+}
+
+#[derive(Deserialize)]
+pub struct ScanRequest {
+    /// Ohne Angabe: alle passenden Geräte
+    device_ids: Option<Vec<i64>>,
+}
+
+/// Suchlauf starten: testen und bei Erfolg zuordnen
+pub async fn scan(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<ScanRequest>,
+) -> ApiResult<Json<crate::collect::check::Job>> {
+    let count = req.device_ids.as_ref().map(Vec::len);
+    let job = crate::collect::check::start_scan(&st, id, req.device_ids)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    audit::by(&st.db, &user, "credential_scan", json!({ "id": id, "devices": count })).await;
+    Ok(Json(job))
+}
+
+pub async fn scan_status(
+    State(st): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+) -> Json<crate::collect::check::Job> {
+    Json(st.cred_jobs.get(id))
+}
+
+pub async fn devices(State(st): State<AppState>, _admin: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<Vec<i64>>> {
+    let rows: Vec<(i64,)> = sqlx::query_as("SELECT device_id FROM device_credentials WHERE credential_id = $1")
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+    Ok(Json(rows.into_iter().map(|r| r.0).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct AssignRequest {
+    device_ids: Vec<i64>,
+}
+
+/// Zuordnung ohne Test festlegen (genau diese Geräte)
+pub async fn set_devices(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<AssignRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut tx = st.db.begin().await?;
+    sqlx::query("DELETE FROM device_credentials WHERE credential_id = $1 AND NOT (device_id = ANY($2))")
+        .bind(id)
+        .bind(&req.device_ids)
+        .execute(&mut *tx)
+        .await?;
+    let added: Vec<(i64,)> = sqlx::query_as(
+        "INSERT INTO device_credentials (device_id, credential_id)
+         SELECT d.id, $1 FROM devices d WHERE d.id = ANY($2)
+         ON CONFLICT DO NOTHING RETURNING device_id",
+    )
+    .bind(id)
+    .bind(&req.device_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    for (device_id,) in &added {
+        let _ = st.poll_tx.send(*device_id);
+    }
+    audit::by(&st.db, &user, "credential_assign", json!({ "id": id, "devices": req.device_ids.len() })).await;
+    Ok(Json(json!({ "ok": true, "added": added.len() })))
+}

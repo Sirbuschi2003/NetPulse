@@ -244,11 +244,16 @@ async function viewCredentials() {
         <td>${esc(c.username || '–')}</td><td>${esc(c.port || (CRED_KINDS[c.kind] || {}).port)}</td>
         <td>${c.auto ? '<span class="badge accent">ja</span>' : '<span class="muted">nein</span>'}</td>
         <td>${c.device_count}</td>
-        <td class="actions"><button type="button" class="ghost sm" data-edit="${c.id}">${icon('edit', 'i-sm')}</button>
-          <button type="button" class="ghost sm" data-del="${c.id}">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}</tbody></table></div>`
+        <td class="actions">
+          <button type="button" class="ghost sm" data-test="${c.id}" title="An einem Gerät testen">${icon('player-play', 'i-sm')}Testen</button>
+          <button type="button" class="ghost sm" data-assign="${c.id}" title="Geräte auswählen, testen und zuordnen">${icon('devices', 'i-sm')}Geräte</button>
+          <button type="button" class="ghost sm" data-edit="${c.id}" title="Bearbeiten">${icon('edit', 'i-sm')}</button>
+          <button type="button" class="ghost sm" data-del="${c.id}" title="Löschen">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}</tbody></table></div>`
       : empty('Noch keine Zugangsdaten. Mit SNMP oder SSH liest NetPulse CPU, RAM, Festplatten, Schnittstellen, Toner und mehr aus.', 'key')}</div>`;
     $('#cred-add').addEventListener('click', () => credDialog(null));
     $$('[data-edit]').forEach((b) => b.addEventListener('click', () => credDialog(creds.find((c) => c.id === Number(b.dataset.edit)))));
+    $$('[data-test]').forEach((b) => b.addEventListener('click', () => testDialog(creds.find((c) => c.id === Number(b.dataset.test)))));
+    $$('[data-assign]').forEach((b) => b.addEventListener('click', () => assignDialog(creds.find((c) => c.id === Number(b.dataset.assign)))));
     $$('[data-del]').forEach((b) => b.addEventListener('click', () => {
       if (!confirm('Zugangsdaten löschen? Zugeordnete Geräte werden dann nicht mehr tief abgefragt.')) return;
       attempt(async () => { await api(`/credentials/${b.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Gelöscht');
@@ -304,12 +309,131 @@ async function viewCredentials() {
       if (kind === 'snmp_v3') { secret.auth_protocol = v('auth_protocol'); secret.priv_protocol = v('priv_protocol'); }
       const body = { name: v('name'), kind, username: v('username'), port: v('port') ? Number(v('port')) : null, auto: form.auto.checked, secret };
       attempt(async () => {
-        if (editing) await api(`/credentials/${cred.id}`, { method: 'PATCH', body });
-        else await api('/credentials', { method: 'POST', body });
-        dlg.close();
-        await render();
+        if (editing) {
+          await api(`/credentials/${cred.id}`, { method: 'PATCH', body });
+          dlg.close();
+          await render();
+        } else {
+          const created = await api('/credentials', { method: 'POST', body });
+          dlg.close();
+          await render();
+          assignDialog(created); // direkt Geräte auswählen und testen
+        }
       }, 'Zugangsdaten gespeichert');
     });
+  }
+
+  /** Passt ein Gerät grundsätzlich zur Zugangsart? (für die Vorauswahl) */
+  const suits = (cred, d) => {
+    if (cred.kind === 'http') return d.integration === 'shelly';
+    if (cred.kind.startsWith('ssh')) return (d.open_ports || []).includes(cred.port || 22);
+    return d.monitored && d.status === 'up';
+  };
+
+  const resultCell = (r) => (r
+    ? `<span class="${r.ok ? 'ok' : 'error'} small">${icon(r.ok ? 'circle-check' : 'circle-x', 'i-sm')} ${esc(r.message)}</span>`
+    : '');
+
+  async function testDialog(cred) {
+    const devices = (await api('/devices')).sort((a, b) => suits(cred, b) - suits(cred, a));
+    const dlg = openModal(`Testen: ${cred.name}`, `<div class="form">
+      <label>Gerät<select id="t-device">${devices.map((d) => `<option value="${d.id}">${esc(deviceLabel(d))} – ${esc(d.ip)}${suits(cred, d) ? '' : ' (passt vermutlich nicht)'}</option>`).join('')}</select></label>
+      <div class="actions"><button type="button" id="t-run">${icon('player-play')}Jetzt testen</button></div>
+      <div id="t-result"></div>
+      <p class="hint">Der Test ordnet nichts zu. Zum Zuordnen „Geräte“ verwenden.</p></div>`);
+    $('#t-run', dlg).addEventListener('click', async () => {
+      const box = $('#t-result', dlg);
+      box.innerHTML = '<p class="muted">Teste …</p>';
+      try {
+        const r = await api(`/credentials/${cred.id}/test`, { method: 'POST', body: { device_id: Number($('#t-device', dlg).value) } });
+        box.innerHTML = `<div class="notice ${r.ok ? 'info' : ''}">${icon(r.ok ? 'circle-check' : 'alert-triangle')}<span>${esc(r.message)}</span></div>`;
+      } catch (e) {
+        box.innerHTML = `<div class="notice">${icon('alert-triangle')}<span>${esc(e.message)}</span></div>`;
+      }
+    });
+  }
+
+  async function assignDialog(cred) {
+    const [devices, assignedIds, job] = await Promise.all([api('/devices'), api(`/credentials/${cred.id}/devices`), api(`/credentials/${cred.id}/scan`)]);
+    const assigned = new Set(assignedIds);
+    // Vorauswahl: bereits zugeordnete plus alle passenden Geräte – ein Klick auf „Testen & zuordnen“ genügt
+    const selected = new Set([...assignedIds, ...devices.filter((d) => suits(cred, d)).map((d) => d.id)]);
+    const results = new Map((job.results || []).map((r) => [r.device_id, r]));
+    const filters = { q: '', type: '', onlySuitable: true };
+    const types = [...new Set(devices.map((d) => d.device_type))];
+    const dlg = openModal(`Geräte zuordnen: ${cred.name}`, `<div class="form">
+      <p class="hint">Häkchen setzen und <b>„Testen &amp; zuordnen“</b> – zugeordnet wird nur, wo die Anmeldung klappt. Ergebnis je Gerät erscheint rechts.</p>
+      <div class="form-row"><input id="a-q" type="search" placeholder="Filtern: Name, IP, Hersteller …">
+        <select id="a-type"><option value="">Alle Typen</option>${types.map((t) => `<option value="${esc(t)}">${esc(typeInfo(t).label)}</option>`).join('')}</select></div>
+      <div class="actions"><label class="inline small"><input type="checkbox" id="a-suit" checked> nur passende Geräte zeigen</label>
+        <button type="button" class="ghost sm" id="a-all">Alle sichtbaren auswählen</button>
+        <button type="button" class="ghost sm" id="a-none">Auswahl leeren</button></div>
+      <div class="table-wrap" id="a-list"></div>
+      <div id="a-progress"></div>
+      <div class="actions"><button type="button" id="a-scan">${icon('player-play')}Testen &amp; zuordnen</button>
+        <button type="button" class="ghost" id="a-save">Ohne Test speichern</button><span class="muted small" id="a-count"></span></div></div>`);
+    dlg.classList.add('wide');
+
+    const visible = () => devices.filter((d) => {
+      if (filters.onlySuitable && !suits(cred, d) && !assigned.has(d.id)) return false;
+      if (filters.type && d.device_type !== filters.type) return false;
+      const hay = `${deviceLabel(d)} ${d.ip} ${d.vendor || ''} ${d.hostname || ''}`.toLowerCase();
+      return !filters.q || hay.includes(filters.q);
+    });
+    const draw = () => {
+      const list = visible();
+      $('#a-list', dlg).innerHTML = list.length ? `<table><tbody>${list.map((d) => `<tr>
+        <td><input type="checkbox" data-id="${d.id}"${selected.has(d.id) ? ' checked' : ''} aria-label="auswählen"></td>
+        <td><div class="cell-dev">${devIcon(d, 'sm')}<span class="ellipsis">${esc(deviceLabel(d))}</span>${assigned.has(d.id) ? ' <span class="badge accent">zugeordnet</span>' : ''}</div></td>
+        <td class="mono small">${esc(d.ip)}</td><td>${resultCell(results.get(d.id))}</td></tr>`).join('')}</tbody></table>`
+        : empty('Keine Geräte – Filter anpassen oder „nur passende“ abschalten.', 'devices');
+      $$('#a-list input[data-id]', dlg).forEach((c) => c.addEventListener('change', () => {
+        if (c.checked) selected.add(Number(c.dataset.id)); else selected.delete(Number(c.dataset.id));
+        $('#a-count', dlg).textContent = `${selected.size} ausgewählt`;
+      }));
+      $('#a-count', dlg).textContent = `${selected.size} ausgewählt`;
+    };
+    const progress = (j) => {
+      $('#a-progress', dlg).innerHTML = j.total ? `<p class="small">${j.running ? 'Teste' : 'Fertig:'} ${j.done} von ${j.total} Geräten ·
+        <b class="ok">${j.found} erfolgreich</b>${j.done - j.found ? ` · ${j.done - j.found} ohne Erfolg` : ''}</p>
+        <div class="progress"><span data-w="${pct(j.done, j.total)}"></span></div>` : '';
+      applyWidths($('#a-progress', dlg));
+    };
+    progress(job);
+
+    $('#a-q', dlg).addEventListener('input', (ev) => { filters.q = ev.target.value.trim().toLowerCase(); draw(); });
+    $('#a-type', dlg).addEventListener('change', (ev) => { filters.type = ev.target.value; draw(); });
+    $('#a-suit', dlg).addEventListener('change', (ev) => { filters.onlySuitable = ev.target.checked; draw(); });
+    $('#a-all', dlg).addEventListener('click', () => { visible().forEach((d) => selected.add(d.id)); draw(); });
+    $('#a-none', dlg).addEventListener('click', () => { selected.clear(); draw(); });
+    $('#a-save', dlg).addEventListener('click', () => attempt(async () => {
+      await api(`/credentials/${cred.id}/devices`, { method: 'PUT', body: { device_ids: [...selected] } });
+      dlg.close();
+      await render();
+    }, 'Zuordnung gespeichert'));
+    $('#a-scan', dlg).addEventListener('click', async () => {
+      if (!selected.size) { toast('Bitte mindestens ein Gerät auswählen', true); return; }
+      $('#a-scan', dlg).disabled = true;
+      try {
+        let j = await api(`/credentials/${cred.id}/scan`, { method: 'POST', body: { device_ids: [...selected] } });
+        results.clear();
+        while (j.running && dlg.open) {
+          progress(j);
+          await new Promise((r) => setTimeout(r, 1000));
+          j = await api(`/credentials/${cred.id}/scan`);
+          j.results.forEach((r) => { results.set(r.device_id, r); if (r.ok) assigned.add(r.device_id); });
+          draw();
+        }
+        progress(j);
+        toast(`Suchlauf fertig: ${j.found} von ${j.total} Geräten zugeordnet`);
+        render();
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        $('#a-scan', dlg).disabled = false;
+      }
+    });
+    draw();
   }
 
   await render();

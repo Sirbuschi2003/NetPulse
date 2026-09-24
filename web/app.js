@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.3.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.4.0#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -72,6 +72,7 @@ function applyWidths(root = document) {
 /** Modaler Dialog; liefert das <dialog>-Element */
 function openModal(title, bodyHtml) {
   const dialog = $('#modal');
+  dialog.className = '';
   dialog.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>
     <button class="icon-btn" type="button" data-close title="Schließen">${icon('x')}</button></div>
     <div class="dlg-body">${bodyHtml}</div>`;

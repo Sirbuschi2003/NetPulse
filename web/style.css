@@ -394,3 +394,6 @@ svg.spark .spark-area { stroke: none; opacity: 0.12; }
 .explorer-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .explorer-tools input[name="oid"] { flex: 1 1 320px; }
 td.val { max-width: 520px; overflow-wrap: anywhere; }
+dialog.wide { width: min(860px, calc(100vw - 32px)); }
+#a-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+#a-list td { padding: 7px 10px; }

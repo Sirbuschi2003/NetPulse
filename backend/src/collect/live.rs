@@ -169,19 +169,54 @@ async fn snmp_counters(ip: Ipv4Addr, cred: &Credential) -> Result<Vec<Counter>> 
         .collect())
 }
 
-/// Linux: Zähler aus /proc/net/dev, Geschwindigkeit und Status aus /sys/class/net
-const LINUX_COUNTERS: &str = "cat /proc/net/dev; for i in /sys/class/net/*; do \
-    echo \"@ ${i##*/} $(cat $i/speed 2>/dev/null || echo -) $(cat $i/operstate 2>/dev/null || echo unknown)\"; done";
+/// Linux: Zähler aus /proc/net/dev, Geschwindigkeit und Status aus /sys/class/net.
+/// FreeBSD/OPNsense/pfSense: Zähler aus `netstat -ibn`.
+const POSIX_COUNTERS: &str = "if [ -r /proc/net/dev ]; then cat /proc/net/dev; for i in /sys/class/net/*; do \
+    echo \"@ ${i##*/} $(cat $i/speed 2>/dev/null || echo -) $(cat $i/operstate 2>/dev/null || echo unknown)\"; done; \
+    else echo '@@BSD'; netstat -ibn; fi";
 
 async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -> Result<Vec<Counter>> {
-    let output = ssh::run_command(ip, cred, host_key, LINUX_COUNTERS).await.map_err(|e| match e {
+    let output = ssh::run_command(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
         ssh::SshError::HostKeyChanged { .. } => anyhow!("SSH-Host-Schlüssel hat sich geändert"),
         ssh::SshError::Failed(msg) => anyhow!(msg),
     })?;
-    if !output.contains("Inter-|") {
-        bail!("Live-Ansicht per SSH gibt es nur für Linux – für Windows bitte den Verlauf nutzen");
+    if output.contains("Inter-|") {
+        Ok(parse_proc_net_dev(&output))
+    } else if output.contains("@@BSD") {
+        Ok(parse_netstat(&output))
+    } else {
+        bail!("Live-Ansicht per SSH gibt es für Linux und FreeBSD/OPNsense – für Windows bitte den Verlauf nutzen");
     }
-    Ok(parse_proc_net_dev(&output))
+}
+
+/// FreeBSD `netstat -ibn`: je Schnittstelle eine „<Link#n>“-Zeile; die Byte-Zähler stehen
+/// von hinten gezählt an fester Stelle (… Ibytes Opkts Oerrs Obytes Coll)
+fn parse_netstat(output: &str) -> Vec<Counter> {
+    let mut seen = std::collections::HashSet::new();
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 8 || !f.get(2)?.starts_with("<Link") {
+                return None;
+            }
+            let down = f[0].ends_with('*');
+            let name = f[0].trim_end_matches('*');
+            if ["lo", "pflog", "pfsync", "enc"].iter().any(|p| name.starts_with(p)) || !seen.insert(name.to_string()) {
+                return None;
+            }
+            let num = |i: usize| f.get(f.len() - i).and_then(|v| v.parse::<f64>().ok());
+            Some(Counter {
+                name: name.to_string(),
+                alias: None,
+                oper: if down { "down".into() } else { "up".into() },
+                speed_mbps: None,
+                rx: num(5),
+                tx: num(2),
+                bits64: true,
+            })
+        })
+        .collect()
 }
 
 fn parse_proc_net_dev(output: &str) -> Vec<Counter> {
@@ -221,6 +256,21 @@ fn parse_proc_net_dev(output: &str) -> Vec<Counter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netstat_freebsd_wird_gelesen() {
+        let out = "@@BSD\nName    Mtu Network       Address              Ipkts Ierrs Idrop     Ibytes    Opkts Oerrs     Obytes  Coll\n\
+            igb0   1500 <Link#1>      00:0d:b9:4a:12:34  9123456     0     0 12345678901  8123456     0  2345678901     0\n\
+            igb0      - 203.0.113.0/24 203.0.113.7        700000     -     -   90000000   600000     -    80000000     -\n\
+            igb1*  1500 <Link#2>      00:0d:b9:4a:12:35        0     0     0          0        0     0           0     0\n\
+            lo0   16384 <Link#3>      lo0                   100     0     0       5000      100     0        5000     0\n";
+        let c = parse_netstat(out);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].name, "igb0");
+        assert_eq!(c[0].rx, Some(12345678901.0));
+        assert_eq!(c[0].tx, Some(2345678901.0));
+        assert_eq!(c[1].oper, "down");
+    }
 
     #[test]
     fn proc_net_dev_wird_gelesen() {

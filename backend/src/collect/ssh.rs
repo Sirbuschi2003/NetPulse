@@ -215,6 +215,37 @@ command -v docker >/dev/null 2>&1 && docker ps -q >/dev/null 2>&1 && echo "conta
 command -v pveversion >/dev/null 2>&1 && echo "proxmox=$(pveversion 2>/dev/null)"
 [ -r /etc/synoinfo.conf ] && echo "synology=$(grep -m1 '^upnpmodelname' /etc/synoinfo.conf | cut -d'"' -f2)"
 [ -r /etc.defaults/VERSION ] && echo "os=DSM $(. /etc.defaults/VERSION; echo "$productversion")"
+# FreeBSD, OPNsense, pfSense: dieselben Kennwerte über sysctl, netstat, ifconfig und route
+if [ "$(uname -s)" = "FreeBSD" ]; then
+  if command -v opnsense-version >/dev/null 2>&1; then echo "os=$(opnsense-version 2>/dev/null)"
+  elif [ -r /etc/version ] && [ -d /usr/local/pfSense ]; then echo "os=pfSense $(cat /etc/version)"
+  else echo "os=FreeBSD $(freebsd-version 2>/dev/null)"; fi
+  echo "cpu_model=$(sysctl -n hw.model 2>/dev/null)"
+  echo "cpu_cores=$(sysctl -n hw.ncpu 2>/dev/null)"
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \([0-9]*\).*/\1/')
+  [ -n "$boot" ] && echo "uptime_s=$(( $(date +%s) - boot ))"
+  echo "load=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1, $2, $3}')"
+  # kern.cp_time: user nice sys intr idle → als „user nice system idle“ ausgeben
+  echo "cpu_a=cpu $(sysctl -n kern.cp_time | awk '{print $1, $2, $3 + $4, $5}')"; sleep 1
+  echo "cpu_b=cpu $(sysctl -n kern.cp_time | awk '{print $1, $2, $3 + $4, $5}')"
+  page=$(sysctl -n hw.pagesize); free=$(sysctl -n vm.stats.vm.v_free_count); inact=$(sysctl -n vm.stats.vm.v_inactive_count)
+  echo "mem_MemTotal=$(( $(sysctl -n hw.physmem) / 1024 ))"
+  echo "mem_MemAvailable=$(( (free + inact) * page / 1024 ))"
+  for t in $(sysctl -n dev.cpu.0.temperature hw.acpi.thermal.tz0.temperature 2>/dev/null); do echo "temp=${t%C}"; done
+  df -kP 2>/dev/null | awk 'NR>1 && ($6 == "/" || $1 ~ /^\/dev\//) {print "disk="$1"|bsd|"$2"|"$3"|"$6}'
+  netstat -ibn 2>/dev/null | awk 'NR>1 && $3 ~ /^<Link/ {n=$1; sub(/\*$/, "", n); m=($4 ~ /:/) ? $4 : "-"; print n, m, $(NF-4), $(NF-1)}' |
+  while read -r n m rx tx; do
+    case "$n" in lo*|pflog*|pfsync*|enc*) continue;; esac
+    info=$(ifconfig "$n" 2>/dev/null)
+    st=$(echo "$info" | awk '/status:/ {print $2; exit}')
+    sp=$(echo "$info" | sed -n 's/.*media:.*(\([0-9]*\)\(G*\)base.*/\1 \2/p' | awk 'NR==1 {print ($2 == "G") ? $1 * 1000 : $1}')
+    case "$st" in active|associated|"") st=up;; *) st=down;; esac
+    [ "$m" = "-" ] && m=""
+    echo "if=$n|$st|$sp|$m|$rx|$tx"
+  done
+  ifconfig 2>/dev/null | awk '/^[a-z]/ {i=$1; sub(":", "", i)} /inet / {print "ip="i"|"$2}'
+  echo "default_if=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
+fi
 exit 0
 "#;
 
@@ -313,7 +344,7 @@ fn parse_posix(output: &str, uname: &str) -> Value {
         data.insert("temp_c".into(), json!(round1(if max > 1000.0 { max / 1000.0 } else { max })));
     }
 
-    const SKIP_FS: &[&str] = &["tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "proc", "sysfs", "devfs", "nullfs", "autofs"];
+    const SKIP_FS: &[&str] = &["tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "proc", "sysfs", "devfs", "nullfs", "autofs", "fdescfs"];
     let mut seen_dev = std::collections::HashSet::new();
     let disks: Vec<Value> = multi
         .get("disk")

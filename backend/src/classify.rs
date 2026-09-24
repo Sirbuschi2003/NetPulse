@@ -43,6 +43,9 @@ fn from_inventory(h: &Hints) -> Option<&'static str> {
 
     if let Some(ssh) = inv.get("ssh") {
         let os = ssh["os"].as_str().unwrap_or_default().to_lowercase();
+        if os.contains("opnsense") || os.contains("pfsense") {
+            return Some("firewall");
+        }
         if ssh["platform"] == "windows" {
             return Some(if os.contains("server") { "server" } else { "windows" });
         }

@@ -4,6 +4,7 @@
 //! Zugangsdaten mit „automatisch ausprobieren“ werden bei Geräten ohne Zuordnung getestet
 //! (SNMP immer, SSH nur mit Schlüssel und nur bei offenem Port) und bei Erfolg fest zugeordnet.
 
+pub mod check;
 pub mod live;
 pub mod shelly;
 pub mod snmp;

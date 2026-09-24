@@ -12,8 +12,11 @@ Grundregeln:
 - NetPulse merkt sich beim ersten Kontakt den SSH-Host-Schlüssel. Ändert er sich später, stoppt die Abfrage und es gibt
   einen Sicherheitshinweis (Schutz vor Man-in-the-Middle-Angriffen).
 
-In NetPulse: **Zugangsdaten → Hinzufügen**, danach beim Gerät unter **Einstellungen** zuordnen
-(oder „automatisch ausprobieren“ aktivieren).
+In NetPulse: **Zugangsdaten → Hinzufügen**. Danach öffnet sich automatisch die Geräteauswahl:
+- **Testen & zuordnen:** Alle passenden Geräte sind vorausgewählt. NetPulse probiert die Zugangsdaten bei jedem aus und
+  ordnet sie nur dort zu, wo die Anmeldung klappt. Das Ergebnis (✓ mit Gerätename bzw. ✗ mit Grund) steht direkt daneben.
+- **Testen:** eine Zugangsangabe an einem einzelnen Gerät prüfen, ohne etwas zu ändern.
+- **Automatisch:** Neue Geräte werden künftig selbst durchprobiert (SNMP, SSH-Schlüssel, Shelly).
 
 ---
 

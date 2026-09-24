@@ -47,6 +47,8 @@ pub struct AppState {
     pub vault: Arc<Vault>,
     /// Letzte Zählerstände für die Live-Ansicht
     pub live: Arc<collect::live::LiveCache>,
+    /// Laufende Suchläufe für Zugangsdaten
+    pub cred_jobs: Arc<collect::check::Jobs>,
     pub login_limiter: Arc<auth::LoginLimiter>,
 }
 
@@ -80,6 +82,7 @@ async fn main() -> Result<()> {
         poll_tx,
         vault: Arc::new(vault),
         live: Arc::new(collect::live::LiveCache::default()),
+        cred_jobs: Arc::new(collect::check::Jobs::default()),
         login_limiter: Arc::new(auth::LoginLimiter::default()),
     };
 

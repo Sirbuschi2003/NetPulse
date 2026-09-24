@@ -95,6 +95,23 @@ impl Val {
     }
 }
 
+/// Fehler der SNMP-Bibliothek in verständliche Hinweise übersetzen
+fn friendly(e: &snmp2::Error) -> String {
+    let raw = format!("{e:?}");
+    let hint = if raw.contains("AuthFailure") || raw.contains("AuthUpdateFailed") || raw.contains("UnknownUsername") {
+        "Anmeldung abgelehnt – Benutzername, Auth-Passwort oder Auth-Verfahren (SHA/MD5) stimmen nicht"
+    } else if raw.contains("Crypto") || raw.contains("Decrypt") || raw.contains("Priv") {
+        "Verschlüsselung passt nicht – Verschlüsselungs-Passwort oder -Verfahren (AES/DES) prüfen"
+    } else if raw.contains("Receive") || raw.contains("Send") || raw.contains("ConnectionRefused") {
+        "Gerät antwortet nicht auf SNMP (UDP-Port 161 geschlossen – ist SNMP am Gerät aktiviert?)"
+    } else if raw.contains("CommunityMismatch") {
+        "Community stimmt nicht"
+    } else {
+        return format!("SNMP-Fehler: {raw}");
+    };
+    format!("{hint} ({raw})")
+}
+
 fn oid(parts: &[u64]) -> Result<Oid<'static>> {
     Oid::from(parts).map_err(|e| anyhow!("Ungültige OID: {e:?}"))
 }
@@ -146,7 +163,7 @@ pub(crate) async fn open(ip: Ipv4Addr, cred: &Credential) -> Result<AsyncSession
             // Engine-ID des Agenten ermitteln (Pflicht bei v3)
             match tokio::time::timeout(TIMEOUT * 2, session.init()).await {
                 Ok(Ok(())) => Ok(session),
-                Ok(Err(e)) => bail!("SNMPv3-Anmeldung fehlgeschlagen: {e:?}"),
+                Ok(Err(e)) => bail!("{}", friendly(&e)),
                 Err(_) => bail!("Zeitüberschreitung (keine Antwort auf SNMPv3)"),
             }
         }
@@ -161,7 +178,7 @@ pub(crate) async fn get(session: &mut AsyncSession, oids: &[&[u64]]) -> Result<V
     for attempt in 0..2 {
         match tokio::time::timeout(TIMEOUT, session.get_many(&refs)).await {
             Ok(Ok(pdu)) => return Ok(pdu.varbinds.map(|(o, v)| (oid_parts(&o), Val::of(&v))).collect()),
-            Ok(Err(e)) => bail!("SNMP-Fehler: {e:?}"),
+            Ok(Err(e)) => bail!("{}", friendly(&e)),
             Err(_) if attempt == 0 => continue,
             Err(_) => bail!("Zeitüberschreitung – Gerät antwortet nicht auf SNMP (Community/Benutzer richtig?)"),
         }
@@ -182,7 +199,7 @@ pub(crate) async fn walk(session: &mut AsyncSession, base: &[u64], max: usize) -
                     response = Some(pdu.varbinds.map(|(o, v)| (oid_parts(&o), Val::of(&v))).collect::<Vec<_>>());
                     break;
                 }
-                Ok(Err(e)) => bail!("SNMP-Fehler: {e:?}"),
+                Ok(Err(e)) => bail!("{}", friendly(&e)),
                 Err(_) => continue,
             }
         }
