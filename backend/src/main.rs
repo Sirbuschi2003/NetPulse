@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collect::run(state.clone(), poll_rx));
     tokio::spawn(collect::fast::run(state.clone()));
     tokio::spawn(alerts::run(state.clone()));
+    tokio::spawn(alerts::deliver::run(state.clone()));
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));
 

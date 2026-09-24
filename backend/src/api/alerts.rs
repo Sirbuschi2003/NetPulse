@@ -149,12 +149,16 @@ pub async fn test_channel(State(st): State<AppState>, _admin: AdminUser, Path(id
             .await?
             .ok_or(ApiError::NotFound)?;
     let config: Value = st.vault.open_value(&sealed)?;
-    let notification = Notification {
-        title: "Testnachricht von NetPulse".into(),
-        message: "Wenn du das liest, funktioniert dieser Benachrichtigungskanal. 🎉".into(),
-        severity: Severity::Info,
-        link: st.config.public_url.clone(),
-    };
+    let notification = Notification::new(
+        "Testnachricht von NetPulse",
+        "Wenn du das liest, funktioniert dieser Benachrichtigungskanal. 🎉",
+        Severity::Info,
+        st.config.public_url.clone(),
+    )
+    .var("geraet", "Beispiel-NAS")
+    .var("ip", "(192.168.178.10)")
+    .var("regel", "Test")
+    .var("wert", "42 %");
     if kind == "app" {
         let message = crate::push::PushMessage {
             title: &notification.title,
@@ -171,7 +175,52 @@ pub async fn test_channel(State(st): State<AppState>, _admin: AdminUser, Path(id
         }
         return Ok(Json(json!({ "ok": true, "sent": ok })));
     }
-    notify::send(&kind, &config, &notification)
+    crate::alerts::deliver::send_now(&st, &kind, config, &notification)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Senden fehlgeschlagen: {e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Zentraler E-Mail-Server
+// ---------------------------------------------------------------------------
+
+pub async fn get_smtp(State(st): State<AppState>, _admin: AdminUser) -> Json<Value> {
+    let config = Value::Object(crate::alerts::deliver::load_smtp(&st).await);
+    Json(json!({ "config": masked(&config), "configured": config["host"].as_str().is_some_and(|h| !h.is_empty()) }))
+}
+
+pub async fn set_smtp(State(st): State<AppState>, AdminUser(user): AdminUser, Json(req): Json<Map<String, Value>>) -> ApiResult<Json<Value>> {
+    let mut config = crate::alerts::deliver::load_smtp(&st).await;
+    for key in crate::alerts::deliver::SMTP_FIELDS {
+        if let Some(value) = req.get(*key) {
+            if value.as_str() != Some(MASK) {
+                config.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+    if let Some(from) = config.get("from").and_then(Value::as_str).filter(|f| !f.is_empty()) {
+        from.parse::<lettre::Address>().map_err(|_| ApiError::BadRequest("Absenderadresse ist ungültig".into()))?;
+    }
+    crate::alerts::deliver::save_smtp(&st, &config).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    audit::by(&st.db, &user, "smtp_update", json!({ "host": config.get("host") })).await;
+    Ok(get_smtp(State(st), AdminUser(user)).await)
+}
+
+#[derive(Deserialize)]
+pub struct SmtpTest {
+    to: String,
+}
+
+pub async fn test_smtp(State(st): State<AppState>, _admin: AdminUser, Json(req): Json<SmtpTest>) -> ApiResult<Json<Value>> {
+    let notification = Notification::new(
+        "E-Mail-Server funktioniert",
+        "Diese Testnachricht wurde über den zentralen E-Mail-Server von NetPulse verschickt.",
+        Severity::Info,
+        st.config.public_url.clone(),
+    )
+    .var("regel", "Test");
+    crate::alerts::deliver::send_now(&st, "email", json!({ "to": req.to }), &notification)
         .await
         .map_err(|e| ApiError::BadRequest(format!("Senden fehlgeschlagen: {e:#}")))?;
     Ok(Json(json!({ "ok": true })))
@@ -193,10 +242,11 @@ pub struct RuleRow {
     channel_ids: Vec<i64>,
     notify_recovery: bool,
     enabled: bool,
+    repeat_min: i32,
 }
 
 const RULE_SELECT: &str = "SELECT r.id, r.name, r.kind, r.device_id, COALESCE(d.name, d.hostname, host(d.ip)) AS device_label,
-                                  r.threshold, r.duration_min, r.channel_ids, r.notify_recovery, r.enabled
+                                  r.threshold, r.duration_min, r.channel_ids, r.notify_recovery, r.enabled, r.repeat_min
                              FROM alert_rules r LEFT JOIN devices d ON d.id = r.device_id";
 
 pub async fn list_rules(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<RuleRow>>> {
@@ -214,6 +264,8 @@ pub struct RuleInput {
     channel_ids: Option<Vec<i64>>,
     notify_recovery: Option<bool>,
     enabled: Option<bool>,
+    /// Erinnerung alle X Minuten, solange der Alarm offen ist (0 = aus)
+    repeat_min: Option<i32>,
 }
 
 pub async fn create_rule(
@@ -231,8 +283,8 @@ pub async fn create_rule(
     }
     let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(kind);
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled, repeat_min)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(name)
     .bind(kind)
@@ -242,6 +294,7 @@ pub async fn create_rule(
     .bind(req.channel_ids.clone().unwrap_or_default())
     .bind(req.notify_recovery.unwrap_or(true))
     .bind(req.enabled.unwrap_or(true))
+    .bind(req.repeat_min.unwrap_or(0).clamp(0, 10_080))
     .fetch_one(&st.db)
     .await?;
     audit::by(&st.db, &user, "rule_add", json!({ "id": id, "rule": req })).await;
@@ -263,7 +316,8 @@ pub async fn update_rule(
             duration_min = COALESCE($5, duration_min),
             channel_ids = COALESCE($6, channel_ids),
             notify_recovery = COALESCE($7, notify_recovery),
-            enabled = COALESCE($8, enabled)
+            enabled = COALESCE($8, enabled),
+            repeat_min = COALESCE($9, repeat_min)
           WHERE id = $1",
     )
     .bind(id)
@@ -274,6 +328,7 @@ pub async fn update_rule(
     .bind(&req.channel_ids)
     .bind(req.notify_recovery)
     .bind(req.enabled)
+    .bind(req.repeat_min.map(|r| r.clamp(0, 10_080)))
     .execute(&st.db)
     .await?;
     if updated.rows_affected() == 0 {

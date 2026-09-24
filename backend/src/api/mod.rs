@@ -69,6 +69,8 @@ pub fn router(state: AppState) -> Router {
         .route("/channels", get(alerts::list_channels).post(alerts::create_channel))
         .route("/channels/{id}", axum::routing::patch(alerts::update_channel).delete(alerts::delete_channel))
         .route("/channels/{id}/test", post(alerts::test_channel))
+        .route("/settings/smtp", get(alerts::get_smtp).put(alerts::set_smtp))
+        .route("/settings/smtp/test", post(alerts::test_smtp))
         .route("/alert-rules", get(alerts::list_rules).post(alerts::create_rule))
         .route("/alert-rules/{id}", axum::routing::patch(alerts::update_rule).delete(alerts::delete_rule))
         // Verwaltung

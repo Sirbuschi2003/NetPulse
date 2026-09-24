@@ -100,6 +100,7 @@ async function viewAlerts(_arg, params) {
         <label id="f-threshold"><span>Schwellwert <span id="unit"></span></span><input name="threshold" type="number" step="any" value="${r.threshold ?? ''}"></label>
         <label id="f-duration">Dauer in Minuten<input name="duration_min" type="number" min="0" max="10080" value="${r.duration_min ?? 0}"></label>
       </div>
+      <label id="f-repeat">Erinnern, solange der Alarm besteht – alle … Minuten (0 = nie)<input name="repeat_min" type="number" min="0" max="10080" value="${r.repeat_min ?? 0}"></label>
       <fieldset><legend>Benachrichtigen über</legend><div class="checks">
         ${channels.length ? channels.map((c) => `<label class="inline"><input type="checkbox" name="ch" value="${c.id}"${r.channel_ids.includes(c.id) ? ' checked' : ''}>${esc(c.name)}</label>`).join('')
           : '<span class="muted">Noch keine Kanäle – unter „Benachrichtigungen“ anlegen.</span>'}</div></fieldset>
@@ -115,6 +116,7 @@ async function viewAlerts(_arg, params) {
       $('#unit', dlg).textContent = def.unit ? `(${def.unit})` : '';
       $('#f-duration', dlg).hidden = !(k === 'device_down' || def.unit);
       $('#f-recovery', dlg).hidden = !(k === 'device_down' || def.unit);
+      $('#f-repeat', dlg).hidden = !(k === 'device_down' || def.unit);
       if (!rule && def.unit && !form.threshold.value) form.threshold.value = k === 'temperature' ? 70 : 90;
     };
     form.kind.addEventListener('change', update);
@@ -130,6 +132,7 @@ async function viewAlerts(_arg, params) {
         channel_ids: $$('input[name="ch"]:checked', form).map((c) => Number(c.value)),
         notify_recovery: form.notify_recovery.checked,
         enabled: form.enabled.checked,
+        repeat_min: Number(form.repeat_min.value || 0),
       };
       attempt(async () => {
         if (rule) await api(`/alert-rules/${rule.id}`, { method: 'PATCH', body });
@@ -527,8 +530,14 @@ const CHANNEL_KINDS = {
       + 'Zertifikat erreichbar (z. B. über den eigenen Reverse-Proxy) und auf dem Handy als App installiert (iPhone: Teilen → „Zum Home-Bildschirm“).' },
   ntfy: { label: 'ntfy (Push aufs Handy)', icon: 'device-mobile', fields: [['server', 'Server', 'https://ntfy.sh'], ['topic', 'Thema (Topic)', 'z. B. netpulse-a8f3k2'], ['token', 'Zugriffstoken (optional)', '', 'password']],
     hint: 'App „ntfy“ installieren, dasselbe Thema abonnieren – fertig. Tipp: ein langes, zufälliges Thema wählen oder einen eigenen ntfy-Server nutzen.' },
-  email: { label: 'E-Mail (SMTP)', icon: 'send', fields: [['host', 'SMTP-Server', 'smtp.example.de'], ['port', 'Port', '587'], ['security', 'Verschlüsselung', '', 'select:starttls=STARTTLS (587),tls=TLS (465),none=keine (nur intern)'],
-    ['username', 'Benutzername', ''], ['password', 'Passwort', '', 'password'], ['from', 'Absender', 'netpulse@example.de'], ['to', 'Empfänger (mehrere mit Komma)', 'du@example.de']] },
+  email: { label: 'E-Mail', icon: 'send', fields: [['to', 'Empfänger (mehrere mit Komma)', 'du@example.de'],
+    ['subject', 'Betreff-Vorlage', '[NetPulse] {{schwere}}: {{titel}}'],
+    ['template', 'Text-Vorlage', '{{meldung}}\n\nGerät: {{geraet}} {{ip}}\nRegel: {{regel}}\nWert: {{wert}}\nZeit: {{zeit}}', 'textarea'],
+    ['-own', 'Eigener Server nur für diesen Kanal (sonst der zentrale E-Mail-Server)'],
+    ['host', 'SMTP-Server', 'leer = zentraler Server'], ['port', 'Port', '587'], ['security', 'Verschlüsselung', '', 'select:starttls=STARTTLS (587),tls=TLS (465),none=keine (nur intern)'],
+    ['username', 'Benutzername', ''], ['password', 'Passwort', '', 'password'], ['from', 'Absender', 'netpulse@example.de']],
+    hint: 'Platzhalter: {{titel}} {{meldung}} {{schwere}} {{geraet}} {{ip}} {{regel}} {{wert}} {{zeit}} {{link}}. Zeilen ohne Wert (z. B. „Wert:“) werden weggelassen. '
+      + 'Die Mail kommt als übersichtliche HTML-Nachricht mit Textfassung.' },
   telegram: { label: 'Telegram', icon: 'send', fields: [['bot_token', 'Bot-Token', '123456:ABC…', 'password'], ['chat_id', 'Chat-ID', '123456789']],
     hint: 'Bot über @BotFather anlegen, dem Bot schreiben und die Chat-ID z. B. über @userinfobot ermitteln.' },
   gotify: { label: 'Gotify', icon: 'bell', fields: [['url', 'Server-URL', 'https://gotify.example.de'], ['token', 'App-Token', '', 'password']] },
@@ -538,10 +547,55 @@ const CHANNEL_KINDS = {
   webhook: { label: 'Webhook (eigene Systeme)', icon: 'plug-connected', fields: [['url', 'URL', 'https://…', 'password'], ['secret', 'Geheimnis (Header X-NetPulse-Secret)', '', 'password']] },
 };
 
+/** Für alle Kanäle: Sammeln und Ruhezeiten */
+const DELIVERY_FIELDS = [
+  ['-delivery', 'Zustellung'],
+  ['digest_min', 'Sammeln: Meldungen so viele Minuten bündeln (0 = sofort)', '0', 'number'],
+  ['quiet_from', 'Ruhezeit von', '22:00', 'time'],
+  ['quiet_to', 'Ruhezeit bis', '07:00', 'time'],
+  ['quiet_critical', 'Kritische Alarme (z. B. Gerät offline) trotz Ruhezeit sofort senden', true, 'checkbox'],
+];
+
+async function renderSmtp() {
+  const box = $('#smtp-box');
+  const { config: c, configured } = await api('/settings/smtp');
+  box.innerHTML = `<form class="form" id="smtp-form">
+      <div class="form-row"><label>SMTP-Server<input name="host" value="${esc(c.host || '')}" placeholder="smtp.example.de"></label>
+        <label>Port<input name="port" type="number" min="1" max="65535" value="${esc(c.port || '')}" placeholder="587"></label></div>
+      <div class="form-row"><label>Verschlüsselung<select name="security">
+          ${[['starttls', 'STARTTLS (Port 587)'], ['tls', 'TLS (Port 465)'], ['none', 'keine (nur im eigenen Netz)']].map(([v, l]) => `<option value="${v}"${(c.security || 'starttls') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label>Benutzername<input name="username" value="${esc(c.username || '')}" autocomplete="off"></label></div>
+      <div class="form-row"><label>Passwort<input name="password" type="password" autocomplete="new-password" placeholder="${c.password ? 'gespeichert – leer lassen = unverändert' : ''}"></label>
+        <label>Absender-Adresse<input name="from" value="${esc(c.from || '')}" placeholder="netpulse@example.de"></label></div>
+      <label>Absender-Name<input name="from_name" value="${esc(c.from_name || '')}" placeholder="NetPulse"></label>
+      <div class="actions"><button type="submit">${icon('check')}Speichern</button>
+        <input name="test_to" type="email" placeholder="Test an: du@example.de" aria-label="Test-Empfänger">
+        <button type="button" class="ghost" id="smtp-test">${icon('send')}Test senden</button></div>
+      <p class="hint">${configured ? 'Gilt für alle E-Mail-Kanäle ohne eigenen Server.' : 'Noch kein Server eingetragen – E-Mail-Kanäle können erst danach senden.'}
+        Tipp: Bei Gmail/Outlook ein App-Passwort verwenden.</p></form>`;
+  const form = $('#smtp-form');
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = form.elements;
+    const body = { host: e.host.value.trim(), port: e.port.value ? Number(e.port.value) : null, security: e.security.value,
+      username: e.username.value.trim(), from: e.from.value.trim(), from_name: e.from_name.value.trim() };
+    if (e.password.value) body.password = e.password.value;
+    attempt(async () => { await api('/settings/smtp', { method: 'PUT', body }); await renderSmtp(); }, 'E-Mail-Server gespeichert');
+  });
+  $('#smtp-test').addEventListener('click', (ev) => {
+    const to = form.elements.test_to.value.trim();
+    if (!to) { toast('Bitte eine Empfängeradresse für den Test eingeben', true); return; }
+    ev.currentTarget.disabled = true;
+    attempt(() => api('/settings/smtp/test', { method: 'POST', body: { to } }), `Test-Mail an ${to} gesendet`)
+      .finally(() => { $('#smtp-test').disabled = false; });
+  });
+}
+
 async function viewChannels() {
   const render = async () => {
     const channels = await api('/channels');
     view().innerHTML = `
+      <div class="card"><header><h2>${icon('send')}E-Mail-Server</h2></header><div id="smtp-box"><div class="empty">Lade …</div></div></div>
       <div class="card"><header><h2>${icon('send')}Benachrichtigungskanäle</h2><button type="button" id="ch-add">${icon('plus')}Kanal hinzufügen</button></header>
       ${channels.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Art</th><th>Aktiv</th><th></th></tr></thead>
       <tbody>${channels.map((c) => `<tr><td>${esc(c.name)}</td>
@@ -552,6 +606,7 @@ async function viewChannels() {
           <button type="button" class="ghost sm" data-del="${c.id}">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}</tbody></table></div>`
       : empty('Noch keine Kanäle. Am einfachsten: ntfy (kostenlose Push-App) oder E-Mail.', 'send')}</div>
       <p class="muted small">Wann benachrichtigt wird, legst du unter <a href="#/alerts?tab=rules">Alarme → Regeln</a> fest.</p>`;
+    renderSmtp();
     $('#ch-add').addEventListener('click', () => channelDialog(null));
     $$('[data-edit]').forEach((b) => b.addEventListener('click', () => channelDialog(channels.find((c) => c.id === Number(b.dataset.edit)))));
     $$('[data-test]').forEach((b) => b.addEventListener('click', () => {
@@ -568,8 +623,18 @@ async function viewChannels() {
     const editing = !!channel;
     const fieldsHtml = (kind, config = {}) => {
       const def = CHANNEL_KINDS[kind];
-      return def.fields.map(([key, label, placeholder, type]) => {
-        const value = config[key] ?? (key === 'server' && !editing ? 'https://ntfy.sh' : key === 'port' && !editing ? '587' : '');
+      return [...def.fields, ...DELIVERY_FIELDS].map(([key, label, placeholder, type]) => {
+        if (key.startsWith('-')) return `<h3 class="sub">${esc(label)}</h3>`;
+        const value = config[key] ?? (key === 'server' && !editing ? 'https://ntfy.sh' : '');
+        if (type === 'textarea') {
+          return `<label>${esc(label)}<textarea name="cfg_${key}" rows="6" class="mono" placeholder="${esc(placeholder)}">${esc(value)}</textarea></label>`;
+        }
+        if (type === 'checkbox') {
+          return `<label class="inline"><input type="checkbox" name="cfg_${key}"${(config[key] ?? placeholder) ? ' checked' : ''}> ${esc(label)}</label>`;
+        }
+        if (type === 'number' || type === 'time') {
+          return `<label>${esc(label)}<input name="cfg_${key}" type="${type}" ${type === 'number' ? 'min="0" max="1440"' : ''} value="${esc(value)}" placeholder="${esc(placeholder)}"></label>`;
+        }
         if (type && type.startsWith('select:')) {
           const opts = type.slice(7).split(',').map((o) => o.split('='));
           return `<label>${esc(label)}<select name="cfg_${key}">${opts.map(([v, l]) => `<option value="${v}"${value === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
@@ -581,10 +646,27 @@ async function viewChannels() {
       <label>Art<select name="kind"${editing ? ' disabled' : ''}>${Object.entries(CHANNEL_KINDS).map(([k, v]) => `<option value="${k}"${channel && channel.kind === k ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
       <label>Name<input name="name" required value="${esc(channel ? channel.name : '')}" placeholder="z. B. Handy"></label>
       <div class="form" id="ch-fields"></div>
+      <div id="ch-preview"></div>
       <label class="inline"><input type="checkbox" name="enabled"${!channel || channel.enabled ? ' checked' : ''}> Aktiv</label>
-      <div class="actions"><button type="submit">${icon('check')}Speichern</button></div></form>`);
+      <div class="actions"><button type="button" class="ghost" id="ch-preview-btn">${icon('search')}Vorschau</button>
+        <button type="submit">${icon('check')}Speichern</button></div></form>`);
+    dlg.classList.add('wide');
     const form = $('#ch-form', dlg);
-    const update = () => { $('#ch-fields', dlg).innerHTML = fieldsHtml(form.kind.value, channel ? channel.config : {}); };
+    const update = () => {
+      $('#ch-fields', dlg).innerHTML = fieldsHtml(form.kind.value, channel ? channel.config : {});
+      $('#ch-preview', dlg).innerHTML = '';
+      $('#ch-preview-btn', dlg).hidden = form.kind.value !== 'email';
+    };
+    $('#ch-preview-btn', dlg).addEventListener('click', () => {
+      const sample = { titel: 'Offline: NAS (192.168.178.10)', meldung: 'NAS (192.168.178.10) ist seit 5 Min. nicht erreichbar', schwere: 'Kritisch',
+        geraet: 'NAS', ip: '(192.168.178.10)', regel: 'Server offline', wert: 'seit 5 Min. offline', zeit: new Date().toLocaleString('de-DE').slice(0, -3), link: location.origin + '/#/device/1' };
+      const fill = (t) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => sample[k] ?? '').split('\n')
+        .filter((l) => !(/^[^:]{1,29}:$/.test(l.trim()))).join('\n').trim();
+      const subject = fill(form.elements.cfg_subject.value || form.elements.cfg_subject.placeholder);
+      const body = fill(form.elements.cfg_template.value || form.elements.cfg_template.placeholder);
+      $('#ch-preview', dlg).innerHTML = `<div class="mail-preview"><div class="mail-bar"></div><div class="muted small">Betreff</div><strong>${esc(subject)}</strong>
+        <pre>${esc(body)}</pre></div>`;
+    });
     form.kind.addEventListener('change', update);
     update();
     form.addEventListener('submit', (ev) => {
@@ -592,7 +674,9 @@ async function viewChannels() {
       const config = {};
       $$('[name^="cfg_"]', form).forEach((el) => {
         const key = el.name.slice(4);
-        config[key] = key === 'port' ? (el.value ? Number(el.value) : null) : el.value.trim();
+        if (el.type === 'checkbox') config[key] = el.checked;
+        else if (key === 'port' || el.type === 'number') config[key] = el.value ? Number(el.value) : null;
+        else config[key] = el.tagName === 'TEXTAREA' ? el.value.replace(/\r/g, '') : el.value.trim();
       });
       const body = { name: form.elements.name.value.trim(), kind: form.kind.value, enabled: form.enabled.checked, config };
       attempt(async () => {
@@ -660,7 +744,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
-  totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
+  smtp_update: 'E-Mail-Server geändert', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 

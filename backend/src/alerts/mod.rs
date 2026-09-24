@@ -5,7 +5,10 @@
 //! - `new_device`   : neues Gerät im Netz
 //! - `mac_changed`  : MAC-Adresse einer IP hat sich geändert (möglicher Angriff)
 //! - `disk_usage`, `cpu_usage`, `mem_usage`, `temperature`: Schwellwert aus SNMP/SSH-Messwerten
+//!
+//! Solange ein Alarm offen ist, erinnert NetPulse auf Wunsch alle `repeat_min` Minuten daran.
 
+pub mod deliver;
 pub mod notify;
 
 use std::time::Duration;
@@ -18,15 +21,16 @@ use crate::AppState;
 use notify::{Notification, Severity};
 
 #[derive(FromRow, Clone)]
-struct Rule {
-    id: i64,
-    name: String,
-    kind: String,
-    device_id: Option<i64>,
-    threshold: Option<f32>,
-    duration_min: i32,
-    channel_ids: Vec<i64>,
-    notify_recovery: bool,
+pub(crate) struct Rule {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub device_id: Option<i64>,
+    pub threshold: Option<f32>,
+    pub duration_min: i32,
+    pub channel_ids: Vec<i64>,
+    pub notify_recovery: bool,
+    pub repeat_min: i32,
 }
 
 pub async fn run(state: AppState) {
@@ -49,7 +53,7 @@ pub async fn run(state: AppState) {
 
 async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
     let rules: Vec<Rule> = sqlx::query_as(
-        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery
+        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, repeat_min
            FROM alert_rules WHERE enabled",
     )
     .fetch_all(&state.db)
@@ -65,6 +69,9 @@ async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
         if let Err(e) = result {
             tracing::error!("Regel „{}“: {e:#}", rule.name);
         }
+    }
+    if let Err(e) = reminders(state, &rules).await {
+        tracing::error!("Erinnerungen: {e:#}");
     }
     Ok(new_cursor)
 }
@@ -101,13 +108,9 @@ async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i6
                 .await?;
             let severity = if rule_kind == "new_device" { Severity::Info } else { Severity::Warning };
             let title = if rule_kind == "new_device" { "Neues Gerät im Netz" } else { "Sicherheitshinweis" };
-            dispatch(state, rule, Notification {
-                title: title.into(),
-                message: message.clone(),
-                severity,
-                link: device_id.and_then(|id| device_link(state, id)),
-            })
-            .await;
+            let mut n = Notification::new(title, message.clone(), severity, device_id.and_then(|id| device_link(state, id)));
+            n.device_id = device_id;
+            dispatch(state, rule, n).await;
         }
     }
     Ok(last)
@@ -128,15 +131,12 @@ async fn device_down(state: &AppState, rule: &Rule) -> Result<()> {
     .fetch_all(&state.db)
     .await?;
     for (device_id, label, minutes) in down {
-        let message = format!("{label} ist seit {minutes} Min. nicht erreichbar");
+        let message = if minutes > 0 { format!("{label} ist seit {minutes} Min. nicht erreichbar") } else { format!("{label} ist nicht erreichbar") };
         if open_alert(state, rule, Some(device_id), &message, None).await? {
-            dispatch(state, rule, Notification {
-                title: format!("Offline: {label}"),
-                message,
-                severity: Severity::Critical,
-                link: device_link(state, device_id),
-            })
-            .await;
+            let n = Notification::new(format!("Offline: {label}"), message, Severity::Critical, device_link(state, device_id))
+                .device(device_id);
+            let n = if minutes > 0 { n.var("wert", format!("seit {minutes} Min. offline")) } else { n };
+            dispatch(state, rule, n).await;
         }
     }
 
@@ -154,13 +154,15 @@ async fn device_down(state: &AppState, rule: &Rule) -> Result<()> {
     .await?;
     if rule.notify_recovery {
         for (device_id, label, minutes) in resolved {
-            dispatch(state, rule, Notification {
-                title: format!("Wieder online: {label}"),
-                message: format!("{label} ist wieder erreichbar (Alarm bestand {minutes} Min.)"),
-                severity: Severity::Resolved,
-                link: device_link(state, device_id),
-            })
-            .await;
+            let n = Notification::new(
+                format!("Wieder online: {label}"),
+                format!("{label} ist wieder erreichbar (Alarm bestand {minutes} Min.)"),
+                Severity::Resolved,
+                device_link(state, device_id),
+            )
+            .device(device_id)
+            .var("wert", format!("{minutes} Min. Ausfall"));
+            dispatch(state, rule, n).await;
         }
     }
     Ok(())
@@ -197,13 +199,10 @@ async fn threshold(state: &AppState, rule: &Rule) -> Result<()> {
         if sustained > limit {
             let message = format!("{what} von {label} liegt bei {latest:.0} {unit} (Grenze {limit:.0} {unit})");
             if open_alert(state, rule, Some(device_id), &message, Some(latest)).await? {
-                dispatch(state, rule, Notification {
-                    title: format!("{what} hoch: {label}"),
-                    message,
-                    severity: Severity::Warning,
-                    link: device_link(state, device_id),
-                })
-                .await;
+                let n = Notification::new(format!("{what} hoch: {label}"), message, Severity::Warning, device_link(state, device_id))
+                    .device(device_id)
+                    .var("wert", format!("{latest:.0} {unit} (Grenze {limit:.0} {unit})"));
+                dispatch(state, rule, n).await;
             }
         } else if latest <= limit {
             let closed: Option<(i64,)> = sqlx::query_as(
@@ -214,23 +213,62 @@ async fn threshold(state: &AppState, rule: &Rule) -> Result<()> {
             .fetch_optional(&state.db)
             .await?;
             if closed.is_some() && rule.notify_recovery {
-                dispatch(state, rule, Notification {
-                    title: format!("{what} wieder normal: {label}"),
-                    message: format!("{what} von {label} liegt wieder bei {latest:.0} {unit}"),
-                    severity: Severity::Resolved,
-                    link: device_link(state, device_id),
-                })
-                .await;
+                let n = Notification::new(
+                    format!("{what} wieder normal: {label}"),
+                    format!("{what} von {label} liegt wieder bei {latest:.0} {unit}"),
+                    Severity::Resolved,
+                    device_link(state, device_id),
+                )
+                .device(device_id)
+                .var("wert", format!("{latest:.0} {unit}"));
+                dispatch(state, rule, n).await;
             }
         }
     }
     Ok(())
 }
 
+/// Offene Alarme erneut melden, solange sie bestehen (je Regel einstellbar)
+async fn reminders(state: &AppState, rules: &[Rule]) -> Result<()> {
+    for rule in rules.iter().filter(|r| r.repeat_min > 0) {
+        // Meldung ohne die ursprüngliche Dauer („seit 5 Min.“) – die aktuelle Dauer kommt dazu
+        let due: Vec<(i64, Option<i64>, String, i32, i64)> = sqlx::query_as(
+            "UPDATE alerts SET last_notified_at = now(), notify_count = notify_count + 1
+              WHERE rule_id = $1 AND resolved_at IS NULL
+                AND COALESCE(last_notified_at, opened_at) <= now() - make_interval(mins => $2)
+              RETURNING id, device_id, message, notify_count, (EXTRACT(EPOCH FROM now() - opened_at) / 60)::bigint",
+        )
+        .bind(rule.id)
+        .bind(rule.repeat_min)
+        .fetch_all(&state.db)
+        .await?;
+        for (_, device_id, message, count, minutes) in due {
+            let severity = if rule.kind == "device_down" { Severity::Critical } else { Severity::Warning };
+            let mut n = Notification::new(
+                format!("Erinnerung ({count}.): {}", rule.name),
+                format!("{} – besteht seit {minutes} Min.", strip_duration(&message)),
+                severity,
+                device_id.and_then(|id| device_link(state, id)),
+            );
+            n.device_id = device_id;
+            dispatch(state, rule, n).await;
+        }
+    }
+    Ok(())
+}
+
+/// „NAS ist seit 5 Min. nicht erreichbar“ → „NAS ist nicht erreichbar“
+fn strip_duration(message: &str) -> String {
+    match (message.find(" seit "), message.find(" Min. ")) {
+        (Some(a), Some(b)) if b > a => format!("{}{}", &message[..a], &message[b + 5..]),
+        _ => message.to_string(),
+    }
+}
+
 /// Legt einen offenen Alarm an; `false`, wenn für Regel+Gerät schon einer offen ist.
 async fn open_alert(state: &AppState, rule: &Rule, device_id: Option<i64>, message: &str, value: Option<f32>) -> sqlx::Result<bool> {
     let inserted: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO alerts (rule_id, device_id, message, value) VALUES ($1, $2, $3, $4)
+        "INSERT INTO alerts (rule_id, device_id, message, value, last_notified_at) VALUES ($1, $2, $3, $4, now())
          ON CONFLICT (rule_id, (COALESCE(device_id, 0))) WHERE resolved_at IS NULL DO NOTHING
          RETURNING id",
     )
@@ -243,16 +281,36 @@ async fn open_alert(state: &AppState, rule: &Rule, device_id: Option<i64>, messa
     Ok(inserted.is_some())
 }
 
-/// An alle Kanäle der Regel senden. Fehler werden geloggt, stoppen aber nichts.
-async fn dispatch(state: &AppState, rule: &Rule, notification: Notification) {
+/// Platzhalter ergänzen, im Browser anzeigen und an alle Kanäle der Regel zustellen
+async fn dispatch(state: &AppState, rule: &Rule, mut n: Notification) {
+    n.vars.insert("regel".into(), rule.name.clone());
+    n.vars.insert(
+        "zeit".into(),
+        chrono::Utc::now().with_timezone(&crate::scanner::schedule::timezone()).format("%d.%m.%Y %H:%M").to_string(),
+    );
+    n.vars.insert("tag".into(), format!("rule-{}-{}", rule.id, n.device_id.unwrap_or(0)));
+    if let Some(device_id) = n.device_id {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT COALESCE(name, reported_name, hostname, host(ip)), host(ip) FROM devices WHERE id = $1")
+                .bind(device_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        if let Some((label, ip)) = row {
+            n.vars.insert("geraet".into(), label);
+            n.vars.insert("ip".into(), format!("({ip})"));
+        }
+    }
+
     // Sofort als Hinweis in allen offenen Browsern anzeigen (unabhängig von den Kanälen)
     state.hub.publish(&serde_json::json!({
         "type": "alert",
-        "title": notification.title,
-        "message": notification.message,
-        "severity": notification.severity.name(),
+        "title": n.title,
+        "message": n.message,
+        "severity": n.severity.name(),
         "rule": rule.name,
-        "device_id": rule.device_id,
+        "device_id": n.device_id,
     }));
     let channels: Vec<(i64, String, String, String)> = match sqlx::query_as(
         "SELECT id, name, kind, config FROM notification_channels WHERE enabled AND id = ANY($1)",
@@ -268,27 +326,20 @@ async fn dispatch(state: &AppState, rule: &Rule, notification: Notification) {
         }
     };
     for (id, name, kind, sealed) in channels {
-        if kind == "app" {
-            let message = crate::push::PushMessage {
-                title: &notification.title,
-                body: &notification.message,
-                severity: notification.severity.name(),
-                url: "/#/alerts",
-                tag: &format!("rule-{}", rule.id),
-            };
-            match crate::push::send(state, None, &message).await {
-                Ok((ok, failed)) => tracing::info!("Push „{}“ an {ok} Gerät(e) gesendet ({failed} fehlgeschlagen)", notification.title),
-                Err(e) => tracing::warn!("Push über Kanal {id} ({name}) fehlgeschlagen: {e:#}"),
-            }
-            continue;
+        match state.vault.open_value::<Value>(&sealed) {
+            Ok(config) => deliver::to_channel(state, id, &name, &kind, config, &n).await,
+            Err(e) => tracing::warn!("Kanal {id} ({name}) nicht lesbar: {e:#}"),
         }
-        let result = match state.vault.open_value::<Value>(&sealed) {
-            Ok(config) => notify::send(&kind, &config, &notification).await,
-            Err(e) => Err(e),
-        };
-        match result {
-            Ok(()) => tracing::info!("Benachrichtigung „{}“ über {name} gesendet", notification.title),
-            Err(e) => tracing::warn!("Benachrichtigung über Kanal {id} ({name}) fehlgeschlagen: {e:#}"),
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dauer_entfernen() {
+        assert_eq!(strip_duration("NAS (10.0.0.5) ist seit 5 Min. nicht erreichbar"), "NAS (10.0.0.5) ist nicht erreichbar");
+        assert_eq!(strip_duration("CPU hoch"), "CPU hoch");
     }
 }

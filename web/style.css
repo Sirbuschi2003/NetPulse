@@ -484,3 +484,8 @@ ol.diag li.info .i { color: var(--muted); }
 .qr svg { width: 220px; height: 220px; display: block; }
 ol.steps { margin: 0 0 6px; padding-left: 20px; color: var(--text-2); font-size: 13.5px; }
 h3.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* ---------- E-Mail-Vorschau ---------- */
+.mail-preview { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; background: var(--surface-2); position: relative; overflow: hidden; }
+.mail-preview .mail-bar { position: absolute; left: 0; top: 0; right: 0; height: 4px; background: var(--down); }
+.mail-preview pre { white-space: pre-wrap; font: inherit; margin: 10px 0 0; color: var(--text-2); }
