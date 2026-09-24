@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.1#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -344,7 +344,7 @@ function sparkline(points, height = 44) {
 // ---------------------------------------------------------------------------
 
 const HISTORY_POINTS = 120;
-const live = { es: null, devices: new Map(), total: null, history: [], perDevice: new Map(), listeners: new Set() };
+const live = { es: null, devices: new Map(), total: null, totals: {}, history: [], prodHistory: [], perDevice: new Map(), listeners: new Set() };
 
 function pushPoint(list, value) {
   list.push(value);
@@ -373,7 +373,11 @@ function connectStream() {
       if (msg.full) live.devices.clear();
       (msg.devices || []).forEach((d) => live.devices.set(d.id, d));
       live.total = msg.total_power_w;
-      if (msg.total_power_w != null && !(msg.full && live.history.length)) pushPoint(live.history, msg.total_power_w);
+      live.totals = msg.totals || {};
+      if (!(msg.full && live.history.length)) {
+        if (live.totals.consumption_w != null) pushPoint(live.history, live.totals.consumption_w);
+        if (live.totals.production_w != null) pushPoint(live.prodHistory, live.totals.production_w);
+      }
       live.devices.forEach((d) => {
         if (!d.ok || d.power_w == null) return;
         if (!live.perDevice.has(d.id)) live.perDevice.set(d.id, []);
@@ -441,6 +445,25 @@ function onLive(fn) {
   state.liveStops.push(() => live.listeners.delete(fn));
 }
 
+/** Verbrauch (orange) und Erzeugung (grün) übereinander */
+function energySpark(consumed, produced, height = 56) {
+  const series = [consumed, produced].filter((s) => s && s.length >= 3);
+  if (!series.length) return `<svg class="spark tall" viewBox="0 0 240 ${height}"></svg>`;
+  const W = 240;
+  const slots = Math.max(24, ...series.map((s) => s.length));
+  const max = Math.max(1, ...series.flat()) * 1.15;
+  const path = (values) => {
+    const x = (i) => ((i + slots - values.length) / (slots - 1)) * W;
+    const y = (v) => height - 2 - (v / max) * (height - 4);
+    const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    return { line, area: `${line} L${W},${height} L${x(0).toFixed(1)},${height} Z` };
+  };
+  let out = '';
+  if (consumed && consumed.length >= 3) { const p = path(consumed); out += `<path class="spark-area c2" d="${p.area}"/><path class="line c2" d="${p.line}"/>`; }
+  if (produced && produced.length >= 3) { const p = path(produced); out += `<path class="spark-area c4" d="${p.area}"/><path class="line c4" d="${p.line}"/>`; }
+  return `<svg class="spark tall" viewBox="0 0 ${W} ${height}" preserveAspectRatio="none">${out}</svg>`;
+}
+
 /** Verlauf eines Einzelwerts (z. B. Watt) als Fläche + Linie */
 function valueSpark(values, height = 56) {
   if (!values || values.length < 3) return `<svg class="spark tall" viewBox="0 0 240 ${height}"></svg>`;
@@ -468,7 +491,7 @@ const linkLabel = (mbps) => (mbps ? (mbps >= 1000 ? `${mbps / 1000} Gbit/s` : `$
 const WIDGETS = {
   summary: { title: 'Übersicht', icon: 'gauge', render: wSummary },
   internet: { title: 'Internet', icon: 'world-www', render: wInternet },
-  power: { title: 'Stromverbrauch live', icon: 'bolt', render: wPower },
+  power: { title: 'Energie live', icon: 'bolt', render: wPower },
   smarthome: { title: 'Smart Home live', icon: 'plug', render: wSmartHome },
   checks: { title: 'Dienste', icon: 'world-www', render: wChecks },
   alerts: { title: 'Offene Alarme', icon: 'bell', render: wAlerts },
@@ -525,26 +548,57 @@ const fmtWatt = (w) => (w == null ? '–' : w >= 1000 ? `${(w / 1000).toFixed(2)
 /** Liste der aktuellen Verbraucher: live, sonst der letzte gespeicherte Stand */
 function powerList(summary) {
   const fromLive = [...live.devices.values()].filter((d) => d.ok && d.power_w != null)
-    .map((d) => ({ id: d.id, label: d.label, power_w: d.power_w }));
+    .map((d) => ({ id: d.id, label: d.label, power_w: d.power_w, role: d.role }));
   const list = fromLive.length ? fromLive : [...((summary && summary.power) || [])];
-  return list.sort((a, b) => b.power_w - a.power_w);
+  return list.sort((a, b) => Math.abs(b.power_w) - Math.abs(a.power_w));
 }
 
+const fmtKwh = (v) => `${Number(v).toLocaleString('de-DE', { maximumFractionDigits: 2 })} kWh`;
+
+const ROLE_ICON = { producer: 'sun', grid: 'plug-connected', consumer: 'bolt' };
+
 function powerBars(list) {
-  const max = (list[0] && list[0].power_w) || 1;
-  return list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${esc(p.label)}</a>
-    <span class="bar" data-w="${pct(p.power_w, max)}"></span><span class="muted num">${esc(fmtWatt(p.power_w))}</span>`).join('');
+  const max = Math.abs((list[0] && list[0].power_w) || 1) || 1;
+  return list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${icon(ROLE_ICON[p.role] || 'bolt', `i-sm role-${esc(p.role || 'consumer')}`)} ${esc(p.label)}</a>
+    <span class="bar${p.role === 'producer' ? ' prod' : ''}" data-w="${pct(Math.abs(p.power_w), max)}"></span><span class="muted num">${esc(fmtWatt(Math.abs(p.power_w)))}</span>`).join('');
+}
+
+/** Verbrauch / Erzeugung / Bilanz aus den Live-Summen (oder der letzten Messung) */
+function energyFigures(list) {
+  const t = live.totals || {};
+  const sum = (role) => list.filter((p) => (p.role || 'consumer') === role).reduce((a, p) => a + Math.abs(p.power_w), 0);
+  const hasRole = (role) => list.some((p) => (p.role || 'consumer') === role);
+  const consumption = t.consumption_w ?? (hasRole('consumer') ? sum('consumer') : null);
+  const production = t.production_w ?? (hasRole('producer') ? sum('producer') : null);
+  return { consumption, production, gridImport: t.grid_import_w, gridExport: t.grid_export_w,
+    balance: consumption != null || production != null ? (consumption || 0) - (production || 0) : null };
+}
+
+function energyHead(f) {
+  const parts = [`<div class="en-fig"><span class="inet-dir">${icon('bolt', 'i-sm')} Verbrauch</span><span class="power-total" data-en="consumption" data-value="${f.consumption || 0}">${esc(fmtWatt(f.consumption))}</span></div>`];
+  if (f.production != null) {
+    parts.push(`<div class="en-fig"><span class="inet-dir">${icon('sun', 'i-sm')} Erzeugung</span><span class="power-total prod" data-en="production" data-value="${f.production}">${esc(fmtWatt(f.production))}</span></div>`);
+    const surplus = f.balance < 0;
+    parts.push(`<div class="en-fig"><span class="inet-dir">${icon('arrows-exchange', 'i-sm')} ${surplus ? 'Überschuss' : 'Bilanz'}</span>
+      <span class="en-balance ${surplus ? 'plus' : ''}" data-en="balance">${esc(fmtWatt(Math.abs(f.balance)))}</span></div>`);
+  }
+  if (f.gridImport != null) {
+    parts.push(`<div class="en-fig"><span class="inet-dir">${icon('plug-connected', 'i-sm')} Netz</span>
+      <span class="en-balance ${f.gridExport > 0 ? 'plus' : ''}" data-en="grid">${f.gridExport > 0 ? `↑ ${esc(fmtWatt(f.gridExport))}` : `↓ ${esc(fmtWatt(f.gridImport))}`}</span></div>`);
+  }
+  return parts.join('');
 }
 
 /** Gesamtleistung aller Geräte mit Strommessung (z. B. Shelly) – live mit Verlauf */
 function wPower({ summary }) {
   const list = powerList(summary);
   if (!list.length) return empty('Keine Geräte mit Strommessung. Shelly-Steckdosen und -Zähler werden automatisch erkannt.', 'bolt');
-  const total = live.total ?? list.reduce((sum, p) => sum + p.power_w, 0);
+  const today = (summary && summary.energy_today) || {};
   return `<div class="power-live" data-live-power>
-    <div class="power-head"><span class="power-total" data-total data-value="${total}">${esc(fmtWatt(total))}</span>
-      <span class="live-tag">LIVE</span></div>
-    <div data-spark>${valueSpark(live.history)}</div>
+    <div class="power-head"><div class="en-figs" data-en-head>${energyHead(energyFigures(list))}</div><span class="live-tag">LIVE</span></div>
+    <div data-spark>${energySpark(live.history, live.prodHistory)}</div>
+    ${today.consumed_kwh != null || today.produced_kwh != null ? `<p class="muted small">Heute: ${today.consumed_kwh != null ? `${esc(fmtKwh(today.consumed_kwh))} verbraucht` : ''}
+      ${today.produced_kwh != null ? ` · <span class="role-producer">☀ ${esc(fmtKwh(today.produced_kwh))} erzeugt</span>` : ''} (ca.)</p>` : ''}
     <div class="bars" data-bars>${powerBars(list)}</div></div>`;
 }
 
@@ -561,8 +615,10 @@ function shellyTile(d) {
       d.battery_pct != null ? `Akku ${d.battery_pct} %` : null].filter(Boolean).join(' · ')
     : (d.error || '');
   const firstKind = (channels[0] || {}).kind;
-  return `<a class="sh-tile${!d.ok ? ' off' : on ? ' on' : ''}" href="#/device/${d.id}" data-sh="${d.id}" title="${esc(d.label)}${d.model ? ` · ${esc(d.model)}` : ''}">
-    <span class="sh-top">${icon(CHANNEL_ICON[firstKind] || 'plug', 'i-sm')}<span class="ellipsis">${esc(d.label)}</span></span>
+  const producer = d.role === 'producer';
+  if (d.ok && producer && d.power_w != null) main = `☀ ${fmtWatt(Math.abs(d.power_w))}`;
+  return `<a class="sh-tile${!d.ok ? ' off' : producer && d.power_w > 1 ? ' prod' : on ? ' on' : ''}" href="#/device/${d.id}" data-sh="${d.id}" title="${esc(d.label)}${d.model ? ` · ${esc(d.model)}` : ''}">
+    <span class="sh-top">${icon(producer ? 'sun' : CHANNEL_ICON[firstKind] || 'plug', 'i-sm')}<span class="ellipsis">${esc(d.label)}</span></span>
     <span class="sh-val">${esc(main)}</span>
     <span class="sh-chans">${channels.map((c) => `<i class="sh-ch${c.on === true ? ' on' : ''}" title="${esc(CHANNEL_LABEL[c.kind] || c.kind)} ${Number(c.id) + 1}${c.position != null ? ` · ${c.position} %` : ''}"></i>`).join('')}</span>
     <span class="sh-extra ellipsis">${esc(extra)}</span></a>`;
@@ -588,14 +644,14 @@ function mountStreamWidgets(root) {
     onLive((msg) => {
       if (msg.type !== 'shelly') return;
       const list = powerList(null);
-      tweenNumber($('[data-total]', el), live.total, fmtWatt);
-      $('[data-spark]', el).innerHTML = valueSpark(live.history);
+      $('[data-en-head]', el).innerHTML = energyHead(energyFigures(list));
+      $('[data-spark]', el).innerHTML = energySpark(live.history, live.prodHistory);
       const ids = list.slice(0, 8).map((p) => p.id).join(',');
       if (bars.dataset.ids === ids) {
         // Gleiche Reihenfolge: Balken nur verschieben (weiche Animation)
         const max = (list[0] && list[0].power_w) || 1;
-        $$('.bar', bars).forEach((bar, i) => { bar.style.width = `${pct(list[i].power_w, max)}%`; });
-        $$('.num', bars).forEach((num, i) => { num.textContent = fmtWatt(list[i].power_w); });
+        $$('.bar', bars).forEach((bar, i) => { bar.style.width = `${pct(Math.abs(list[i].power_w), Math.abs(max))}%`; });
+        $$('.num', bars).forEach((num, i) => { num.textContent = fmtWatt(Math.abs(list[i].power_w)); });
       } else {
         bars.innerHTML = powerBars(list);
         bars.dataset.ids = ids;

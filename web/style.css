@@ -630,3 +630,18 @@ svg.st-chart .grid-line { stroke: var(--border); stroke-dasharray: 3 4; vector-e
 .sp-item { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface-2); }
 .sp-fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto; gap: 10px; align-items: end; margin-top: 6px; }
 @media (max-width: 900px) { .sp-fields { grid-template-columns: 1fr 1fr; } }
+
+/* ---------- Verbrauch / Erzeugung ---------- */
+.en-figs { display: flex; flex-wrap: wrap; gap: 6px 22px; }
+.en-fig { display: flex; flex-direction: column; }
+.en-fig .power-total { font-size: 26px; }
+.power-total.prod { background: linear-gradient(90deg, var(--up), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.en-balance { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.6; }
+.en-balance.plus { color: var(--up); }
+.bar.prod { background: linear-gradient(90deg, var(--up), var(--accent-2)); }
+.role-producer { color: var(--up); }
+.i.role-producer { color: var(--up); } .i.role-consumer { color: var(--warn); } .i.role-grid { color: var(--info); }
+.sh-tile.prod { border-color: color-mix(in srgb, var(--up) 55%, transparent);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--up) 14%, var(--surface-2)), var(--surface-2) 70%);
+  box-shadow: 0 0 18px -6px color-mix(in srgb, var(--up) 70%, transparent); }
+.sh-tile.prod .sh-top .i, .sh-tile.prod .sh-val { color: var(--up); }

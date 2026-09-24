@@ -23,7 +23,7 @@ const DEVICE_COLUMNS: &str = "id, host(ip) AS ip, mac, hostname, name, notes, op
                               COALESCE(device_type, 'unknown') AS device_type, device_type_manual, os, model, \
                               inventory_at, inventory_error, wan_interface, wan_interface_manual, reported_name, integration, \
                               EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = devices.id) AS has_credentials, \
-                              parent_id, parent_manual";
+                              parent_id, parent_manual, energy_role";
 
 const EVENT_SELECT: &str = "SELECT e.id, e.time, e.device_id, \
                             COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS device_label, e.kind, e.message \
@@ -59,6 +59,7 @@ pub struct Device {
     has_credentials: bool,
     parent_id: Option<i64>,
     parent_manual: bool,
+    energy_role: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -107,14 +108,32 @@ pub async fn summary(State(st): State<AppState>, _user: CurrentUser) -> ApiResul
     .fetch_all(&st.db)
     .await?;
     // Aktuelle Leistung aller Geräte mit Strommessung (z. B. Shelly), Messwert höchstens 15 Minuten alt
-    let power: Vec<(i64, String, f32)> = sqlx::query_as(
-        "SELECT DISTINCT ON (s.device_id) s.device_id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)), s.power_w
+    let power: Vec<(i64, String, f32, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (s.device_id) s.device_id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)), s.power_w,
+                COALESCE(d.energy_role, CASE WHEN lower(COALESCE(d.name, '') || ' ' || COALESCE(d.reported_name, '') || ' ' || COALESCE(d.hostname, ''))
+    ~ '(balkon|solar|photovolt|wechselrichter|inverter|\\mpv\\M|\\mbkw\\M)' THEN 'producer' ELSE 'consumer' END)
            FROM device_stats s JOIN devices d ON d.id = s.device_id
           WHERE s.power_w IS NOT NULL AND s.time > now() - interval '15 minutes'
           ORDER BY s.device_id, s.time DESC",
     )
     .fetch_all(&st.db)
     .await?;
+    // Heute (ab Mitternacht, Ortszeit) verbraucht/erzeugt – aus den Minutenwerten, ungefähr
+    let tz = crate::scanner::schedule::timezone().name().to_string();
+    let energy: Vec<(String, Option<f64>)> = sqlx::query_as(
+        "SELECT role, sum(w) / 60000.0 FROM (
+             SELECT COALESCE(d.energy_role, CASE WHEN lower(COALESCE(d.name, '') || ' ' || COALESCE(d.reported_name, '') || ' ' || COALESCE(d.hostname, ''))
+    ~ '(balkon|solar|photovolt|wechselrichter|inverter|\\mpv\\M|\\mbkw\\M)' THEN 'producer' ELSE 'consumer' END) AS role,
+                    time_bucket('1 minute', s.time) AS b, avg(abs(s.power_w))::float8 AS w
+               FROM device_stats s JOIN devices d ON d.id = s.device_id
+              WHERE s.power_w IS NOT NULL AND s.time > (date_trunc('day', now() AT TIME ZONE $1) AT TIME ZONE $1)
+              GROUP BY d.id, role, b) x
+          GROUP BY role",
+    )
+    .bind(&tz)
+    .fetch_all(&st.db)
+    .await?;
+    let kwh = |role: &str| energy.iter().find(|(r, _)| r == role).and_then(|(_, v)| *v).map(|v| (v * 100.0).round() / 100.0);
     let types: Vec<(String, i64)> =
         sqlx::query_as("SELECT COALESCE(device_type, 'unknown'), count(*) FROM devices GROUP BY 1 ORDER BY 2 DESC")
             .fetch_all(&st.db)
@@ -125,9 +144,10 @@ pub async fn summary(State(st): State<AppState>, _user: CurrentUser) -> ApiResul
         "scan": st.scan_progress.snapshot(),
         "open_alerts": open_alerts,
         "types": types.into_iter().map(|(t, n)| json!({ "type": t, "count": n })).collect::<Vec<_>>(),
+        "energy_today": { "consumed_kwh": kwh("consumer"), "produced_kwh": kwh("producer") },
         "power": power
             .into_iter()
-            .map(|(id, label, watt)| json!({ "id": id, "label": label, "power_w": watt }))
+            .map(|(id, label, watt, role)| json!({ "id": id, "label": label, "power_w": watt, "role": role }))
             .collect::<Vec<_>>(),
         "wan_devices": wan_devices
             .into_iter()
@@ -272,6 +292,8 @@ pub struct DeviceUpdate {
     wan_interface: Option<String>,
     /// Elterngerät (Switch/AP/Router), an dem das Gerät hängt; 0 = keins, -1 = automatisch (UniFi)
     parent_id: Option<i64>,
+    /// Strommessung: auto | consumer | producer | grid
+    energy_role: Option<String>,
 }
 
 pub async fn update(
@@ -290,6 +312,9 @@ pub async fn update(
         if kind != "auto" && !classify::TYPES.contains(&kind) {
             return Err(ApiError::BadRequest(format!("Unbekannter Gerätetyp: {kind}")));
         }
+    }
+    if req.energy_role.as_deref().is_some_and(|r| !matches!(r, "auto" | "consumer" | "producer" | "grid")) {
+        return Err(ApiError::BadRequest("Unbekannte Energie-Rolle".into()));
     }
     if let Some(parent) = req.parent_id.filter(|p| *p > 0) {
         // Kein Kreis: das neue Elterngerät darf nicht (indirekt) an diesem Gerät hängen
@@ -320,7 +345,8 @@ pub async fn update(
             wan_interface = CASE WHEN $6::text IS NULL THEN wan_interface ELSE NULLIF(trim($6), '') END,
             wan_interface_manual = CASE WHEN $6::text IS NULL THEN wan_interface_manual ELSE trim($6) <> '' END,
             parent_id = CASE WHEN $7::bigint IS NULL OR $7 = -1 THEN parent_id WHEN $7 = 0 THEN NULL ELSE $7 END,
-            parent_manual = CASE WHEN $7::bigint IS NULL THEN parent_manual ELSE $7 <> -1 END
+            parent_manual = CASE WHEN $7::bigint IS NULL THEN parent_manual ELSE $7 <> -1 END,
+            energy_role = CASE WHEN $8::text IS NULL THEN energy_role WHEN $8 = 'auto' THEN NULL ELSE $8 END
           WHERE id = $1
           RETURNING {DEVICE_COLUMNS}"
     );
@@ -332,6 +358,7 @@ pub async fn update(
         .bind(&req.device_type)
         .bind(&req.wan_interface)
         .bind(req.parent_id)
+        .bind(&req.energy_role)
         .fetch_optional(&st.db)
         .await?
         .ok_or(ApiError::NotFound)?;

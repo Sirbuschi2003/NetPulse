@@ -57,19 +57,43 @@ impl Hub {
     pub fn snapshot(&self) -> Value {
         let latest = self.latest.lock().unwrap();
         let devices: Vec<&Value> = latest.values().collect();
-        json!({ "type": "shelly", "full": true, "time": Utc::now(), "devices": devices, "total_power_w": total_power(devices.iter().copied()) })
+        let totals = totals(devices.iter().copied());
+        json!({ "type": "shelly", "full": true, "time": Utc::now(), "devices": devices, "total_power_w": totals["consumption_w"], "totals": totals })
     }
 }
 
-fn total_power<'a>(devices: impl Iterator<Item = &'a Value>) -> Option<f64> {
-    let mut any = false;
-    let sum: f64 = devices
-        .filter(|d| d["ok"].as_bool() == Some(true))
-        .filter_map(|d| d["power_w"].as_f64())
-        .inspect(|_| any = true)
-        .sum();
-    any.then_some((sum * 10.0).round() / 10.0)
+/// Summen nach Rolle: Verbrauch, Erzeugung und Netz (Bezug/Einspeisung)
+fn totals<'a>(devices: impl Iterator<Item = &'a Value>) -> Value {
+    let (mut consumption, mut production, mut grid_import, mut grid_export) = (0.0, 0.0, 0.0, 0.0);
+    let (mut has_c, mut has_p, mut has_g) = (false, false, false);
+    for d in devices.filter(|d| d["ok"].as_bool() == Some(true)) {
+        let Some(w) = d["power_w"].as_f64() else { continue };
+        match d["role"].as_str() {
+            Some("producer") => {
+                production += w.abs();
+                has_p = true;
+            }
+            Some("grid") => {
+                if w >= 0.0 { grid_import += w } else { grid_export -= w }
+                has_g = true;
+            }
+            _ => {
+                consumption += w.abs();
+                has_c = true;
+            }
+        }
+    }
+    let r = |v: f64| (v * 10.0).round() / 10.0;
+    json!({
+        "consumption_w": has_c.then(|| r(consumption)),
+        "production_w": has_p.then(|| r(production)),
+        "grid_import_w": has_g.then(|| r(grid_import)),
+        "grid_export_w": has_g.then(|| r(grid_export)),
+        // Bilanz ohne Netz-Zähler: Verbrauch minus Erzeugung (negativ = Überschuss)
+        "balance_w": (has_c || has_p).then(|| r(consumption - production)),
+    })
 }
+
 
 // ---------------------------------------------------------------------------
 // Einstellungen
@@ -126,6 +150,8 @@ struct Target {
     id: i64,
     ip: String,
     label: String,
+    /// consumer | producer | grid
+    role: String,
 }
 
 /// Was pro Gerät zwischen den Durchläufen im Speicher bleibt
@@ -158,8 +184,10 @@ pub async fn run(state: AppState) {
         let started = Instant::now();
         let perf = crate::perf::Timer::new("Echtzeit Shelly (Runde)");
         let targets: Vec<Target> = match sqlx::query_as(
-            "SELECT id, host(ip) AS ip, COALESCE(name, reported_name, hostname, host(ip)) AS label
-               FROM devices WHERE integration = 'shelly' AND status = 'up'",
+            "SELECT d.id, host(d.ip) AS ip, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS label,
+                    COALESCE(d.energy_role, CASE WHEN lower(COALESCE(d.name, '') || ' ' || COALESCE(d.reported_name, '') || ' ' || COALESCE(d.hostname, ''))
+    ~ '(balkon|solar|photovolt|wechselrichter|inverter|\\mpv\\M|\\mbkw\\M)' THEN 'producer' ELSE 'consumer' END) AS role
+               FROM devices d WHERE d.integration = 'shelly' AND d.status = 'up'",
         )
         .fetch_all(&state.db)
         .await
@@ -201,8 +229,8 @@ pub async fn run(state: AppState) {
                 }
                 latest.insert(id, value);
             }
-            let total = total_power(latest.values());
-            state.hub.publish(&json!({ "type": "shelly", "time": Utc::now(), "devices": changed, "total_power_w": total }));
+            let totals = totals(latest.values());
+            state.hub.publish(&json!({ "type": "shelly", "time": Utc::now(), "devices": changed, "total_power_w": totals["consumption_w"], "totals": totals }));
         }
 
         if last_store.elapsed() >= STORE_EVERY && !store.is_empty() {
@@ -241,7 +269,7 @@ fn same(a: &Value, b: &Value) -> bool {
 
 async fn poll_one(state: &AppState, t: Target, cached: Option<Cached>, limit: Duration) -> (i64, Option<Cached>, Option<Value>) {
     let Ok(ip) = t.ip.parse::<Ipv4Addr>() else { return (t.id, None, None) };
-    let offline = |error: &str| Some(json!({ "id": t.id, "label": t.label, "ok": false, "error": error, "time": Utc::now() }));
+    let offline = |error: &str| Some(json!({ "id": t.id, "label": t.label, "role": t.role, "ok": false, "error": error, "time": Utc::now() }));
 
     let mut c = match cached {
         Some(c) if c.info_at.elapsed() < INFO_REFRESH => c,
@@ -281,6 +309,7 @@ async fn poll_one(state: &AppState, t: Target, cached: Option<Cached>, limit: Du
             let value = json!({
                 "id": t.id,
                 "label": t.label,
+                "role": t.role,
                 "ok": true,
                 "time": Utc::now(),
                 "model": c.info.model,

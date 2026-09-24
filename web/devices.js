@@ -415,7 +415,7 @@ async function viewDevice(id) {
     const l = live.devices.get(Number(id));
     return `<div class="live-head"><span class="live-pulse" id="sh-state">${l ? (l.ok ? 'Live – aktualisiert sich automatisch' : esc(l.error || 'keine Antwort')) : 'Warte auf Live-Daten …'}</span></div>
       <div class="grid">
-        <section class="card span-1"><header><h2>${icon('bolt')}Leistung</h2><span class="live-tag">LIVE</span></header>
+        <section class="card span-1"><header><h2>${icon(l && l.role === 'producer' ? 'sun' : 'bolt')}${l && l.role === 'producer' ? 'Erzeugung' : 'Leistung'}</h2><span class="live-tag">LIVE</span></header>
           <div class="power-total big" id="sh-watt" data-value="${(l && l.power_w) || 0}">${esc(l && l.power_w != null ? fmtWatt(l.power_w) : '–')}</div>
           <div id="sh-spark">${valueSpark(live.perDevice.get(Number(id)) || [])}</div>
           <p class="muted small" id="sh-extra"></p></section>
@@ -766,6 +766,11 @@ async function viewDevice(id) {
           <option value="-1"${!d.parent_manual ? ' selected' : ''}>Automatisch${!d.parent_manual && parent ? ` (${esc(deviceLabel(parent))})` : ' (aus UniFi)'}</option>
           <option value="0"${d.parent_manual && !d.parent_id ? ' selected' : ''}>– keins –</option>${parentOptions}</select></label>
         <p class="hint">Fällt das übergeordnete Gerät aus, kommt nur dafür ein Alarm – nicht zusätzlich für jedes Gerät dahinter.</p>
+        ${d.integration === 'shelly' || (data.stats || []).some((p) => p.power_w != null) ? `<label>Strommessung<select name="energy_role">
+          <option value="auto"${!d.energy_role ? ' selected' : ''}>Automatisch (Name mit „Balkon“, „Solar“, „PV“ … = Erzeugung)</option>
+          <option value="consumer"${d.energy_role === 'consumer' ? ' selected' : ''}>Verbrauch</option>
+          <option value="producer"${d.energy_role === 'producer' ? ' selected' : ''}>Erzeugung (Balkonkraftwerk, PV)</option>
+          <option value="grid"${d.energy_role === 'grid' ? ' selected' : ''}>Netz-Zähler (+ Bezug, − Einspeisung)</option></select></label>` : ''}
         <div class="actions"><button type="submit">${icon('check')}Speichern</button></div>
       </form></section>
       <section class="span-1"><h3>Zugangsdaten für tiefe Abfragen</h3>
@@ -792,7 +797,8 @@ async function viewDevice(id) {
       attempt(async () => {
         data.device = await api(`/devices/${id}`, {
           method: 'PATCH',
-          body: { name: f.get('name'), notes: f.get('notes'), monitored: f.get('monitored') === 'on', device_type: f.get('device_type'), parent_id: Number(f.get('parent_id')) },
+          body: { name: f.get('name'), notes: f.get('notes'), monitored: f.get('monitored') === 'on', device_type: f.get('device_type'), parent_id: Number(f.get('parent_id')),
+            ...(f.get('energy_role') ? { energy_role: f.get('energy_role') } : {}) },
         });
         render();
       }, 'Gespeichert');
@@ -1056,7 +1062,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.8.0#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.8.1#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;
