@@ -645,3 +645,6 @@ svg.st-chart .grid-line { stroke: var(--border); stroke-dasharray: 3 4; vector-e
   background: linear-gradient(160deg, color-mix(in srgb, var(--up) 14%, var(--surface-2)), var(--surface-2) 70%);
   box-shadow: 0 0 18px -6px color-mix(in srgb, var(--up) 70%, transparent); }
 .sh-tile.prod .sh-top .i, .sh-tile.prod .sh-val { color: var(--up); }
+
+.power-head .actions { display: flex; align-items: center; gap: 6px; }
+.ghost.icon-only { padding: 4px 6px; }

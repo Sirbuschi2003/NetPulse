@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.1#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.2#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -559,8 +559,50 @@ const ROLE_ICON = { producer: 'sun', grid: 'plug-connected', consumer: 'bolt' };
 
 function powerBars(list) {
   const max = Math.abs((list[0] && list[0].power_w) || 1) || 1;
-  return list.slice(0, 8).map((p) => `<a href="#/device/${p.id}" class="ellipsis">${icon(ROLE_ICON[p.role] || 'bolt', `i-sm role-${esc(p.role || 'consumer')}`)} ${esc(p.label)}</a>
+  return list.slice(0, 8).map((p) => `${p.id ? `<a href="#/device/${p.id}" class="ellipsis">` : '<span class="ellipsis muted">'}${icon(ROLE_ICON[p.role] || 'bolt', `i-sm role-${esc(p.role || 'consumer')}`)} ${esc(p.label)}${p.id ? '</a>' : '</span>'}
     <span class="bar${p.role === 'producer' ? ' prod' : ''}" data-w="${pct(Math.abs(p.power_w), max)}"></span><span class="muted num">${esc(fmtWatt(Math.abs(p.power_w)))}</span>`).join('');
+}
+
+/** Geräte des Widgets: Auswahl (include) und Hauptzähler (main_id) aus der Widget-Einstellung */
+function powerModel(summary, widget = {}) {
+  let list = powerList(summary);
+  if (Array.isArray(widget.include)) {
+    const include = new Set(widget.include);
+    list = list.filter((p) => include.has(p.id) || p.id === widget.main_id);
+  }
+  const main = widget.main_id ? list.find((p) => p.id === widget.main_id) || null : null;
+  return { list: list.filter((p) => p !== main), main };
+}
+
+/** Verbrauch, Erzeugung, Netz, Bilanz und „Sonstiges“ (Hauptzähler minus Einzelmessungen) */
+function modelFigures({ list, main }) {
+  const role = (p) => p.role || 'consumer';
+  const sum = (r) => list.filter((p) => role(p) === r).reduce((a, p) => a + Math.abs(p.power_w), 0);
+  const has = (r) => list.some((p) => role(p) === r);
+  const production = has('producer') ? sum('producer') : null;
+  let consumption = has('consumer') ? sum('consumer') : null;
+  let gridImport = null;
+  let gridExport = null;
+  const grids = list.filter((p) => role(p) === 'grid');
+  if (grids.length) {
+    const net = grids.reduce((a, p) => a + p.power_w, 0);
+    gridImport = Math.max(0, net);
+    gridExport = Math.max(0, -net);
+  }
+  let other = null;
+  if (main) {
+    if (role(main) === 'grid') {
+      // Netz-Zähler am Hausanschluss: Hausverbrauch = Bezug − Einspeisung + eigene Erzeugung
+      gridImport = Math.max(0, main.power_w);
+      gridExport = Math.max(0, -main.power_w);
+      consumption = Math.max(0, main.power_w + (production || 0));
+    } else {
+      consumption = Math.abs(main.power_w);
+    }
+    other = Math.max(0, consumption - sum('consumer'));
+  }
+  const balance = consumption != null || production != null ? (consumption || 0) - (production || 0) : null;
+  return { consumption, production, gridImport, gridExport, balance, other, main };
 }
 
 /** Verbrauch / Erzeugung / Bilanz aus den Live-Summen (oder der letzten Messung) */
@@ -575,7 +617,7 @@ function energyFigures(list) {
 }
 
 function energyHead(f) {
-  const parts = [`<div class="en-fig"><span class="inet-dir">${icon('bolt', 'i-sm')} Verbrauch</span><span class="power-total" data-en="consumption" data-value="${f.consumption || 0}">${esc(fmtWatt(f.consumption))}</span></div>`];
+  const parts = [`<div class="en-fig"><span class="inet-dir">${icon('bolt', 'i-sm')} ${f.main ? 'Verbrauch gesamt' : 'Verbrauch'}</span><span class="power-total" data-en="consumption" data-value="${f.consumption || 0}">${esc(fmtWatt(f.consumption))}</span></div>`];
   if (f.production != null) {
     parts.push(`<div class="en-fig"><span class="inet-dir">${icon('sun', 'i-sm')} Erzeugung</span><span class="power-total prod" data-en="production" data-value="${f.production}">${esc(fmtWatt(f.production))}</span></div>`);
     const surplus = f.balance < 0;
@@ -590,16 +632,77 @@ function energyHead(f) {
 }
 
 /** Gesamtleistung aller Geräte mit Strommessung (z. B. Shelly) – live mit Verlauf */
-function wPower({ summary }) {
-  const list = powerList(summary);
-  if (!list.length) return empty('Keine Geräte mit Strommessung. Shelly-Steckdosen und -Zähler werden automatisch erkannt.', 'bolt');
+/** Balkenliste inkl. „Sonstiges“ beim Hauptzähler */
+function powerRows(model, figures) {
+  const rows = [...model.list];
+  if (model.main && figures.other > 1) rows.push({ id: null, label: 'Sonstiges (nicht einzeln gemessen)', power_w: figures.other, role: 'consumer' });
+  return rows.sort((a, b) => Math.abs(b.power_w) - Math.abs(a.power_w));
+}
+
+function wPower({ summary }, widget = {}) {
+  const model = powerModel(summary, widget);
+  if (!model.list.length && !model.main) return empty('Keine Geräte mit Strommessung. Shelly-Steckdosen und -Zähler werden automatisch erkannt.', 'bolt');
+  const figures = modelFigures(model);
   const today = (summary && summary.energy_today) || {};
-  return `<div class="power-live" data-live-power>
-    <div class="power-head"><div class="en-figs" data-en-head>${energyHead(energyFigures(list))}</div><span class="live-tag">LIVE</span></div>
-    <div data-spark>${energySpark(live.history, live.prodHistory)}</div>
+  const configured = Array.isArray(widget.include) || widget.main_id;
+  return `<div class="power-live" data-live-power data-include="${esc(Array.isArray(widget.include) ? widget.include.join(',') : '')}" data-main="${esc(widget.main_id || '')}">
+    <div class="power-head"><div class="en-figs" data-en-head>${energyHead(figures)}</div>
+      <span class="actions"><span class="live-tag">LIVE</span>
+      <button type="button" class="ghost sm icon-only" data-power-config title="Einstellen: welche Geräte, Hauptzähler">${icon('settings', 'i-sm')}</button></span></div>
+    ${model.main ? `<p class="muted small">gemessen am Hauptzähler „${esc(model.main.label)}“ – darunter die Aufschlüsselung</p>` : ''}
+    <div data-spark>${energySpark([], [])}</div>
     ${today.consumed_kwh != null || today.produced_kwh != null ? `<p class="muted small">Heute: ${today.consumed_kwh != null ? `${esc(fmtKwh(today.consumed_kwh))} verbraucht` : ''}
       ${today.produced_kwh != null ? ` · <span class="role-producer">☀ ${esc(fmtKwh(today.produced_kwh))} erzeugt</span>` : ''} (ca.)</p>` : ''}
-    <div class="bars" data-bars>${powerBars(list)}</div></div>`;
+    <div class="bars" data-bars>${powerBars(powerRows(model, figures))}</div>
+    ${!configured && model.list.length > 3 ? '<p class="muted small">Tipp: Über das Zahnrad Hauptzähler festlegen oder Geräte ausblenden.</p>' : ''}</div>`;
+}
+
+/** Einstellungen des Energie-Widgets: Geräte, Rolle je Gerät, Hauptzähler */
+function powerWidgetDialog(widget = {}) {
+  const byId = new Map();
+  ((state.summary && state.summary.power) || []).forEach((p) => byId.set(p.id, { ...p }));
+  live.devices.forEach((d) => byId.set(d.id, { id: d.id, label: d.label, power_w: d.power_w, role: d.role }));
+  const devices = [...byId.values()].sort((a, b) => String(a.label).localeCompare(String(b.label), 'de'));
+  const included = Array.isArray(widget.include) ? new Set(widget.include) : null;
+  return new Promise((resolve) => {
+    const dlg = openModal('Energie-Widget einstellen', `<form class="form" id="pw-cfg">
+      <p class="hint">Hängt ein Zähler am Hausanschluss oder an der Unterverteilung (z. B. „Strom Gesamt“), diesen als <b>Hauptzähler</b> wählen –
+        dann ist sein Wert der Gesamtverbrauch und die anderen Geräte werden nicht noch einmal dazugezählt.</p>
+      <div class="table-wrap"><table><thead><tr><th>Anzeigen</th><th>Gerät</th><th>Jetzt</th><th>Rolle</th><th>Hauptzähler</th></tr></thead><tbody>
+        <tr><td></td><td class="muted">kein Hauptzähler (Summe der Geräte)</td><td></td><td></td>
+          <td><input type="radio" name="main" value=""${widget.main_id ? '' : ' checked'}></td></tr>
+        ${devices.map((d) => `<tr><td><input type="checkbox" name="inc" value="${d.id}"${!included || included.has(d.id) ? ' checked' : ''}></td>
+          <td>${esc(d.label)}</td><td class="small">${d.power_w != null ? esc(fmtWatt(d.power_w)) : '–'}</td>
+          <td><select name="role-${d.id}" data-role="${d.id}" data-was="${esc(d.role || 'consumer')}"${isAdmin() ? '' : ' disabled'}>
+            ${[['consumer', 'Verbrauch'], ['producer', 'Erzeugung'], ['grid', 'Netz-Zähler']].map(([v, l]) => `<option value="${v}"${(d.role || 'consumer') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></td>
+          <td><input type="radio" name="main" value="${d.id}"${widget.main_id === d.id ? ' checked' : ''}></td></tr>`).join('')}
+      </tbody></table></div>
+      <p class="hint">Die Rolle gilt für das ganze System (auch Summen und Statusseite); Anzeigen und Hauptzähler nur für dieses Widget.
+        Neue Geräte erscheinen automatisch, solange alle Häkchen gesetzt sind.</p>
+      <div class="actions"><button type="submit">${icon('check')}Übernehmen</button></div></form>`);
+    dlg.classList.add('wide');
+    $('#pw-cfg', dlg).addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.target;
+      const checked = $$('input[name="inc"]', form).filter((c) => c.checked).map((c) => Number(c.value));
+      const main = form.elements.main.value ? Number(form.elements.main.value) : null;
+      // Geänderte Rollen am Gerät speichern
+      if (isAdmin()) {
+        for (const sel of $$('[data-role]', form)) {
+          if (sel.value !== sel.dataset.was) {
+            try { await api(`/devices/${sel.dataset.role}`, { method: 'PATCH', body: { energy_role: sel.value } }); } catch (e) { toast(e.message, true); }
+            const d = live.devices.get(Number(sel.dataset.role));
+            if (d) d.role = sel.value;
+            const p = ((state.summary && state.summary.power) || []).find((x) => x.id === Number(sel.dataset.role));
+            if (p) p.role = sel.value;
+          }
+        }
+      }
+      dlg.close();
+      resolve({ include: checked.length === devices.length ? null : checked, main_id: main });
+    });
+    dlg.addEventListener('close', () => resolve(null), { once: true });
+  });
 }
 
 function shellyTile(d) {
@@ -640,12 +743,26 @@ function wSmartHome() {
 function mountStreamWidgets(root) {
   $$('[data-live-power]', root).forEach((el) => {
     const bars = $('[data-bars]', el);
-    bars.dataset.ids = powerList(state.summary).slice(0, 8).map((p) => p.id).join(',');
+    const widget = {
+      include: el.dataset.include ? el.dataset.include.split(',').map(Number) : null,
+      main_id: el.dataset.main ? Number(el.dataset.main) : null,
+    };
+    const history = { consumed: [], produced: [] };
+    const card = el.closest('.widget');
+    $('[data-power-config]', el)?.addEventListener('click', () => state.configureWidget?.(Number(card && card.dataset.idx)));
+    const current = () => {
+      const model = powerModel(live.devices.size ? null : state.summary, widget);
+      const figures = modelFigures(model);
+      return { figures, list: powerRows(model, figures) };
+    };
+    bars.dataset.ids = current().list.slice(0, 8).map((p) => p.id).join(',');
     onLive((msg) => {
       if (msg.type !== 'shelly') return;
-      const list = powerList(null);
-      $('[data-en-head]', el).innerHTML = energyHead(energyFigures(list));
-      $('[data-spark]', el).innerHTML = energySpark(live.history, live.prodHistory);
+      const { figures, list } = current();
+      if (figures.consumption != null) pushPoint(history.consumed, figures.consumption);
+      if (figures.production != null) pushPoint(history.produced, figures.production);
+      $('[data-en-head]', el).innerHTML = energyHead(figures);
+      $('[data-spark]', el).innerHTML = energySpark(history.consumed, history.produced);
       const ids = list.slice(0, 8).map((p) => p.id).join(',');
       if (bars.dataset.ids === ids) {
         // Gleiche Reihenfolge: Balken nur verschieben (weiche Animation)
@@ -945,7 +1062,7 @@ async function viewDashboard() {
           <button class="ghost" data-act="left" data-idx="${i}" title="Nach vorne">${icon('chevron-left', 'i-sm')}</button>
           <button class="ghost" data-act="right" data-idx="${i}" title="Nach hinten">${icon('chevron-right', 'i-sm')}</button>
           <button class="ghost" data-act="size" data-idx="${i}" title="Breite ändern">${size}/3</button>
-          ${widget.type === 'device' ? `<button class="ghost" data-act="config" data-idx="${i}" title="Werte auswählen">${icon('settings', 'i-sm')}</button>` : ''}
+          ${widget.type === 'device' || widget.type === 'power' ? `<button class="ghost" data-act="config" data-idx="${i}" title="Einstellen">${icon('settings', 'i-sm')}</button>` : ''}
           <button class="ghost" data-act="remove" data-idx="${i}" title="Entfernen">${icon('x', 'i-sm')}</button></div>` : '';
       return `<section class="card widget span-${size}" data-idx="${i}" draggable="${editing}">
           <header><h2>${icon(def.icon)}${esc(widgetTitle(widget, ctx))}</h2>${tools}</header>
@@ -1012,7 +1129,8 @@ async function viewDashboard() {
       if (btn.dataset.act === 'size') layout[i].size = ((layout[i].size || 1) % 3) + 1;
       if (btn.dataset.act === 'remove') layout.splice(i, 1);
       if (btn.dataset.act === 'config') {
-        deviceWidgetDialog(ctx.devices, layout[i]).then((cfg) => { if (cfg) Object.assign(layout[i], cfg); render(); });
+        const dialog = layout[i].type === 'power' ? powerWidgetDialog(layout[i]) : deviceWidgetDialog(ctx.devices, layout[i]);
+        dialog.then((cfg) => { if (cfg) Object.assign(layout[i], cfg); render(); });
         return;
       }
       render();
@@ -1031,6 +1149,18 @@ async function viewDashboard() {
     });
   }
 
+  // Zahnrad direkt im Widget (ohne Bearbeiten-Modus): Einstellung sofort speichern
+  state.configureWidget = (idx) => {
+    const widget = layout[idx];
+    if (!widget || widget.type !== 'power') return;
+    powerWidgetDialog(widget).then(async (cfg) => {
+      if (!cfg) return;
+      Object.assign(widget, cfg);
+      await attempt(async () => { layout = await api('/dashboard', { method: 'PUT', body: layout }); }, 'Widget gespeichert');
+      await load();
+      await render();
+    });
+  };
   await load();
   await render();
   autoRefresh(async () => { if (editing) return; await load(); await render(); });
