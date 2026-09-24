@@ -18,6 +18,14 @@ const RULE_KINDS = {
   cert_expiry: { label: 'Zertifikat läuft ab', icon: 'shield-lock', unit: 'Tage', check: true, hint: 'Alarm, wenn ein überwachtes Zertifikat in weniger als X Tagen abläuft.' },
 };
 
+/** Regel-Arten nach Themen – damit man z. B. die Dienst-Regeln sofort findet */
+const RULE_GROUPS = [
+  ['Geräte', ['device_down', 'cpu_usage', 'mem_usage', 'disk_usage', 'temperature']],
+  ['Dienste (Webseiten, Ports, Zertifikate)', ['check_down', 'cert_expiry']],
+  ['Protokolle', ['syslog_match']],
+  ['Sicherheit & Netz', ['new_device', 'mac_changed']],
+];
+
 async function viewAlerts(_arg, params) {
   let tab = params.get('tab') || 'open';
   const render = async () => {
@@ -94,13 +102,17 @@ async function viewAlerts(_arg, params) {
     const [devices, checkList] = await Promise.all([api('/devices'), api('/checks')]);
     const r = rule || { kind: 'device_down', duration_min: 5, channel_ids: channels.map((c) => c.id), notify_recovery: true, enabled: true };
     const dlg = openModal(rule ? 'Regel bearbeiten' : 'Regel anlegen', `<form class="form" id="rule-form">
-      <label>Art der Regel<select name="kind"${rule ? ' disabled' : ''}>${Object.entries(RULE_KINDS).map(([k, v]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
+      <label>Art der Regel<select name="kind"${rule ? ' disabled' : ''}>${RULE_GROUPS.map(([group, kinds]) => `<optgroup label="${esc(group)}">
+        ${kinds.map((k) => `<option value="${k}"${k === r.kind ? ' selected' : ''}>${esc(RULE_KINDS[k].label)}</option>`).join('')}</optgroup>`).join('')}</select></label>
       <p class="hint" id="kind-hint"></p>
       <label>Name<input name="name" value="${esc(r.name || '')}" placeholder="z. B. NAS offline"></label>
       <div id="f-syslog" class="form-row"><label>Suchtext (leer = alle)<input name="pattern" value="${esc(r.pattern || '')}" placeholder="z. B. Failed password"></label>
         <label>Mindestens Stufe<select name="syslog_sev">${SYSLOG_SEV.map((s, i) => `<option value="${i}"${i === (r.threshold ?? 4) ? ' selected' : ''}>${esc(s)}${i ? ' oder schlimmer' : ''}</option>`).join('')}</select></label></div>
-      <label id="f-check">Dienst<select name="check_id"><option value="">Alle Dienste</option>
-        ${checkList.map((c) => `<option value="${c.id}"${c.id === r.check_id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <div id="f-check" class="form">${checkList.length ? `<label>Dienst<select name="check_id"><option value="">Alle Dienste</option>
+        ${checkList.map((c) => `<option value="${c.id}"${c.id === r.check_id ? ' selected' : ''}>${esc(c.name)} – ${esc(c.target)}</option>`).join('')}</select></label>`
+        : `<input type="hidden" name="check_id" value=""><div class="notice info">${icon('world-www')}<span>Noch keine Dienste angelegt. Unter
+          <a href="#/checks">Dienste</a> z. B. eine Webseite, einen Port oder ein Zertifikat hinzufügen – danach hier auswählen
+          (oder die Regel jetzt für „alle Dienste“ speichern).</span></div>`}</div>
       <label id="f-device">Gerät<select name="device_id"><option value="">Alle Geräte</option>
         ${devices.map((d) => `<option value="${d.id}"${d.id === r.device_id ? ' selected' : ''}>${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}</select></label>
       <div class="form-row">
@@ -115,6 +127,8 @@ async function viewAlerts(_arg, params) {
       <label class="inline"><input type="checkbox" name="enabled"${r.enabled ? ' checked' : ''}> Regel aktiv</label>
       <div class="actions"><button type="submit">${icon('check')}Speichern</button></div></form>`);
     const form = $('#rule-form', dlg);
+    makeSearchable(form.querySelector('select[name="device_id"]'), 'Gerät suchen: Name oder IP …');
+    makeSearchable(form.querySelector('select[name="check_id"]'), 'Dienst suchen …');
     const update = () => {
       const k = form.kind.value;
       const def = RULE_KINDS[k];
@@ -1180,6 +1194,7 @@ async function viewStatusPage() {
     });
   };
   renderItems();
+  makeSearchable($('#sp-add'), 'Gerät oder Dienst suchen …');
 
   $('#sp-add-btn').addEventListener('click', () => {
     const v = $('#sp-add').value;

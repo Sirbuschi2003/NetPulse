@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.2#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.3#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -67,6 +67,41 @@ async function attempt(fn, successMessage) {
 /** Breiten von Balken setzen (per JavaScript, weil die CSP Inline-Styles verbietet) */
 function applyWidths(root = document) {
   $$('[data-w]', root).forEach((el) => { el.style.width = `${Math.max(0, Math.min(100, Number(el.dataset.w)))}%`; });
+}
+
+/**
+ * Suchfeld vor einer langen Auswahlliste: filtert die Einträge beim Tippen und wählt den ersten Treffer.
+ * Einträge ohne Wert („Alle Geräte“) bleiben immer sichtbar.
+ */
+function makeSearchable(select, placeholder = 'Suchen …') {
+  if (!select || select.dataset.searchable) return;
+  select.dataset.searchable = '1';
+  const input = document.createElement('input');
+  input.type = 'search';
+  input.className = 'select-search';
+  input.placeholder = placeholder;
+  input.setAttribute('aria-label', placeholder);
+  select.before(input);
+  const options = [...select.options];
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    let first = null;
+    let visible = 0;
+    options.forEach((o) => {
+      const show = !q || o.value === '' || o.text.toLowerCase().includes(q);
+      o.hidden = !show;
+      if (show) visible += 1;
+      if (show && o.value !== '' && !first) first = o;
+    });
+    // Beim Suchen als Liste aufklappen, damit man die Treffer sieht
+    select.size = q ? Math.min(8, Math.max(2, visible)) : 0;
+    if (q && first) select.value = first.value;
+    select.dispatchEvent(new Event('change'));
+  });
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); select.size = 0; input.blur(); }
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); select.focus(); }
+  });
 }
 
 /** Modaler Dialog; liefert das <dialog>-Element */
@@ -1006,6 +1041,7 @@ function deviceWidgetDialog(devices, widget = {}) {
       <p class="hint">CPU, RAM, Speicher, Temperatur und Clients gibt es bei Geräten mit SNMP-/SSH-Zugang oder aus dem UniFi-Controller,
         Strom bei Shellys, „Internet live“ beim Router/der Firewall mit erkannter WAN-Schnittstelle.</p>
       <div class="actions"><button type="submit">${icon('check')}Übernehmen</button></div></form>`);
+    makeSearchable($('#dw-form select[name="device"]', dlg), 'Gerät suchen …');
     $('#dw-form', dlg).addEventListener('submit', (ev) => {
       ev.preventDefault();
       const metrics = $$('input[name="m"]:checked', dlg).map((c) => c.value);

@@ -648,3 +648,7 @@ svg.st-chart .grid-line { stroke: var(--border); stroke-dasharray: 3 4; vector-e
 
 .power-head .actions { display: flex; align-items: center; gap: 6px; }
 .ghost.icon-only { padding: 4px 6px; }
+
+/* Suchfeld über langen Auswahllisten */
+.select-search { margin-bottom: 6px; }
+select[size]:not([size="0"]):not([size="1"]) { padding: 4px; }
