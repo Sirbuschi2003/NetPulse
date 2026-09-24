@@ -528,3 +528,40 @@ h3.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 16px 0 
 .pick-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px;
   display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
 .pick-list label { min-width: 0; }
+
+/* ---------- Netzwerkkarte ---------- */
+.map-scroll { overflow: auto; max-height: calc(100vh - 230px); min-height: 300px; }
+svg.map { display: block; }
+svg.map .edge { fill: none; stroke: var(--border-strong); stroke-width: 1.5; }
+svg.map .edge.guess { stroke-dasharray: 4 4; opacity: 0.7; }
+svg.map .edge.down { stroke: var(--down); }
+svg.map .node circle { fill: var(--surface-2); stroke: var(--unknown); stroke-width: 2; }
+svg.map .node use { color: var(--text-2); }
+svg.map .node.st-up circle { stroke: var(--up); }
+svg.map .node.st-down circle { stroke: var(--down); fill: var(--down-soft); }
+svg.map .node.st-off circle { stroke-dasharray: 3 3; }
+svg.map .node text { font-size: 12px; fill: var(--text); }
+svg.map .node text.ip { font-size: 10px; fill: var(--muted); font-family: ui-monospace, monospace; }
+svg.map .node.hit circle { stroke: var(--accent); stroke-width: 4; }
+svg.map a:hover text { fill: var(--accent); }
+/* ---------- Statusseite ---------- */
+.pick-list.tall { max-height: 460px; }
+.sp-row { display: grid; grid-template-columns: minmax(0, 1fr) 170px; gap: 8px; align-items: center; }
+.sp-label { padding: 4px 8px; font-size: 12.5px; }
+body.status-page { background: var(--bg); color: var(--text); }
+.status-wrap { max-width: 860px; margin: 0 auto; padding: 32px 16px; }
+.status-head h1 { margin: 0 0 6px; font-size: 26px; }
+.status-overall { margin: 16px 0; padding: 14px 18px; border-radius: var(--radius); font-weight: 600; background: var(--up-soft); color: var(--up); }
+.status-overall.degraded { background: var(--warn-soft); color: var(--warn); }
+.status-overall.down { background: var(--down-soft); color: var(--down); }
+.status-overall.unknown { background: var(--surface-2); color: var(--muted); }
+.status-item { padding: 12px 4px; border-bottom: 1px solid var(--border); }
+.status-item:last-child { border-bottom: 0; }
+.status-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.status-label { font-size: 12.5px; }
+.status-label.ok { color: var(--up); } .status-label.degraded { color: var(--warn); } .status-label.down { color: var(--down); }
+.status-uptime { margin-left: auto; }
+.beats.days { height: 28px; gap: 3px; }
+.beats.days i { flex: 1; width: auto; }
+.beats i.warn { background: var(--warn); }
+.status-foot { text-align: center; margin-top: 18px; }

@@ -751,7 +751,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
-  smtp_update: 'E-Mail-Server geändert', maintenance_add: 'Wartung angelegt', maintenance_update: 'Wartung geändert', maintenance_delete: 'Wartung gelöscht', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
+  smtp_update: 'E-Mail-Server geändert', status_page: 'Statusseite geändert', maintenance_add: 'Wartung angelegt', maintenance_update: 'Wartung geändert', maintenance_delete: 'Wartung gelöscht', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -1063,4 +1063,56 @@ async function viewMaintenance() {
       }, 'Wartungsfenster gespeichert');
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Öffentliche Statusseite
+// ---------------------------------------------------------------------------
+
+async function viewStatusPage() {
+  const [cfg, devices, checks] = await Promise.all([api('/settings/status-page'), api('/devices'), api('/checks')]);
+  const chosen = (kind, id) => cfg.items.find((i) => i.kind === kind && i.id === id);
+  const link = `${location.origin}/status.html#${cfg.token}`;
+  const row = (kind, x, label) => {
+    const c = chosen(kind, x.id);
+    return `<div class="sp-row"><label class="inline"><input type="checkbox" data-kind="${kind}" value="${x.id}"${c ? ' checked' : ''}>
+      <span class="ellipsis">${esc(label)}</span></label>
+      <input class="sp-label" data-label="${kind}-${x.id}" value="${esc((c && c.label) || '')}" placeholder="Anzeigename (optional)"></div>`;
+  };
+  view().innerHTML = `
+    <div class="notice info">${icon('world')}<span>Eine schlichte Seite ohne Anmeldung, z. B. für Familie oder Kollegen. Sie zeigt nur die hier gewählten
+      Einträge mit Anzeigename, Status und Verfügbarkeit – keine IP-Adressen. Erreichbar über den geheimen Link unten.</span></div>
+    <div class="grid">
+      <section class="card span-1"><header><h2>${icon('settings')}Einstellungen</h2></header><form class="form" id="sp-form">
+        <label class="inline"><input type="checkbox" name="enabled"${cfg.enabled ? ' checked' : ''}> Statusseite eingeschaltet</label>
+        <label>Titel<input name="title" maxlength="80" value="${esc(cfg.title)}"></label>
+        <label>Beschreibung (optional)<textarea name="description" maxlength="500" rows="3">${esc(cfg.description || '')}</textarea></label>
+        <label>Link<input readonly value="${esc(link)}" id="sp-link"></label>
+        <div class="actions"><button type="button" class="ghost" id="sp-copy">${icon('check')}Link kopieren</button>
+          <a class="btn ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('external-link')}Öffnen</a>
+          <label class="inline"><input type="checkbox" name="new_token"> neuen Link erzeugen</label></div>
+        <button type="submit">${icon('check')}Speichern</button></form></section>
+      <section class="card span-2"><header><h2>${icon('list-details')}Angezeigte Einträge</h2></header>
+        <input type="search" id="sp-filter" placeholder="Filtern …">
+        <div class="form-row"><div><h3 class="sub">Dienste</h3><div class="pick-list tall">${checks.map((c) => row('check', c, c.name)).join('') || '<span class="muted small">keine</span>'}</div></div>
+          <div><h3 class="sub">Geräte</h3><div class="pick-list tall">${devices.map((d) => row('device', d, `${deviceLabel(d)} – ${d.ip}`)).join('')}</div></div></div></section>
+    </div>`;
+  $('#sp-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText($('#sp-link').value).then(() => toast('Link kopiert'), () => { $('#sp-link').select(); });
+  });
+  $('#sp-filter').addEventListener('input', (ev) => {
+    const q = ev.target.value.toLowerCase();
+    $$('.sp-row').forEach((r) => { r.hidden = q && !r.textContent.toLowerCase().includes(q); });
+  });
+  $('#sp-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = ev.target.elements;
+    const items = $$('.sp-row input[type=checkbox]:checked').map((c) => ({
+      kind: c.dataset.kind, id: Number(c.value), label: $(`[data-label="${c.dataset.kind}-${c.value}"]`).value.trim() || null,
+    }));
+    attempt(async () => {
+      await api('/settings/status-page', { method: 'PUT', body: { enabled: e.enabled.checked, title: e.title.value, description: e.description.value, items, new_token: e.new_token.checked } });
+      await viewStatusPage();
+    }, 'Statusseite gespeichert');
+  });
 }

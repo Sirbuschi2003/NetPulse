@@ -949,3 +949,100 @@ async function viewChecks() {
   });
   autoRefresh(async () => { if (!$('#modal').open) { checks = await api('/checks'); render(); } }, 60);
 }
+
+// ---------------------------------------------------------------------------
+// Netzwerkkarte
+// ---------------------------------------------------------------------------
+
+const INFRA = ['router', 'firewall', 'switch', 'access_point', 'network'];
+
+async function viewMap() {
+  let nodes = await api('/topology');
+  let hideLeaves = readPref('np-map-leaves', 'show') === 'hide';
+  let zoom = 1;
+  let filter = '';
+
+  view().innerHTML = `
+    <div class="page-head"><div class="actions">
+        <input type="search" id="map-q" placeholder="Gerät hervorheben …" aria-label="Suchen">
+        <label class="inline"><input type="checkbox" id="map-leaves"${hideLeaves ? ' checked' : ''}> Endgeräte zusammenfassen</label></div>
+      <div class="actions"><button type="button" class="ghost sm" id="map-out" title="Verkleinern">−</button>
+        <button type="button" class="ghost sm" id="map-in" title="Vergrößern">+</button></div></div>
+    <div class="card map-card"><div class="map-scroll" id="map"></div>
+      <p class="muted small">Linien: <b>durchgezogen</b> = bekannte Verbindung (aus UniFi oder von Hand), <b>gestrichelt</b> = vermutet (hängt vermutlich direkt am Router).
+        Zuordnung ändern: beim Gerät unter „Einstellungen → Hängt ab von“.</p></div>`;
+
+  const draw = () => {
+    const byId = new Map(nodes.map((n) => [n.id, { ...n, children: [] }]));
+    const gateways = [...byId.values()].filter((n) => !n.parent_id && (n.wan || n.device_type === 'firewall' || n.device_type === 'router'))
+      .sort((a, b) => Number(b.wan) - Number(a.wan));
+    const gateway = gateways[0];
+    const internet = { id: 0, label: 'Internet', device_type: 'cloud', status: 'up', children: [], ip: '' };
+    for (const n of byId.values()) {
+      const parent = n.parent_id && byId.get(n.parent_id);
+      if (parent) parent.children.push(n);
+      else if (gateways.includes(n)) internet.children.push(n);
+      else if (gateway) { n.guess = true; gateway.children.push(n); } else internet.children.push(n);
+    }
+    const order = (a, b) => (INFRA.includes(b.device_type) - INFRA.includes(a.device_type)) || (b.children.length - a.children.length)
+      || String(a.label).localeCompare(String(b.label), 'de');
+    // Layout von links nach rechts: Tiefe → x, Blätter untereinander
+    const ROW = 30;
+    const COL = 250;
+    let row = 0;
+    const placed = [];
+    const edges = [];
+    const layout = (n, depth) => {
+      n.children.sort(order);
+      let kids = n.children;
+      if (hideLeaves && depth > 0) {
+        const leaves = kids.filter((k) => !k.children.length && !INFRA.includes(k.device_type));
+        if (leaves.length > 1) {
+          kids = kids.filter((k) => !leaves.includes(k));
+          const down = leaves.filter((l) => l.monitored && l.status === 'down').length;
+          kids.push({ id: `sum-${n.id}`, summary: true, label: `+ ${leaves.length} Geräte${down ? ` (${down} offline)` : ''}`, device_type: 'devices',
+            status: down ? 'down' : 'up', children: [], guess: leaves.every((l) => l.guess) });
+        }
+      }
+      n.x = depth * COL;
+      if (!kids.length) {
+        n.y = row * ROW;
+        row += 1;
+      } else {
+        kids.forEach((k) => { layout(k, depth + 1); edges.push([n, k]); });
+        n.y = (kids[0].y + kids[kids.length - 1].y) / 2;
+      }
+      placed.push(n);
+    };
+    layout(internet, 0);
+    const W = Math.max(...placed.map((n) => n.x)) + 260;
+    const H = Math.max(ROW, row * ROW) + 20;
+    const statusCls = (n) => (n.device_type === 'cloud' ? 'up' : !n.monitored && !n.summary ? 'off' : n.status);
+    const svg = `<svg class="map" width="${W * zoom}" height="${H * zoom}" viewBox="-20 -15 ${W + 20} ${H + 10}">
+      ${edges.map(([a, b]) => `<path class="edge${b.guess ? ' guess' : ''}${statusCls(b) === 'down' ? ' down' : ''}"
+        d="M${a.x + 12},${a.y} C${a.x + COL / 2},${a.y} ${b.x - COL / 2},${b.y} ${b.x - 12},${b.y}"/>`).join('')}
+      ${placed.map((n) => {
+        const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
+        const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
+        const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
+          <circle r="12"/><use href="icons.svg?v=0.7.0#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
+        return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
+      }).join('')}</svg>`;
+    $('#map').innerHTML = svg;
+    const hit = $('#map .hit');
+    if (hit) hit.scrollIntoView({ block: 'center', inline: 'center' });
+  };
+
+  $('#map-leaves').addEventListener('change', (ev) => { hideLeaves = ev.target.checked; writePref('np-map-leaves', hideLeaves ? 'hide' : 'show'); draw(); });
+  $('#map-q').addEventListener('input', (ev) => { filter = ev.target.value.trim().toLowerCase(); draw(); });
+  $('#map-in').addEventListener('click', () => { zoom = Math.min(2, zoom * 1.2); draw(); });
+  $('#map-out').addEventListener('click', () => { zoom = Math.max(0.4, zoom / 1.2); draw(); });
+  draw();
+  onLive((msg) => {
+    if (msg.type !== 'status') return;
+    msg.devices.forEach((d) => { const n = nodes.find((x) => x.id === d.id); if (n) n.status = d.status; });
+    draw();
+  });
+  autoRefresh(async () => { nodes = await api('/topology'); draw(); }, 60);
+}

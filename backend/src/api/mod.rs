@@ -6,6 +6,7 @@ mod checks;
 mod credentials;
 mod dashboard;
 mod devices;
+mod public;
 mod session;
 mod stream;
 
@@ -48,6 +49,9 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/interfaces/history", get(devices::interface_history))
         .route("/devices/{id}/snmp", get(devices::snmp_explorer))
         .route("/events", get(devices::events))
+        .route("/topology", get(public::topology))
+        .route("/public/status/{token}", get(public::public_status))
+        .route("/settings/status-page", get(public::get_config).put(public::set_config))
         .route("/checks", get(checks::list).post(checks::create))
         .route("/checks/{id}", axum::routing::patch(checks::update).delete(checks::remove))
         .route("/checks/{id}/run", post(checks::run_now))
