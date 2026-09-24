@@ -31,6 +31,7 @@ pub(crate) struct Rule {
     pub channel_ids: Vec<i64>,
     pub notify_recovery: bool,
     pub repeat_min: i32,
+    pub check_id: Option<i64>,
 }
 
 pub async fn run(state: AppState) {
@@ -52,8 +53,9 @@ pub async fn run(state: AppState) {
 }
 
 async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
+    let _perf = crate::perf::Timer::new("Alarmprüfung");
     let rules: Vec<Rule> = sqlx::query_as(
-        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, repeat_min
+        "SELECT id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, repeat_min, check_id
            FROM alert_rules WHERE enabled",
     )
     .fetch_all(&state.db)
@@ -64,6 +66,8 @@ async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
         let result = match rule.kind.as_str() {
             "device_down" => device_down(state, rule).await,
             "disk_usage" | "cpu_usage" | "mem_usage" | "temperature" => threshold(state, rule).await,
+            "check_down" => check_down(state, rule).await,
+            "cert_expiry" => cert_expiry(state, rule).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -228,6 +232,121 @@ async fn threshold(state: &AppState, rule: &Rule) -> Result<()> {
     Ok(())
 }
 
+fn check_link(state: &AppState) -> Option<String> {
+    state.config.public_url.as_ref().map(|u| format!("{u}/#/checks"))
+}
+
+/// Dienst-Check ausgefallen (länger als `duration_min`)
+async fn check_down(state: &AppState, rule: &Rule) -> Result<()> {
+    type Down = (i64, String, String, Option<String>, Option<i64>, i64);
+    let down: Vec<Down> = sqlx::query_as(
+        "SELECT id, name, target, last_message, device_id, (EXTRACT(EPOCH FROM now() - status_since) / 60)::bigint
+           FROM checks
+          WHERE enabled AND status = 'down' AND status_since <= now() - make_interval(mins => $1)
+            AND ($2::bigint IS NULL OR id = $2)",
+    )
+    .bind(rule.duration_min)
+    .bind(rule.check_id)
+    .fetch_all(&state.db)
+    .await?;
+    for (check_id, name, target, reason, device_id, minutes) in down {
+        let reason = reason.unwrap_or_default();
+        let message = format!("Dienst „{name}“ ({target}) funktioniert nicht: {reason}");
+        if open_check_alert(state, rule, check_id, device_id, &message).await? {
+            let mut n = Notification::new(format!("Dienst ausgefallen: {name}"), message, Severity::Critical, check_link(state))
+                .var("geraet", &name)
+                .var("ip", format!("({target})"))
+                .var("wert", reason);
+            if minutes > 0 {
+                n = n.var("wert", format!("seit {minutes} Min."));
+            }
+            n.device_id = device_id;
+            dispatch(state, rule, n).await;
+        }
+    }
+    let resolved: Vec<(i64, String, String, Option<i64>, i64)> = sqlx::query_as(
+        "UPDATE alerts a SET resolved_at = now()
+           FROM checks c
+          WHERE a.rule_id = $1 AND a.resolved_at IS NULL AND c.id = a.check_id AND (c.status <> 'down' OR NOT c.enabled)
+          RETURNING c.id, c.name, c.target, c.device_id, (EXTRACT(EPOCH FROM a.resolved_at - a.opened_at) / 60)::bigint",
+    )
+    .bind(rule.id)
+    .fetch_all(&state.db)
+    .await?;
+    if rule.notify_recovery {
+        for (_, name, target, device_id, minutes) in resolved {
+            let mut n = Notification::new(
+                format!("Dienst wieder da: {name}"),
+                format!("Dienst „{name}“ ({target}) funktioniert wieder (Ausfall {minutes} Min.)"),
+                Severity::Resolved,
+                check_link(state),
+            )
+            .var("geraet", &name)
+            .var("ip", format!("({target})"));
+            n.device_id = device_id;
+            dispatch(state, rule, n).await;
+        }
+    }
+    Ok(())
+}
+
+/// Zertifikat läuft in weniger als `threshold` Tagen ab
+async fn cert_expiry(state: &AppState, rule: &Rule) -> Result<()> {
+    let days = rule.threshold.unwrap_or(14.0).max(0.0);
+    type Expiring = (i64, String, String, Option<i64>, chrono::DateTime<chrono::Utc>);
+    let expiring: Vec<Expiring> = sqlx::query_as(
+        "SELECT id, name, target, device_id, cert_expires_at FROM checks
+          WHERE enabled AND cert_expires_at IS NOT NULL AND cert_expires_at < now() + make_interval(days => $1)
+            AND ($2::bigint IS NULL OR id = $2)",
+    )
+    .bind(days as i32)
+    .bind(rule.check_id)
+    .fetch_all(&state.db)
+    .await?;
+    for (check_id, name, target, device_id, until) in expiring {
+        let left = (until - chrono::Utc::now()).num_days();
+        let message = if left < 0 {
+            format!("Zertifikat von „{name}“ ({target}) ist seit {} abgelaufen", until.format("%d.%m.%Y"))
+        } else {
+            format!("Zertifikat von „{name}“ ({target}) läuft in {left} Tagen ab ({})", until.format("%d.%m.%Y"))
+        };
+        if open_check_alert(state, rule, check_id, device_id, &message).await? {
+            let mut n = Notification::new(format!("Zertifikat läuft ab: {name}"), message, Severity::Warning, check_link(state))
+                .var("geraet", &name)
+                .var("ip", format!("({target})"))
+                .var("wert", format!("noch {left} Tage"));
+            n.device_id = device_id;
+            dispatch(state, rule, n).await;
+        }
+    }
+    // Erneuerte Zertifikate: Alarm schließen
+    sqlx::query(
+        "UPDATE alerts a SET resolved_at = now() FROM checks c
+          WHERE a.rule_id = $1 AND a.resolved_at IS NULL AND c.id = a.check_id
+            AND (c.cert_expires_at IS NULL OR c.cert_expires_at >= now() + make_interval(days => $2))",
+    )
+    .bind(rule.id)
+    .bind(days as i32)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+async fn open_check_alert(state: &AppState, rule: &Rule, check_id: i64, device_id: Option<i64>, message: &str) -> sqlx::Result<bool> {
+    let inserted: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO alerts (rule_id, check_id, device_id, message, last_notified_at) VALUES ($1, $2, NULL, $3, now())
+         ON CONFLICT (rule_id, (COALESCE(device_id, 0)), (COALESCE(check_id, 0))) WHERE resolved_at IS NULL DO NOTHING
+         RETURNING id",
+    )
+    .bind(rule.id)
+    .bind(check_id)
+    .bind(message)
+    .fetch_optional(&state.db)
+    .await?;
+    let _ = device_id;
+    Ok(inserted.is_some())
+}
+
 /// Offene Alarme erneut melden, solange sie bestehen (je Regel einstellbar)
 async fn reminders(state: &AppState, rules: &[Rule]) -> Result<()> {
     for rule in rules.iter().filter(|r| r.repeat_min > 0) {
@@ -243,7 +362,7 @@ async fn reminders(state: &AppState, rules: &[Rule]) -> Result<()> {
         .fetch_all(&state.db)
         .await?;
         for (_, device_id, message, count, minutes) in due {
-            let severity = if rule.kind == "device_down" { Severity::Critical } else { Severity::Warning };
+            let severity = if matches!(rule.kind.as_str(), "device_down" | "check_down") { Severity::Critical } else { Severity::Warning };
             let mut n = Notification::new(
                 format!("Erinnerung ({count}.): {}", rule.name),
                 format!("{} – besteht seit {minutes} Min.", strip_duration(&message)),
@@ -269,7 +388,7 @@ fn strip_duration(message: &str) -> String {
 async fn open_alert(state: &AppState, rule: &Rule, device_id: Option<i64>, message: &str, value: Option<f32>) -> sqlx::Result<bool> {
     let inserted: Option<(i64,)> = sqlx::query_as(
         "INSERT INTO alerts (rule_id, device_id, message, value, last_notified_at) VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (rule_id, (COALESCE(device_id, 0))) WHERE resolved_at IS NULL DO NOTHING
+         ON CONFLICT (rule_id, (COALESCE(device_id, 0)), (COALESCE(check_id, 0))) WHERE resolved_at IS NULL DO NOTHING
          RETURNING id",
     )
     .bind(rule.id)

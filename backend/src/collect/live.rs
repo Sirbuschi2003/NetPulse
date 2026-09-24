@@ -43,6 +43,7 @@ struct Counter {
 }
 
 pub async fn live(state: &AppState, device_id: i64) -> Result<Value> {
+    let _perf = crate::perf::Timer::new("Live-Datenraten (Anfrage)");
     if let Some(entry) = state.live.entries.lock().unwrap().get(&device_id) {
         if entry.at.elapsed() < MIN_INTERVAL {
             return Ok(entry.last.clone());
@@ -176,7 +177,7 @@ const POSIX_COUNTERS: &str = "if [ -r /proc/net/dev ]; then cat /proc/net/dev; f
     else echo '@@BSD'; netstat -ibn; fi";
 
 async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -> Result<Vec<Counter>> {
-    let output = ssh::run_script(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
+    let output = ssh::run_script_pooled(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
         ssh::SshError::HostKeyChanged { .. } => anyhow!("SSH-Host-Schlüssel hat sich geändert"),
         ssh::SshError::Failed(msg) => anyhow!(msg),
     })?;

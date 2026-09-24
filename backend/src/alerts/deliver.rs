@@ -63,6 +63,7 @@ async fn with_smtp(state: &AppState, mut config: Value) -> Value {
 
 /// Sofort über einen Kanal senden (ohne Sammeln/Ruhezeit)
 pub async fn send_now(state: &AppState, kind: &str, config: Value, n: &Notification) -> Result<()> {
+    let _perf = crate::perf::Timer::new("Benachrichtigung senden");
     match kind {
         "app" => {
             let url = n.device_id.map_or_else(|| "/#/alerts".to_string(), |id| format!("/#/device/{id}"));

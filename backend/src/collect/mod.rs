@@ -186,6 +186,7 @@ impl Trace {
 
 /// Fragt ein Gerät ab und speichert Inventar, Messwerte und abgeleitete Angaben.
 pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
+    let _perf = crate::perf::Timer::new("Inventar-Abfrage (je Gerät)");
     let row: Option<DeviceRow> = sqlx::query_as(
         "SELECT host(ip) AS ip, open_ports, ssh_host_key, inventory, inventory_error,
                 COALESCE(name, reported_name, hostname, host(ip)) AS label, device_type, wan_interface, wan_interface_manual,

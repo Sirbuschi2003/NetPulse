@@ -5,6 +5,7 @@
 //! ändert er sich später, wird die Verbindung abgelehnt (Schutz vor Man-in-the-Middle).
 
 use std::{
+    collections::HashMap,
     net::Ipv4Addr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -81,17 +82,45 @@ pub async fn run_command(
     Ok(result?.1)
 }
 
-/// POSIX-Skript über `sh -s` ausführen – unabhängig von der Login-Shell
-/// (OPNsense/pfSense nutzen z. B. csh, das `if [ … ]` nicht versteht)
-pub async fn run_script(
+/// Offene Sitzungen für die Live-Ansicht (Gerät + Zugangsdaten → Sitzung, zuletzt benutzt).
+/// Spart den teuren Verbindungsaufbau alle 2 Sekunden – auf NetPulse und auf dem Gerät.
+type Pool = Mutex<HashMap<(Ipv4Addr, i64), (Arc<Handle<Client>>, std::time::Instant)>>;
+
+fn pool() -> &'static Pool {
+    static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+    POOL.get_or_init(Pool::default)
+}
+
+/// POSIX-Skript über `sh -s` ausführen – unabhängig von der Login-Shell (OPNsense/pfSense nutzen
+/// z. B. csh). Die Sitzung wird weiterverwendet, weil die Live-Ansicht alle 2 s fragt.
+pub async fn run_script_pooled(
     ip: Ipv4Addr,
     cred: &Credential,
     expected_host_key: Option<&str>,
     script: &str,
 ) -> Result<String, SshError> {
+    let key = (ip, cred.id);
+    let existing = {
+        let mut map = pool().lock().unwrap();
+        // Unbenutzte Sitzungen schließen (die Gegenstelle beendet sie ohnehin nach 30 s)
+        map.retain(|_, (_, used)| used.elapsed() < Duration::from_secs(25));
+        map.get(&key).map(|(h, _)| h.clone())
+    };
+    if let Some(session) = existing {
+        if let Ok((_, out)) = exec(&session, "sh -s", Some(script.as_bytes())).await {
+            if let Some(entry) = pool().lock().unwrap().get_mut(&key) {
+                entry.1 = std::time::Instant::now();
+            }
+            return Ok(out);
+        }
+        pool().lock().unwrap().remove(&key);
+    }
     let (session, _) = connect(ip, cred, expected_host_key).await?;
+    let session = Arc::new(session);
     let result = exec(&session, "sh -s", Some(script.as_bytes())).await;
-    let _ = session.disconnect(Disconnect::ByApplication, "", "de").await;
+    if result.is_ok() {
+        pool().lock().unwrap().insert(key, (session, std::time::Instant::now()));
+    }
     Ok(result?.1)
 }
 

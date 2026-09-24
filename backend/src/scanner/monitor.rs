@@ -43,6 +43,7 @@ pub async fn run(state: AppState, pinger: Arc<Pinger>) {
 }
 
 async fn check_all(state: &AppState, pinger: &Arc<Pinger>) -> Result<()> {
+    let _perf = crate::perf::Timer::new("Erreichbarkeit (Runde über alle Geräte)");
     let targets: Vec<Target> = sqlx::query_as(
         "SELECT id, host(ip) AS ip, status, open_ports, COALESCE(name, hostname) AS label
            FROM devices WHERE monitored AND family(ip) = 4",

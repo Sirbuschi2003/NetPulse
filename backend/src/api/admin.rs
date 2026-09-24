@@ -318,3 +318,32 @@ pub async fn reset_totp(State(st): State<AppState>, AdminUser(admin): AdminUser,
     audit::by(&st.db, &admin, "totp_reset", json!({ "username": username })).await;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ---------------------------------------------------------------------------
+// Systemzustand (CPU, RAM, Dauer der Aufgaben)
+// ---------------------------------------------------------------------------
+
+pub async fn system(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    let (db_mb, devices, monitored, shellys, checks): (f64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT pg_database_size(current_database())::float8 / 1048576,
+                (SELECT count(*) FROM devices), (SELECT count(*) FROM devices WHERE monitored),
+                (SELECT count(*) FROM devices WHERE integration = 'shelly'), (SELECT count(*) FROM checks WHERE enabled)",
+    )
+    .fetch_one(&st.db)
+    .await?;
+    let live = crate::collect::fast::load_settings(&st.db).await;
+    Ok(Json(json!({
+        "process": crate::perf::process(),
+        "tasks": crate::perf::tasks(),
+        "db_mb": (db_mb * 10.0).round() / 10.0,
+        "devices": devices,
+        "monitored": monitored,
+        "shellys": shellys,
+        "checks": checks,
+        "browsers": st.hub.clients(),
+        "live_interval_s": live.interval_s,
+        "live_enabled": live.enabled,
+        "inventory_interval_min": st.config.inventory_interval.as_secs() / 60,
+        "monitor_interval_s": st.config.monitor_interval.as_secs(),
+    })))
+}

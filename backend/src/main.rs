@@ -15,6 +15,7 @@ mod alerts;
 mod api;
 mod audit;
 mod auth;
+mod checks;
 mod classify;
 mod collect;
 mod config;
@@ -22,6 +23,7 @@ mod error;
 mod logbuf;
 mod mib;
 mod oui;
+mod perf;
 mod push;
 mod scanner;
 mod totp;
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collect::fast::run(state.clone()));
     tokio::spawn(alerts::run(state.clone()));
     tokio::spawn(alerts::deliver::run(state.clone()));
+    tokio::spawn(checks::run(state.clone()));
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));
 
@@ -170,6 +173,13 @@ async fn apply_retention(db: &PgPool, config: &Config) -> Result<()> {
         .execute(db)
         .await?;
     sqlx::query("SELECT add_retention_policy('interface_stats', make_interval(days => $1))")
+        .bind(config.metrics_retention_days)
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT remove_retention_policy('check_results', if_exists => true)")
+        .execute(db)
+        .await?;
+    sqlx::query("SELECT add_retention_policy('check_results', make_interval(days => $1))")
         .bind(config.metrics_retention_days)
         .execute(db)
         .await?;

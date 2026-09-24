@@ -13,6 +13,8 @@ const RULE_KINDS = {
   cpu_usage: { label: 'CPU-Auslastung hoch', icon: 'cpu', unit: '%', hint: 'Durchschnittliche CPU-Last (SNMP/SSH nötig).' },
   mem_usage: { label: 'RAM-Auslastung hoch', icon: 'gauge', unit: '%', hint: 'Belegter Arbeitsspeicher (SNMP/SSH nötig).' },
   temperature: { label: 'Temperatur hoch', icon: 'temperature', unit: '°C', hint: 'Höchste gemeldete Temperatur (SSH/Synology-SNMP).' },
+  check_down: { label: 'Dienst ausgefallen', icon: 'world-www', unit: null, check: true, hint: 'Webseite, Port, DNS oder Zertifikat-Check schlägt fehl (unter „Dienste“ angelegt).' },
+  cert_expiry: { label: 'Zertifikat läuft ab', icon: 'shield-lock', unit: 'Tage', check: true, hint: 'Alarm, wenn ein überwachtes Zertifikat in weniger als X Tagen abläuft.' },
 };
 
 async function viewAlerts(_arg, params) {
@@ -88,13 +90,15 @@ async function viewAlerts(_arg, params) {
 
   async function ruleDialog(rule) {
     const { channels } = state.rulesCache;
-    const devices = await api('/devices');
+    const [devices, checkList] = await Promise.all([api('/devices'), api('/checks')]);
     const r = rule || { kind: 'device_down', duration_min: 5, channel_ids: channels.map((c) => c.id), notify_recovery: true, enabled: true };
     const dlg = openModal(rule ? 'Regel bearbeiten' : 'Regel anlegen', `<form class="form" id="rule-form">
       <label>Art der Regel<select name="kind"${rule ? ' disabled' : ''}>${Object.entries(RULE_KINDS).map(([k, v]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
       <p class="hint" id="kind-hint"></p>
       <label>Name<input name="name" value="${esc(r.name || '')}" placeholder="z. B. NAS offline"></label>
-      <label>Gerät<select name="device_id"><option value="">Alle Geräte</option>
+      <label id="f-check">Dienst<select name="check_id"><option value="">Alle Dienste</option>
+        ${checkList.map((c) => `<option value="${c.id}"${c.id === r.check_id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <label id="f-device">Gerät<select name="device_id"><option value="">Alle Geräte</option>
         ${devices.map((d) => `<option value="${d.id}"${d.id === r.device_id ? ' selected' : ''}>${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}</select></label>
       <div class="form-row">
         <label id="f-threshold"><span>Schwellwert <span id="unit"></span></span><input name="threshold" type="number" step="any" value="${r.threshold ?? ''}"></label>
@@ -114,10 +118,12 @@ async function viewAlerts(_arg, params) {
       $('#kind-hint', dlg).textContent = def.hint;
       $('#f-threshold', dlg).hidden = !def.unit;
       $('#unit', dlg).textContent = def.unit ? `(${def.unit})` : '';
-      $('#f-duration', dlg).hidden = !(k === 'device_down' || def.unit);
-      $('#f-recovery', dlg).hidden = !(k === 'device_down' || def.unit);
-      $('#f-repeat', dlg).hidden = !(k === 'device_down' || def.unit);
-      if (!rule && def.unit && !form.threshold.value) form.threshold.value = k === 'temperature' ? 70 : 90;
+      $('#f-duration', dlg).hidden = !(k === 'device_down' || k === 'check_down' || (def.unit && k !== 'cert_expiry'));
+      $('#f-check', dlg).hidden = !def.check;
+      $('#f-device', dlg).hidden = !!def.check;
+      $('#f-recovery', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
+      $('#f-repeat', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
+      if (!rule && def.unit && !form.threshold.value) form.threshold.value = k === 'temperature' ? 70 : k === 'cert_expiry' ? 14 : 90;
     };
     form.kind.addEventListener('change', update);
     update();
@@ -126,7 +132,8 @@ async function viewAlerts(_arg, params) {
       const body = {
         name: form.elements.name.value.trim() || RULE_KINDS[form.kind.value].label,
         kind: form.kind.value,
-        device_id: form.device_id.value ? Number(form.device_id.value) : null,
+        device_id: !RULE_KINDS[form.kind.value].check && form.device_id.value ? Number(form.device_id.value) : null,
+        check_id: RULE_KINDS[form.kind.value].check && form.check_id.value ? Number(form.check_id.value) : null,
         threshold: form.threshold.value === '' ? null : Number(form.threshold.value),
         duration_min: Number(form.duration_min.value || 0),
         channel_ids: $$('input[name="ch"]:checked', form).map((c) => Number(c.value)),
@@ -744,7 +751,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
-  smtp_update: 'E-Mail-Server geändert', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
+  smtp_update: 'E-Mail-Server geändert', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -776,10 +783,32 @@ async function viewLogs() {
         <button type="button" class="ghost" id="log-save">${icon('cloud-download')}Als Datei speichern</button></div></div>
     <div class="notice info">${icon('file-text')}<span>Die letzten 5.000 Meldungen seit dem Start des Containers (nur im Speicher).
       Tipp: Für ein einzelnes Gerät zeigt der Tab „Diagnose“ auf der Geräteseite jeden Abfrageschritt.</span></div>
+    <div class="card" id="sys-card"><header><h2>${icon('gauge')}Systemzustand von NetPulse</h2><span class="muted small" id="sys-note"></span></header>
+      <div id="sys-body"><div class="empty">Lade …</div></div></div>
     <div class="card"><div class="log" id="log-body"><div class="empty">Lade …</div></div></div>`;
 
   const shortTarget = (t) => t.replace(/^netpulse::/, '');
+  const renderSystem = async () => {
+    const s = await api('/system');
+    const p = s.process;
+    const tasks = [...s.tasks].sort((a, b) => b.busy_pct - a.busy_pct);
+    $('#sys-note').textContent = p.available ? `läuft seit ${fmtDuration(p.uptime_s)}` : '';
+    $('#sys-body').innerHTML = `<div class="kpis">
+        ${kpi('CPU jetzt', p.cpu_pct_now != null ? `${p.cpu_pct_now} %` : '…', 'cpu', p.cpu_pct_now > 50 ? 'tone-warn' : 'tone-up', '#/logs')}
+        ${kpi('CPU Ø seit Start', p.available ? `${p.cpu_pct_avg} %` : '–', 'activity', 'tone-accent', '#/logs')}
+        ${kpi('Arbeitsspeicher', p.available ? `${p.rss_mb} MB` : '–', 'stack-2', 'tone-info', '#/logs')}
+        ${kpi('Datenbank', `${Math.round(s.db_mb)} MB`, 'database', 'tone-muted', '#/logs')}
+        ${kpi('Offene Browser', s.browsers, 'device-desktop', 'tone-muted', '#/logs')}
+      </div>
+      <p class="muted small">${s.monitored} überwachte Geräte (Prüfung alle ${s.monitor_interval_s} s) · Inventar alle ${s.inventory_interval_min} Min. ·
+        ${s.shellys} Shellys ${s.live_enabled ? `live alle ${s.live_interval_s} s` : '(Echtzeit aus)'} · ${s.checks} Dienst-Checks.
+        CPU-Werte gelten für den NetPulse-Prozess (100 % = ein voller Prozessorkern).</p>
+      ${tasks.length ? `<div class="table-wrap"><table><thead><tr><th>Aufgabe</th><th>Läufe/Min.</th><th>Ø Dauer</th><th>max.</th><th>zuletzt</th><th title="Anteil der Laufzeit, in der diese Aufgabe aktiv war (inkl. Wartezeit auf Geräte)">aktiv</th></tr></thead>
+        <tbody>${tasks.map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.per_min)}</td><td>${esc(fmtMs(t.avg_ms))}</td><td>${esc(fmtMs(t.max_ms))}</td>
+          <td class="small">${esc(fmtAgo(t.last_at))}</td><td>${esc(t.busy_pct)} %</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  };
   const render = async () => {
+    renderSystem().catch(() => {});
     lines = await api(`/logs?level=${encodeURIComponent(filters.level)}&q=${encodeURIComponent(filters.q)}&limit=1000`);
     $('#log-count').textContent = `${lines.length} Einträge`;
     $('#log-body').innerHTML = lines.length ? lines.map((l) => `<div class="log-line lvl-${esc(l.level)}">

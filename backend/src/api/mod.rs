@@ -2,6 +2,7 @@
 
 mod admin;
 mod alerts;
+mod checks;
 mod credentials;
 mod dashboard;
 mod devices;
@@ -47,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/interfaces/history", get(devices::interface_history))
         .route("/devices/{id}/snmp", get(devices::snmp_explorer))
         .route("/events", get(devices::events))
+        .route("/checks", get(checks::list).post(checks::create))
+        .route("/checks/{id}", axum::routing::patch(checks::update).delete(checks::remove))
+        .route("/checks/{id}/run", post(checks::run_now))
+        .route("/checks/{id}/history", get(checks::history))
         .route("/alerts", get(alerts::list_alerts))
         // Dashboard (pro Benutzer)
         .route("/dashboard", get(dashboard::load).put(dashboard::save))
@@ -79,6 +84,7 @@ pub fn router(state: AppState) -> Router {
         .route("/users/{id}/totp", delete(admin::reset_totp))
         .route("/audit", get(admin::audit_log))
         .route("/logs", get(admin::system_log))
+        .route("/system", get(admin::system))
         .layer(middleware::from_fn(auth::csrf_guard));
 
     Router::new()

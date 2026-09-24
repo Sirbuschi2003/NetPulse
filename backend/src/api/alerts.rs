@@ -18,8 +18,9 @@ use crate::{
 };
 
 const CHANNEL_KINDS: &[&str] = &["email", "ntfy", "gotify", "telegram", "discord", "teams", "webhook", "app"];
-const RULE_KINDS: &[&str] =
-    &["device_down", "new_device", "mac_changed", "disk_usage", "cpu_usage", "mem_usage", "temperature"];
+const RULE_KINDS: &[&str] = &[
+    "device_down", "new_device", "mac_changed", "disk_usage", "cpu_usage", "mem_usage", "temperature", "check_down", "cert_expiry",
+];
 const MASK: &str = "••••••";
 
 // ---------------------------------------------------------------------------
@@ -243,11 +244,14 @@ pub struct RuleRow {
     notify_recovery: bool,
     enabled: bool,
     repeat_min: i32,
+    check_id: Option<i64>,
+    check_label: Option<String>,
 }
 
 const RULE_SELECT: &str = "SELECT r.id, r.name, r.kind, r.device_id, COALESCE(d.name, d.hostname, host(d.ip)) AS device_label,
-                                  r.threshold, r.duration_min, r.channel_ids, r.notify_recovery, r.enabled, r.repeat_min
-                             FROM alert_rules r LEFT JOIN devices d ON d.id = r.device_id";
+                                  r.threshold, r.duration_min, r.channel_ids, r.notify_recovery, r.enabled, r.repeat_min,
+                                  r.check_id, c.name AS check_label
+                             FROM alert_rules r LEFT JOIN devices d ON d.id = r.device_id LEFT JOIN checks c ON c.id = r.check_id";
 
 pub async fn list_rules(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<RuleRow>>> {
     let sql = format!("{RULE_SELECT} ORDER BY r.name");
@@ -266,6 +270,8 @@ pub struct RuleInput {
     enabled: Option<bool>,
     /// Erinnerung alle X Minuten, solange der Alarm offen ist (0 = aus)
     repeat_min: Option<i32>,
+    /// Nur für Check-Regeln: bestimmter Check (leer = alle)
+    check_id: Option<i64>,
 }
 
 pub async fn create_rule(
@@ -277,14 +283,14 @@ pub async fn create_rule(
     if !RULE_KINDS.contains(&kind) {
         return Err(ApiError::BadRequest("Unbekannter Regeltyp".into()));
     }
-    let needs_threshold = matches!(kind, "disk_usage" | "cpu_usage" | "mem_usage" | "temperature");
+    let needs_threshold = matches!(kind, "disk_usage" | "cpu_usage" | "mem_usage" | "temperature" | "cert_expiry");
     if needs_threshold && req.threshold.is_none() {
         return Err(ApiError::BadRequest("Bitte einen Schwellwert angeben".into()));
     }
     let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(kind);
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled, repeat_min)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+        "INSERT INTO alert_rules (name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled, repeat_min, check_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
     .bind(name)
     .bind(kind)
@@ -295,6 +301,7 @@ pub async fn create_rule(
     .bind(req.notify_recovery.unwrap_or(true))
     .bind(req.enabled.unwrap_or(true))
     .bind(req.repeat_min.unwrap_or(0).clamp(0, 10_080))
+    .bind(req.check_id)
     .fetch_one(&st.db)
     .await?;
     audit::by(&st.db, &user, "rule_add", json!({ "id": id, "rule": req })).await;
@@ -317,7 +324,8 @@ pub async fn update_rule(
             channel_ids = COALESCE($6, channel_ids),
             notify_recovery = COALESCE($7, notify_recovery),
             enabled = COALESCE($8, enabled),
-            repeat_min = COALESCE($9, repeat_min)
+            repeat_min = COALESCE($9, repeat_min),
+            check_id = $10
           WHERE id = $1",
     )
     .bind(id)
@@ -329,6 +337,7 @@ pub async fn update_rule(
     .bind(req.notify_recovery)
     .bind(req.enabled)
     .bind(req.repeat_min.map(|r| r.clamp(0, 10_080)))
+    .bind(req.check_id)
     .execute(&st.db)
     .await?;
     if updated.rows_affected() == 0 {
@@ -382,9 +391,10 @@ pub async fn list_alerts(
 ) -> ApiResult<Json<Vec<AlertRow>>> {
     let alerts = sqlx::query_as::<_, AlertRow>(
         "SELECT a.id, r.name AS rule_name, r.kind AS rule_kind, a.device_id,
-                COALESCE(d.name, d.hostname, host(d.ip)) AS device_label,
+                COALESCE(d.name, d.reported_name, d.hostname, host(d.ip), c.name) AS device_label,
                 a.opened_at, a.resolved_at, a.message
            FROM alerts a JOIN alert_rules r ON r.id = a.rule_id LEFT JOIN devices d ON d.id = a.device_id
+                LEFT JOIN checks c ON c.id = a.check_id
           WHERE NOT $1 OR a.resolved_at IS NULL
           ORDER BY (a.resolved_at IS NULL) DESC, a.opened_at DESC
           LIMIT $2",

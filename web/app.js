@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.6.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.0#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -168,7 +168,8 @@ const statusBadge = (d) =>
   d.monitored === false
     ? '<span class="badge plain">nicht überwacht</span>'
     : `<span class="badge st-${esc(d.status)}"><span class="dot ${esc(d.status)}"></span>${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
-const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel' };
+const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel',
+  check_down: 'Dienst aus', check_up: 'Dienst ok', check_warn: 'Dienst-Warnung' };
 const eventBadge = (kind) => `<span class="badge ev-${esc(kind)}">${esc(EVENT_LABEL[kind] || kind)}</span>`;
 const deviceLabel = (d) => d.name || d.reported_name || d.hostname || d.ip;
 
@@ -263,6 +264,7 @@ function startLive(deviceId, onData, onError, history = {}) {
   let stopped = false;
   let timer = null;
   const tick = async () => {
+    if (document.hidden) { timer = setTimeout(tick, 3000); return; }
     try {
       const data = await api(`/devices/${deviceId}/live`);
       if (stopped) return;
@@ -468,6 +470,7 @@ const WIDGETS = {
   internet: { title: 'Internet', icon: 'world-www', render: wInternet },
   power: { title: 'Stromverbrauch live', icon: 'bolt', render: wPower },
   smarthome: { title: 'Smart Home live', icon: 'plug', render: wSmartHome },
+  checks: { title: 'Dienste', icon: 'world-www', render: wChecks },
   alerts: { title: 'Offene Alarme', icon: 'bell', render: wAlerts },
   down: { title: 'Nicht erreichbar', icon: 'alert-triangle', render: wDown },
   types: { title: 'Gerätetypen', icon: 'category', render: wTypes },
@@ -637,6 +640,15 @@ function mountInternetWidgets(root, histories) {
   });
 }
 
+/** Dienst-Checks mit Heartbeat-Balken */
+async function wChecks() {
+  const checks = await api('/checks');
+  if (!checks.length) return empty('Noch keine Dienste – unter „Dienste“ z. B. die eigene Webseite oder ein Zertifikat überwachen.', 'world-www');
+  return `<ul class="list">${checks.slice(0, 10).map((c) => `<li><a class="lead" href="#/checks"><span class="check-dot st-${esc(c.status)}"></span>
+      <span class="ellipsis">${esc(c.name)}</span></a><span class="meta wbeats">${beats(c.beats, 20)}
+      <span>${c.uptime_24h != null ? `${esc(c.uptime_24h)} %` : '–'}</span></span></li>`).join('')}</ul>`;
+}
+
 function deviceRow(d, meta) {
   return `<li><a class="lead" href="#/device/${d.id}">${devIcon(d, 'sm')}<span class="ellipsis">${esc(deviceLabel(d))}</span></a>
     <span class="meta">${meta}</span></li>`;
@@ -708,13 +720,94 @@ function wSlowest({ devices }) {
   return `<ul class="list">${slow.map((d) => deviceRow(d, esc(fmtMs(d.last_rtt_ms)))).join('')}</ul>`;
 }
 
+/** Was das Geräte-Widget anzeigen kann (mehrere gleichzeitig wählbar) */
+const DEVICE_METRICS = {
+  rtt: { label: 'Antwortzeit & Verfügbarkeit', icon: 'activity' },
+  cpu: { label: 'CPU-Auslastung', icon: 'cpu', key: 'cpu_pct', fmt: fmtPct, max: 100 },
+  mem: { label: 'RAM-Auslastung', icon: 'gauge', key: 'mem_pct', fmt: fmtPct, max: 100 },
+  disk: { label: 'Speicherbelegung', icon: 'database', key: 'disk_pct', fmt: fmtPct, max: 100 },
+  temp: { label: 'Temperatur', icon: 'temperature', key: 'temp_c', fmt: (v) => (v == null ? '–' : `${Math.round(v)} °C`) },
+  net: { label: 'Netzwerk (Verlauf ↓/↑)', icon: 'arrows-exchange' },
+  internet: { label: 'Internet live (WAN)', icon: 'world-www' },
+  live: { label: 'Datenraten live (alle Schnittstellen)', icon: 'activity' },
+  power: { label: 'Stromverbrauch', icon: 'bolt', key: 'power_w', fmt: fmtWatt },
+  clients: { label: 'Clients (z. B. WLAN)', icon: 'devices', key: 'clients', fmt: (v) => (v == null ? '–' : String(Math.round(v))) },
+};
+
+const lastValue = (list, key) => {
+  for (let i = list.length - 1; i >= 0; i -= 1) if (list[i][key] != null) return list[i][key];
+  return null;
+};
+
 async function wDevice(_ctx, widget) {
   const data = await api(`/devices/${encodeURIComponent(widget.device_id)}?hours=24`);
   const d = data.device;
+  const metrics = (widget.metrics && widget.metrics.length ? widget.metrics : ['rtt']).filter((m) => DEVICE_METRICS[m]);
   const avail = availability(data.points);
-  return `<div class="cell-dev">${devIcon(d, 'sm')}<a href="#/device/${d.id}">${esc(deviceLabel(d))}</a> ${statusBadge(d)}</div>
-    <p class="muted small">${esc(d.ip)} · ${esc(fmtMs(d.last_rtt_ms))}${avail != null ? ` · ${avail} % verfügbar (24 h)` : ''}</p>
-    ${lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, height: 170, width: 440, outages: true })}`;
+  const width = 460 * Math.min(2, widget.size || 1);
+  const parts = metrics.map((m) => {
+    const def = DEVICE_METRICS[m];
+    let head = '';
+    let body = '';
+    if (m === 'rtt') {
+      head = `${esc(fmtMs(d.last_rtt_ms))}${avail != null ? ` · ${avail} %` : ''}`;
+      body = lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, height: 120, width, outages: true });
+    } else if (m === 'net') {
+      head = `↓ ${esc(fmtBps(lastValue(data.stats, 'rx_bps')))} · ↑ ${esc(fmtBps(lastValue(data.stats, 'tx_bps')))}`;
+      body = lineChart(data.stats, { series: [{ key: 'rx_bps', label: 'Empfang' }, { key: 'tx_bps', label: 'Senden' }], format: fmtBps, height: 120, width });
+    } else if (m === 'internet') {
+      body = d.wan_interface ? wInternet({ summary: { wan_devices: [{ id: d.id, label: deviceLabel(d), interface: d.wan_interface, device_type: d.device_type }] } }, { device_id: d.id })
+        : '<p class="muted small">Für dieses Gerät ist keine Internet-Schnittstelle erkannt (beim Gerät unter „Schnittstellen“ markieren).</p>';
+    } else if (m === 'live') {
+      body = `<div class="dev-live" data-dev-live="${d.id}"><p class="muted small">verbinde …</p></div>`;
+    } else if (m === 'power' && d.integration === 'shelly') {
+      const l = live.devices.get(d.id);
+      head = `<span data-watt="${d.id}">${esc(l && l.ok && l.power_w != null ? fmtWatt(l.power_w) : fmtWatt(lastValue(data.stats, 'power_w')))}</span>`;
+      body = lineChart(data.stats, { series: [{ key: 'power_w', label: 'Leistung' }], format: fmtWatt, height: 120, width });
+    } else {
+      head = esc(def.fmt(lastValue(data.stats, def.key)));
+      body = lineChart(data.stats, { series: [{ key: def.key, label: def.label }], format: def.fmt, height: 120, width, maxValue: def.max ?? null });
+    }
+    return `<div class="dw-part"><div class="dw-head">${icon(def.icon, 'i-sm')}<span>${esc(def.label)}</span><strong>${head}</strong></div>${body}</div>`;
+  });
+  return `<div class="cell-dev">${devIcon(d, 'sm')}<a href="#/device/${d.id}">${esc(deviceLabel(d))}</a> ${statusBadge(d)}
+      <span class="muted small">${esc(d.ip)}</span></div>
+    <div class="dw-parts">${parts.join('')}</div>`;
+}
+
+/** Live-Datenraten aller Schnittstellen eines Geräts im Widget */
+function mountDeviceLive(root) {
+  $$('[data-dev-live]', root).forEach((el) => {
+    startLive(Number(el.dataset.devLive), (data) => {
+      const list = data.interfaces.filter((i) => i.rx_bps != null || i.tx_bps != null)
+        .sort((a, b) => ((b.rx_bps || 0) + (b.tx_bps || 0)) - ((a.rx_bps || 0) + (a.tx_bps || 0))).slice(0, 6);
+      el.innerHTML = list.length ? `<div class="bars">${list.map((i) => `<span class="ellipsis mono small">${esc(i.alias || i.name)}</span>
+        <span class="small">↓ ${esc(fmtBps(i.rx_bps))}</span><span class="small">↑ ${esc(fmtBps(i.tx_bps))}</span>`).join('')}</div>
+        <p class="muted small">live per ${esc(data.source)}</p>` : '<p class="muted small">Noch keine Datenraten – kommt nach der zweiten Messung.</p>';
+    }, (e) => { el.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; });
+  });
+}
+
+/** Auswahl, welches Gerät und welche Werte ein Widget zeigt */
+function deviceWidgetDialog(devices, widget = {}) {
+  return new Promise((resolve) => {
+    const chosen = new Set(widget.metrics && widget.metrics.length ? widget.metrics : ['rtt', 'cpu', 'net']);
+    const dlg = openModal('Geräte-Widget', `<form class="form" id="dw-form">
+      <label>Gerät<select name="device">${devices.map((d) => `<option value="${d.id}"${d.id === widget.device_id ? ' selected' : ''}>${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}</select></label>
+      <fieldset><legend>Anzeigen (mehrere möglich)</legend><div class="checks">
+        ${Object.entries(DEVICE_METRICS).map(([k, m]) => `<label class="inline"><input type="checkbox" name="m" value="${k}"${chosen.has(k) ? ' checked' : ''}> ${esc(m.label)}</label>`).join('')}
+      </div></fieldset>
+      <p class="hint">CPU, RAM, Speicher, Temperatur und Clients gibt es bei Geräten mit SNMP-/SSH-Zugang oder aus dem UniFi-Controller,
+        Strom bei Shellys, „Internet live“ beim Router/der Firewall mit erkannter WAN-Schnittstelle.</p>
+      <div class="actions"><button type="submit">${icon('check')}Übernehmen</button></div></form>`);
+    $('#dw-form', dlg).addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const metrics = $$('input[name="m"]:checked', dlg).map((c) => c.value);
+      dlg.close();
+      resolve({ device_id: Number(ev.target.elements.device.value), metrics: metrics.length ? metrics : ['rtt'] });
+    });
+    dlg.addEventListener('close', () => resolve(null), { once: true });
+  });
 }
 
 function widgetTitle(widget, ctx) {
@@ -761,6 +854,7 @@ async function viewDashboard() {
           <button class="ghost" data-act="left" data-idx="${i}" title="Nach vorne">${icon('chevron-left', 'i-sm')}</button>
           <button class="ghost" data-act="right" data-idx="${i}" title="Nach hinten">${icon('chevron-right', 'i-sm')}</button>
           <button class="ghost" data-act="size" data-idx="${i}" title="Breite ändern">${size}/3</button>
+          ${widget.type === 'device' ? `<button class="ghost" data-act="config" data-idx="${i}" title="Werte auswählen">${icon('settings', 'i-sm')}</button>` : ''}
           <button class="ghost" data-act="remove" data-idx="${i}" title="Entfernen">${icon('x', 'i-sm')}</button></div>` : '';
       return `<section class="card widget span-${size}" data-idx="${i}" draggable="${editing}">
           <header><h2>${icon(def.icon)}${esc(widgetTitle(widget, ctx))}</h2>${tools}</header>
@@ -769,7 +863,7 @@ async function viewDashboard() {
 
     const addOptions = `<option value="">+ Widget hinzufügen …</option>
       ${Object.entries(WIDGETS).filter(([, def]) => !def.perDevice).map(([key, def]) => `<option value="${key}">${esc(def.title)}</option>`).join('')}
-      <optgroup label="Einzelnes Gerät (Antwortzeit)">
+      <optgroup label="Einzelnes Gerät (Werte frei wählbar)">
         ${ctx.devices.map((d) => `<option value="device:${d.id}">${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}
       </optgroup>`;
     const actions = editing
@@ -789,6 +883,7 @@ async function viewDashboard() {
     state.liveStops = [];
     mountInternetWidgets(view(), liveHistories);
     mountStreamWidgets(view());
+    mountDeviceLive(view());
   };
 
   const move = (from, to) => {
@@ -808,8 +903,14 @@ async function viewDashboard() {
     $('#add-widget')?.addEventListener('change', (ev) => {
       const value = ev.target.value;
       if (!value) return;
-      if (value.startsWith('device:')) layout.push({ type: 'device', size: 1, device_id: Number(value.slice(7)) });
-      else layout.push({ type: value, size: 1 });
+      if (value.startsWith('device:')) {
+        const d = ctx.devices.find((x) => x.id === Number(value.slice(7)));
+        deviceWidgetDialog(ctx.devices, { device_id: d && d.id }).then((cfg) => {
+          if (cfg) { layout.push({ type: 'device', size: cfg.metrics.length > 2 ? 2 : 1, ...cfg }); render(); } else render();
+        });
+        return;
+      }
+      layout.push({ type: value, size: 1 });
       render();
     });
     $$('.widget-tools button').forEach((btn) => btn.addEventListener('click', () => {
@@ -818,6 +919,10 @@ async function viewDashboard() {
       if (btn.dataset.act === 'right') move(i, i + 1);
       if (btn.dataset.act === 'size') layout[i].size = ((layout[i].size || 1) % 3) + 1;
       if (btn.dataset.act === 'remove') layout.splice(i, 1);
+      if (btn.dataset.act === 'config') {
+        deviceWidgetDialog(ctx.devices, layout[i]).then((cfg) => { if (cfg) Object.assign(layout[i], cfg); render(); });
+        return;
+      }
       render();
     }));
     if (!editing) return;
@@ -888,6 +993,7 @@ const ROUTES = {
   device: { title: 'Gerät', view: (a, p) => viewDevice(a, p), nav: 'devices' },
   alerts: { title: 'Alarme', view: (a, p) => viewAlerts(a, p) },
   events: { title: 'Ereignisse', view: () => viewEvents() },
+  checks: { title: 'Dienste', view: () => viewChecks() },
   networks: { title: 'Netzwerke', view: () => viewNetworks(), admin: true },
   credentials: { title: 'Zugangsdaten', view: () => viewCredentials(), admin: true },
   channels: { title: 'Benachrichtigungen', view: () => viewChannels(), admin: true },
@@ -899,7 +1005,8 @@ const ROUTES = {
 
 function autoRefresh(fn, seconds = 30) {
   clearInterval(state.refreshTimer);
-  state.refreshTimer = setInterval(() => { fn().catch(() => {}); }, seconds * 1000);
+  // Im Hintergrund-Tab nicht nachladen – spart Last auf Server und Datenbank
+  state.refreshTimer = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, seconds * 1000);
 }
 
 async function route() {
@@ -969,7 +1076,8 @@ function startApp() {
   connectStream();
   registerServiceWorker();
   clearInterval(state.globalTimer);
-  state.globalTimer = setInterval(refreshShell, 10000);
+  // Alarme kommen sofort über den Live-Stream; die Seitenleiste reicht alle 30 s
+  state.globalTimer = setInterval(() => { if (!document.hidden) refreshShell(); }, 30000);
   if (!location.hash || location.hash === '#/') location.hash = '#/dashboard';
   else route();
 }

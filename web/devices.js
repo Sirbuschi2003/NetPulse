@@ -779,3 +779,164 @@ async function viewDevice(id) {
   render();
   autoRefresh(reload, 60);
 }
+
+// ---------------------------------------------------------------------------
+// Dienste (Dienst-Checks)
+// ---------------------------------------------------------------------------
+
+const CHECK_KINDS = {
+  http: { label: 'Webseite / HTTP(S)', icon: 'world-www', target: 'URL', placeholder: 'https://monitoring.example.de' },
+  tcp: { label: 'Port (TCP)', icon: 'plug-connected', target: 'Host:Port', placeholder: '192.168.178.10:22' },
+  dns: { label: 'DNS-Auflösung', icon: 'world', target: 'Name', placeholder: 'example.de' },
+  tls: { label: 'TLS-Zertifikat', icon: 'shield-lock', target: 'Host:Port', placeholder: 'mail.example.de:993' },
+};
+const CHECK_STATUS = { up: ['ok', 'st-up'], down: ['Ausfall', 'st-down'], warn: ['Warnung', 'warn'], pending: ['prüft …', 'plain'], unknown: ['neu', 'plain'] };
+const checkBadge = (c) => { const [label, cls] = CHECK_STATUS[c.status] || CHECK_STATUS.unknown; return `<span class="badge ${cls}">${esc(label)}</span>`; };
+
+function beats(list, count = 40) {
+  const items = (list || []).slice(-count);
+  const pad = count - items.length;
+  return `<div class="beats" title="Letzte ${count} Prüfungen">${'<i></i>'.repeat(pad)}${items.map((ok) => `<i class="${ok ? 'ok' : 'bad'}"></i>`).join('')}</div>`;
+}
+
+const certDays = (c) => (c.cert_expires_at ? Math.floor((new Date(c.cert_expires_at) - Date.now()) / 86400000) : null);
+
+function checkRow(c) {
+  const kind = CHECK_KINDS[c.kind] || {};
+  const days = certDays(c);
+  return `<div class="check-row st-${esc(c.status)}${c.enabled ? '' : ' off'}" data-check="${c.id}">
+    <span class="check-dot"></span>
+    <div class="check-main"><div class="check-title">${icon(kind.icon || 'activity', 'i-sm')}<strong class="ellipsis">${esc(c.name)}</strong> ${checkBadge(c)}</div>
+      <div class="muted small ellipsis">${esc(c.target)}${c.device_label ? ` · ${esc(c.device_label)}` : ''}</div>
+      <div class="small ellipsis check-msg">${esc(c.last_message || (c.enabled ? 'noch nicht geprüft' : 'pausiert'))}</div></div>
+    ${beats(c.beats)}
+    <div class="check-nums"><strong>${c.uptime_24h != null ? `${esc(c.uptime_24h)} %` : '–'}</strong><span class="muted small">24 h</span></div>
+    <div class="check-nums"><strong>${esc(fmtMs(c.last_ms))}</strong><span class="muted small">${days != null ? `Zert. ${days} T.` : 'Antwort'}</span></div>
+  </div>`;
+}
+
+async function viewChecks() {
+  let checks = await api('/checks');
+  const render = () => {
+    const count = (s) => checks.filter((c) => c.status === s).length;
+    view().innerHTML = `
+      <div class="page-head"><div class="kpis compact">
+          ${kpi('Dienste', checks.length, 'world-www', 'tone-accent', '#/checks')}
+          ${kpi('OK', count('up'), 'circle-check', 'tone-up', '#/checks')}
+          ${kpi('Warnung', count('warn'), 'alert-triangle', count('warn') ? 'tone-warn' : 'tone-muted', '#/checks')}
+          ${kpi('Ausfall', count('down'), 'circle-x', count('down') ? 'tone-down' : 'tone-muted', '#/checks')}</div>
+        <div class="actions">${isAdmin() ? `<button type="button" id="check-add">${icon('plus')}Dienst hinzufügen</button>` : ''}</div></div>
+      <div class="card">${checks.length ? `<div class="check-list">${checks.map(checkRow).join('')}</div>`
+        : empty('Noch keine Dienste. Beispiele: eigene Webseite (mit Suchwort), Zertifikat des Mailservers, DNS des Routers, SSH-Port des NAS.', 'world-www')}</div>`;
+    $('#check-add')?.addEventListener('click', () => checkDialog(null));
+    $$('[data-check]').forEach((row) => row.addEventListener('click', () => checkDetail(Number(row.dataset.check))));
+  };
+
+  async function checkDetail(id) {
+    const h = await api(`/checks/${id}/history?hours=24`);
+    const c = h.check;
+    const days = certDays(c);
+    const dlg = openModal(c.name, `<div class="check-detail">
+      <p>${checkBadge(c)} <span class="muted">${esc((CHECK_KINDS[c.kind] || {}).label || c.kind)} · ${esc(c.target)} · alle ${esc(c.interval_s)} s</span></p>
+      <p class="small">${esc(c.last_message || '')}</p>
+      <div class="kpis compact">${h.uptime.map((u) => kpi(`Verfügbar ${u.label}`, u.value != null ? `${u.value} %` : '–', 'activity', 'tone-accent', '#/checks')).join('')}
+        ${days != null ? kpi('Zertifikat', `${days} Tage`, 'shield-lock', days < 14 ? 'tone-warn' : 'tone-up', '#/checks') : ''}</div>
+      ${lineChart(h.points, { series: [{ key: 'ms', label: 'Antwortzeit' }], format: fmtMs, height: 180, width: 720, outages: true })}
+      ${beats(c.beats)}
+      ${isAdmin() ? `<div class="actions"><button type="button" id="cd-run">${icon('refresh')}Jetzt prüfen</button>
+        <button type="button" class="ghost" id="cd-edit">${icon('edit')}Bearbeiten</button>
+        <button type="button" class="ghost" id="cd-del">${icon('trash')}Löschen</button></div>` : ''}</div>`);
+    dlg.classList.add('wide');
+    $('#cd-run', dlg)?.addEventListener('click', () => attempt(async () => {
+      const r = await api(`/checks/${id}/run`, { method: 'POST' });
+      toast(`${r.outcome.ok ? 'OK' : 'Fehler'}: ${r.outcome.message}`, !r.outcome.ok);
+      dlg.close();
+      checks = await api('/checks');
+      render();
+    }));
+    $('#cd-edit', dlg)?.addEventListener('click', () => { dlg.close(); checkDialog(c); });
+    $('#cd-del', dlg)?.addEventListener('click', () => {
+      if (!confirm(`Dienst „${c.name}“ löschen? Der Verlauf wird ebenfalls gelöscht.`)) return;
+      attempt(async () => { await api(`/checks/${id}`, { method: 'DELETE' }); dlg.close(); checks = await api('/checks'); render(); }, 'Dienst gelöscht');
+    });
+  }
+
+  async function checkDialog(check) {
+    const devices = await api('/devices');
+    const c = check || { kind: 'http', interval_s: 60, timeout_s: 10, enabled: true, config: {} };
+    const cfg = c.config || {};
+    const dlg = openModal(check ? 'Dienst bearbeiten' : 'Dienst hinzufügen', `<form class="form" id="check-form">
+      <label>Art<select name="kind">${Object.entries(CHECK_KINDS).map(([k, v]) => `<option value="${k}"${k === c.kind ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
+      <label><span id="target-label">Ziel</span><input name="target" required value="${esc(c.target || '')}"></label>
+      <label>Name<input name="name" value="${esc(c.name || '')}" placeholder="z. B. Eigene Webseite"></label>
+      <div data-k="http" class="form">
+        <div class="form-row"><label>Suchwort im Inhalt (optional)<input name="keyword" value="${esc(cfg.keyword || '')}" placeholder="z. B. Willkommen"></label>
+          <label>Erwarteter Status<input name="expect_status" value="${esc(cfg.expect_status || '')}" placeholder="Standard 200–399, z. B. 200,401"></label></div>
+        <label class="inline"><input type="checkbox" name="keyword_invert"${cfg.keyword_invert ? ' checked' : ''}> Suchwort darf <b>nicht</b> vorkommen (z. B. „Fehler“)</label>
+        <label>Methode<select name="method"><option value="GET">GET</option><option value="HEAD"${cfg.method === 'HEAD' ? ' selected' : ''}>HEAD (nur Kopfzeilen)</option></select></label>
+        <label class="inline"><input type="checkbox" name="check_cert"${cfg.check_cert === false ? '' : ' checked'}> Bei HTTPS auch das Zertifikat überwachen</label>
+      </div>
+      <div data-k="dns" class="form"><div class="form-row">
+        <label>DNS-Server (optional)<input name="server" value="${esc(cfg.server || '')}" placeholder="leer = System, z. B. 192.168.178.1"></label>
+        <label>Eintrag<select name="record"><option value="A">A (IPv4)</option><option value="AAAA"${cfg.record === 'AAAA' ? ' selected' : ''}>AAAA (IPv6)</option></select></label></div>
+        <label>Erwartete Adresse (optional)<input name="expect" value="${esc(cfg.expect || '')}" placeholder="z. B. 203.0.113.10"></label></div>
+      <div data-k="http tls" class="form"><div class="form-row">
+        <label>Warnen, wenn Zertifikat in weniger als … Tagen abläuft<input name="warn_days" type="number" min="1" max="365" value="${esc(cfg.warn_days ?? 14)}"></label>
+        <label class="inline"><input type="checkbox" name="ignore_tls"${cfg.ignore_tls ? ' checked' : ''}> Selbst signierte Zertifikate akzeptieren</label></div></div>
+      <div class="form-row">
+        <label>Prüfen alle … Sekunden<input name="interval_s" type="number" min="10" max="86400" value="${esc(c.interval_s)}"></label>
+        <label>Zeitlimit (s)<input name="timeout_s" type="number" min="1" max="60" value="${esc(c.timeout_s)}"></label>
+        <label>Ausfall nach … Fehlversuchen<input name="retries" type="number" min="1" max="10" value="${esc(cfg.retries ?? 2)}"></label></div>
+      <label>Zugehöriges Gerät (optional)<select name="device_id"><option value="">–</option>
+        ${devices.map((d) => `<option value="${d.id}"${d.id === c.device_id ? ' selected' : ''}>${esc(deviceLabel(d))} – ${esc(d.ip)}</option>`).join('')}</select></label>
+      <label class="inline"><input type="checkbox" name="enabled"${c.enabled ? ' checked' : ''}> Aktiv</label>
+      <p class="hint">Alarm bei Ausfall oder ablaufendem Zertifikat: unter <a href="#/alerts?tab=rules">Alarme → Regeln</a> „Dienst ausgefallen“ bzw. „Zertifikat läuft ab“ anlegen.</p>
+      <div class="actions"><button type="submit">${icon('check')}Speichern</button></div></form>`);
+    dlg.classList.add('wide');
+    const form = $('#check-form', dlg);
+    const e = form.elements;
+    const update = () => {
+      const def = CHECK_KINDS[e.kind.value];
+      $('#target-label', dlg).textContent = def.target;
+      e.target.placeholder = def.placeholder;
+      $$('[data-k]', form).forEach((el) => { el.hidden = !el.dataset.k.split(' ').includes(e.kind.value); });
+    };
+    e.kind.addEventListener('change', update);
+    update();
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const k = e.kind.value;
+      const config = { retries: Number(e.retries.value || 2) };
+      if (k === 'http') Object.assign(config, { keyword: e.keyword.value.trim(), keyword_invert: e.keyword_invert.checked, expect_status: e.expect_status.value.trim(), method: e.method.value, check_cert: e.check_cert.checked });
+      if (k === 'dns') Object.assign(config, { server: e.server.value.trim(), record: e.record.value, expect: e.expect.value.trim() });
+      if (k === 'http' || k === 'tls') Object.assign(config, { warn_days: Number(e.warn_days.value || 14), ignore_tls: e.ignore_tls.checked });
+      const body = { kind: k, target: e.target.value.trim(), name: e.name.value.trim(), config, interval_s: Number(e.interval_s.value),
+        timeout_s: Number(e.timeout_s.value), device_id: e.device_id.value ? Number(e.device_id.value) : null, enabled: e.enabled.checked };
+      attempt(async () => {
+        if (check) await api(`/checks/${check.id}`, { method: 'PATCH', body });
+        else await api('/checks', { method: 'POST', body });
+        dlg.close();
+        checks = await api('/checks');
+        render();
+      }, 'Dienst gespeichert – wird gleich geprüft');
+    });
+  }
+
+  render();
+  // Ergebnisse kommen live über den Stream
+  onLive((msg) => {
+    if (msg.type !== 'check') return;
+    const c = checks.find((x) => x.id === msg.id);
+    if (!c) return;
+    Object.assign(c, { status: msg.status, last_ms: msg.ms, last_message: msg.message, last_check: msg.time });
+    c.beats = [...(c.beats || []), msg.ok].slice(-40);
+    const row = $(`[data-check="${msg.id}"]`);
+    if (row && !$('#modal').open) {
+      row.outerHTML = checkRow(c);
+      const fresh = $(`[data-check="${msg.id}"]`);
+      fresh.classList.add('flash');
+      fresh.addEventListener('click', () => checkDetail(msg.id));
+    }
+  });
+  autoRefresh(async () => { if (!$('#modal').open) { checks = await api('/checks'); render(); } }, 60);
+}

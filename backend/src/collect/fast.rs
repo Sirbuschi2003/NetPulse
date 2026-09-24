@@ -43,6 +43,11 @@ impl Hub {
         self.tx.subscribe()
     }
 
+    /// Anzahl offener Browser-Verbindungen
+    pub fn clients(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
     pub fn publish(&self, event: &Value) {
         // Fehler heißt nur: gerade niemand verbunden
         let _ = self.tx.send(event.to_string().into());
@@ -151,6 +156,7 @@ pub async fn run(state: AppState) {
             continue;
         }
         let started = Instant::now();
+        let perf = crate::perf::Timer::new("Echtzeit Shelly (Runde)");
         let targets: Vec<Target> = match sqlx::query_as(
             "SELECT id, host(ip) AS ip, COALESCE(name, reported_name, hostname, host(ip)) AS label
                FROM devices WHERE integration = 'shelly' AND status = 'up'",
@@ -215,6 +221,7 @@ pub async fn run(state: AppState) {
             }
         }
 
+        drop(perf);
         let elapsed = started.elapsed();
         tokio::time::sleep(interval.saturating_sub(elapsed).max(Duration::from_millis(500))).await;
     }

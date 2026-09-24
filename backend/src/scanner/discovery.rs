@@ -134,6 +134,7 @@ async fn enabled_network_ids(state: &AppState) -> sqlx::Result<Vec<i64>> {
 }
 
 async fn scan_network(state: &AppState, pinger: &Arc<Pinger>, network_id: i64, queued: usize) -> Result<()> {
+    let _perf = crate::perf::Timer::new("Netz-Scan");
     let Some((cidr,)): Option<(String,)> =
         sqlx::query_as("SELECT cidr::text FROM networks WHERE id = $1 AND enabled")
             .bind(network_id)
