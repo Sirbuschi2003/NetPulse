@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.1#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.7.2#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -767,6 +767,11 @@ async function wDevice(_ctx, widget) {
     } else {
       head = esc(def.fmt(lastValue(data.stats, def.key)));
       body = lineChart(data.stats, { series: [{ key: def.key, label: def.label }], format: def.fmt, height: 120, width, maxValue: def.max ?? null });
+      if (['cpu', 'mem', 'temp'].includes(m) && d.has_credentials) {
+        // Aktueller Wert und Kurve der letzten Minuten kommen live (alle 2 s)
+        head = `<span data-live-sys="${d.id}" data-key="${def.key}">${head}</span>`;
+        body = `<div class="dw-live" data-live-spark="${d.id}" data-key="${def.key}"></div>${body}`;
+      }
     }
     return `<div class="dw-part"><div class="dw-head">${icon(def.icon, 'i-sm')}<span>${esc(def.label)}</span><strong>${head}</strong></div>${body}</div>`;
   });
@@ -775,8 +780,36 @@ async function wDevice(_ctx, widget) {
     <div class="dw-parts">${parts.join('')}</div>`;
 }
 
+const SYS_FMT = { cpu_pct: fmtPct, mem_pct: fmtPct, temp_c: (v) => (v == null ? '–' : `${Math.round(v)} °C`) };
+
+/** Live-Werte CPU/RAM/Temperatur in Geräte-Widgets (eine Abfrage je Gerät) */
+function mountDeviceSystem(root) {
+  const ids = [...new Set($$('[data-live-sys]', root).map((el) => Number(el.dataset.liveSys)))];
+  ids.forEach((id) => {
+    const series = {};
+    const stop = startLive(id, (data) => {
+      const sys = data.system || {};
+      $$(`[data-live-sys="${id}"]`, root).forEach((el) => {
+        const v = sys[el.dataset.key];
+        if (v == null) return;
+        el.textContent = SYS_FMT[el.dataset.key](v);
+        el.closest('.dw-head')?.classList.add('is-live');
+      });
+      $$(`[data-live-spark="${id}"]`, root).forEach((el) => {
+        const key = el.dataset.key;
+        if (sys[key] == null) return;
+        const list = (series[key] ||= []);
+        list.push(sys[key]);
+        if (list.length > HISTORY_POINTS) list.shift();
+        el.innerHTML = valueSpark(list, 36);
+      });
+    }, () => stop());
+  });
+}
+
 /** Live-Datenraten aller Schnittstellen eines Geräts im Widget */
 function mountDeviceLive(root) {
+  mountDeviceSystem(root);
   $$('[data-dev-live]', root).forEach((el) => {
     startLive(Number(el.dataset.devLive), (data) => {
       const list = data.interfaces.filter((i) => i.rx_bps != null || i.tx_bps != null)

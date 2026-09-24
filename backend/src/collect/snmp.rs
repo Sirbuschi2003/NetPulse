@@ -688,3 +688,26 @@ async fn synology_storage(s: &mut AsyncSession) -> Map<String, Value> {
     }
     out
 }
+
+/// Schnell: nur CPU-Last und RAM-Belegung (für die Live-Ansicht, HOST-RESOURCES-MIB)
+pub async fn system_quick(ip: std::net::Ipv4Addr, cred: &super::Credential) -> Result<(Option<f64>, Option<f64>)> {
+    let mut s = open(ip, cred).await?;
+    let loads: Vec<f64> = column(&mut s, HR_PROCESSOR_LOAD, 256).await.values().filter_map(Val::num).collect();
+    let cpu = (!loads.is_empty()).then(|| loads.iter().sum::<f64>() / loads.len() as f64);
+    let types = column(&mut s, &with(HR_STORAGE, &[2]), 128).await;
+    let mut mem = None;
+    if let Some((idx, _)) = types.iter().find(|(_, t)| matches!(t, Val::Oid(o) if o.ends_with(".25.2.1.2"))) {
+        let mut oid_size = with(HR_STORAGE, &[5]);
+        oid_size.extend_from_slice(idx);
+        let mut oid_used = with(HR_STORAGE, &[6]);
+        oid_used.extend_from_slice(idx);
+        let values = get(&mut s, &[&oid_size[..], &oid_used[..]]).await.unwrap_or_default();
+        let num = |i: usize| values.get(i).and_then(|(_, v)| v.num());
+        if let (Some(size), Some(used)) = (num(0), num(1)) {
+            if size > 0.0 {
+                mem = Some(used / size * 100.0);
+            }
+        }
+    }
+    Ok((cpu, mem))
+}

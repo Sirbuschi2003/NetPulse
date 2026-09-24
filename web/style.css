@@ -579,3 +579,13 @@ tr.sev-row-warn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 .install-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-bottom: 12px;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
 .install-btn { white-space: nowrap; }
+
+/* ---------- Live CPU/RAM ---------- */
+.dw-head.is-live strong::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--up);
+  margin-left: 6px; vertical-align: middle; animation: blink 1.4s infinite; }
+.dw-live svg.spark { height: 36px; margin: 2px 0 6px; }
+.sys-live { display: grid; grid-template-columns: repeat(3, minmax(120px, 180px)) 1fr; gap: 18px; align-items: end; margin-bottom: 16px;
+  padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.sys-live strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.sys-live .meter span { transition: width 0.8s; }
+@media (max-width: 720px) { .sys-live { grid-template-columns: 1fr 1fr; } }

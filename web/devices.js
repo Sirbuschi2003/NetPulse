@@ -211,6 +211,11 @@ async function viewDevice(id) {
   function tabLive() {
     return `<div class="live-head"><span class="live-pulse" id="live-status">verbinde …</span>
         <label class="inline small"><input type="checkbox" id="live-all"> auch getrennte Schnittstellen zeigen</label></div>
+      <div class="sys-live" id="sys-live" hidden>
+        <div><span class="muted small">CPU</span><strong data-sys="cpu_pct">–</strong><div class="meter"><span data-bar="cpu_pct"></span></div></div>
+        <div><span class="muted small">RAM</span><strong data-sys="mem_pct">–</strong><div class="meter"><span data-bar="mem_pct"></span></div></div>
+        <div data-temp hidden><span class="muted small">Temperatur</span><strong data-sys="temp_c">–</strong></div>
+        <div class="sys-spark" id="sys-spark"></div></div>
       <div class="if-grid" id="if-grid"></div>`;
   }
 
@@ -234,9 +239,26 @@ async function viewDevice(id) {
         ${isAdmin() && !wan ? `<button type="button" class="ghost sm" data-mark-wan="${esc(i.name)}">${icon('world-www', 'i-sm')}Als Internet markieren</button>` : ''}
       </div>`;
 
+    const cpuHistory = [];
     const update = (live, history) => {
       last = live;
       lastHistory = history;
+      const sys = live.system || {};
+      if (sys.cpu_pct != null || sys.mem_pct != null) {
+        $('#sys-live').hidden = false;
+        ['cpu_pct', 'mem_pct', 'temp_c'].forEach((k) => {
+          const el = $(`[data-sys="${k}"]`);
+          if (el && sys[k] != null) el.textContent = k === 'temp_c' ? `${Math.round(sys[k])} °C` : fmtPct(sys[k]);
+          const bar = $(`[data-bar="${k}"]`);
+          if (bar && sys[k] != null) bar.style.width = `${Math.min(100, sys[k])}%`;
+        });
+        $('[data-temp]').hidden = sys.temp_c == null;
+        if (sys.cpu_pct != null) {
+          cpuHistory.push(sys.cpu_pct);
+          if (cpuHistory.length > HISTORY_POINTS) cpuHistory.shift();
+          $('#sys-spark').innerHTML = valueSpark(cpuHistory, 44);
+        }
+      }
       $('#live-status').textContent = live.warming_up
         ? 'Erste Messung – die Raten erscheinen in 2 Sekunden …'
         : `Live per ${live.source} · ${new Date(live.time).toLocaleTimeString('de-DE')}`;
@@ -1034,7 +1056,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.7.1#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.7.2#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

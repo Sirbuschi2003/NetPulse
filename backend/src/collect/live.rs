@@ -29,6 +29,64 @@ struct Entry {
     at: Instant,
     counters: HashMap<String, (Option<f64>, Option<f64>)>,
     last: Value,
+    /// CPU-Zähler (gesamt, Leerlauf) der letzten SSH-Abfrage
+    cpu_ticks: Option<(f64, f64)>,
+    /// Letzte CPU/RAM-Werte per SNMP und wann sie geholt wurden (höchstens alle 10 s)
+    snmp_sys: Option<(Instant, Value)>,
+}
+
+/// CPU, RAM und Temperatur aus der SSH-Ausgabe
+#[derive(Default)]
+struct SysSample {
+    cpu_ticks: Option<(f64, f64)>,
+    mem_pct: Option<f64>,
+    temp_c: Option<f64>,
+}
+
+fn parse_sys(section: &str) -> SysSample {
+    let mut out = SysSample::default();
+    let lines = section.lines().map(str::trim).filter(|l| !l.is_empty());
+    let nums = |l: &str| l.split_whitespace().filter_map(|v| v.trim_end_matches('C').parse::<f64>().ok()).collect::<Vec<_>>();
+    let mut mem_total = None;
+    let mut mem_avail = None;
+    let mut bsd: Vec<f64> = Vec::new();
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("cpu ") {
+            // Linux /proc/stat: user nice system idle iowait irq softirq steal …
+            let v = nums(rest);
+            if v.len() >= 4 {
+                let total: f64 = v.iter().take(8).sum();
+                out.cpu_ticks = Some((total, v[3] + v.get(4).copied().unwrap_or(0.0)));
+            }
+        } else if let Some(rest) = line.strip_prefix("MemTotal:") {
+            mem_total = nums(rest).first().copied();
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            mem_avail = nums(rest).first().copied();
+        } else if let Some(rest) = line.strip_prefix("TEMP ") {
+            out.temp_c = nums(rest).first().map(|t| if *t > 1000.0 { t / 1000.0 } else { *t });
+        } else if let Some(rest) = line.strip_prefix("BSDCPU ") {
+            // kern.cp_time: user nice sys intr idle
+            let v = nums(rest);
+            if v.len() >= 5 {
+                out.cpu_ticks = Some((v.iter().sum(), v[4]));
+            }
+        } else if let Some(rest) = line.strip_prefix("BSDMEM ") {
+            bsd = nums(rest);
+        }
+    }
+    if let (Some(total), Some(avail)) = (mem_total, mem_avail) {
+        if total > 0.0 {
+            out.mem_pct = Some((total - avail) / total * 100.0);
+        }
+    }
+    // hw.physmem hw.pagesize free inactive cache
+    if let [phys, page, free, inactive, rest @ ..] = &bsd[..] {
+        let cache = rest.first().copied().unwrap_or(0.0);
+        if *phys > 0.0 {
+            out.mem_pct = Some(((phys - (free + inactive + cache) * page) / phys * 100.0).clamp(0.0, 100.0));
+        }
+    }
+    out
 }
 
 struct Counter {
@@ -58,12 +116,25 @@ pub async fn live(state: &AppState, device_id: i64) -> Result<Value> {
             .ok_or_else(|| anyhow!("Gerät nicht gefunden"))?;
     let addr: Ipv4Addr = ip.parse()?;
     let creds: Vec<Credential> = load_credentials(state, device_id).await?.into_iter().filter(|c| c.linked).collect();
-    let (counters, source) = if let Some(cred) = creds.iter().find(|c| c.kind.starts_with("snmp")) {
-        (snmp_counters(addr, cred).await?, "SNMP")
+    let snmp_cred = creds.iter().find(|c| c.kind.starts_with("snmp"));
+    let (counters, source, sys) = if let Some(cred) = snmp_cred {
+        (snmp_counters(addr, cred).await?, "SNMP", SysSample::default())
     } else if let Some(cred) = creds.iter().find(|c| c.kind.starts_with("ssh")) {
-        (ssh_counters(addr, cred, host_key.as_deref()).await?, "SSH")
+        let (counters, sys) = ssh_counters(addr, cred, host_key.as_deref()).await?;
+        (counters, "SSH", sys)
     } else {
         bail!("Für die Live-Ansicht braucht das Gerät zugeordnete SNMP- oder SSH-Zugangsdaten");
+    };
+
+    // CPU/RAM per SNMP höchstens alle 10 s (die Zähler ändern sich im Gerät ohnehin selten öfter)
+    let cached_snmp = state.live.entries.lock().unwrap().get(&device_id).and_then(|e| e.snmp_sys.clone());
+    let snmp_sys = match (snmp_cred, cached_snmp) {
+        (Some(_), Some((at, v))) if at.elapsed() < Duration::from_secs(10) => Some((at, v)),
+        (Some(cred), cached) => match snmp::system_quick(addr, cred).await {
+            Ok((cpu, mem)) => Some((Instant::now(), json!({ "cpu_pct": cpu, "mem_pct": mem }))),
+            Err(_) => cached,
+        },
+        _ => None,
     };
 
     let now = Instant::now();
@@ -110,12 +181,20 @@ pub async fn live(state: &AppState, device_id: i64) -> Result<Value> {
         })
         .collect();
 
+    // CPU aus der Differenz der Zähler (SSH) bzw. direkt aus SNMP
+    let round = |v: f64| (v * 10.0).round() / 10.0;
+    let cpu_pct = match (sys.cpu_ticks, previous.and_then(|p| p.cpu_ticks)) {
+        (Some((total, idle)), Some((pt, pi))) if total > pt => Some(round(((total - pt) - (idle - pi)) / (total - pt) * 100.0)),
+        _ => snmp_sys.as_ref().and_then(|(_, v)| v["cpu_pct"].as_f64()).map(round),
+    };
+    let mem_pct = sys.mem_pct.or_else(|| snmp_sys.as_ref().and_then(|(_, v)| v["mem_pct"].as_f64())).map(round);
     let result = json!({
         "time": chrono::Utc::now(),
         "source": source,
         "wan": wan,
         "warming_up": seconds.is_none(),
         "interfaces": interfaces,
+        "system": { "cpu_pct": cpu_pct, "mem_pct": mem_pct, "temp_c": sys.temp_c.map(round) },
     });
     entries.insert(
         device_id,
@@ -123,6 +202,8 @@ pub async fn live(state: &AppState, device_id: i64) -> Result<Value> {
             at: now,
             counters: counters.into_iter().map(|c| (c.name, (c.rx, c.tx))).collect(),
             last: result.clone(),
+            cpu_ticks: sys.cpu_ticks,
+            snmp_sys,
         },
     );
     entries.retain(|_, e| e.at.elapsed() < Duration::from_secs(600));
@@ -174,17 +255,24 @@ async fn snmp_counters(ip: Ipv4Addr, cred: &Credential) -> Result<Vec<Counter>> 
 /// FreeBSD/OPNsense/pfSense: Zähler aus `netstat -ibn`.
 const POSIX_COUNTERS: &str = "if [ -r /proc/net/dev ]; then cat /proc/net/dev; for i in /sys/class/net/*; do \
     echo \"@ ${i##*/} $(cat $i/speed 2>/dev/null || echo -) $(cat $i/operstate 2>/dev/null || echo unknown)\"; done; \
-    else echo '@@BSD'; netstat -ibn; fi";
+    else echo '@@BSD'; netstat -ibn; fi; \
+    echo '@@SYS'; if [ -r /proc/stat ]; then head -1 /proc/stat; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; \
+    t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null) && echo \"TEMP $t\"; \
+    else echo \"BSDCPU $(sysctl -n kern.cp_time)\"; \
+    echo \"BSDMEM $(sysctl -n hw.physmem hw.pagesize vm.stats.vm.v_free_count vm.stats.vm.v_inactive_count vm.stats.vm.v_cache_count 2>/dev/null | tr '\\n' ' ')\"; \
+    t=$(sysctl -n dev.cpu.0.temperature 2>/dev/null) && echo \"TEMP $t\"; fi";
 
-async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -> Result<Vec<Counter>> {
+async fn ssh_counters(ip: Ipv4Addr, cred: &Credential, host_key: Option<&str>) -> Result<(Vec<Counter>, SysSample)> {
     let output = ssh::run_script_pooled(ip, cred, host_key, POSIX_COUNTERS).await.map_err(|e| match e {
         ssh::SshError::HostKeyChanged { .. } => anyhow!("SSH-Host-Schlüssel hat sich geändert"),
         ssh::SshError::Failed(msg) => anyhow!(msg),
     })?;
-    if output.contains("Inter-|") {
-        Ok(parse_proc_net_dev(&output))
-    } else if output.contains("@@BSD") {
-        Ok(parse_netstat(&output))
+    let (net, sys) = output.split_once("@@SYS").unwrap_or((&output, ""));
+    let sys = parse_sys(sys);
+    if net.contains("Inter-|") {
+        Ok((parse_proc_net_dev(net), sys))
+    } else if net.contains("@@BSD") {
+        Ok((parse_netstat(net), sys))
     } else {
         let first: String = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("(keine Ausgabe)").chars().take(120).collect();
         bail!("Live-Ansicht per SSH gibt es für Linux und FreeBSD/OPNsense – für Windows bitte den Verlauf nutzen (Antwort des Geräts: {first})");
@@ -258,6 +346,18 @@ fn parse_proc_net_dev(output: &str) -> Vec<Counter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_werte() {
+        let linux = parse_sys("cpu  100 0 50 800 50 0 0 0 0 0\nMemTotal:  8000000 kB\nMemAvailable: 2000000 kB\nTEMP 48500\n");
+        assert_eq!(linux.cpu_ticks, Some((1000.0, 850.0)));
+        assert_eq!(linux.mem_pct, Some(75.0));
+        assert_eq!(linux.temp_c, Some(48.5));
+        let bsd = parse_sys("BSDCPU 100 0 50 10 840\nBSDMEM 4294967296 4096 262144 262144 0 \nTEMP 51.0C\n");
+        assert_eq!(bsd.cpu_ticks, Some((1000.0, 840.0)));
+        assert_eq!(bsd.mem_pct, Some(50.0));
+        assert_eq!(bsd.temp_c, Some(51.0));
+    }
 
     #[test]
     fn netstat_freebsd_wird_gelesen() {
