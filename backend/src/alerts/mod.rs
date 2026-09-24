@@ -122,20 +122,39 @@ async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i6
 
 async fn device_down(state: &AppState, rule: &Rule) -> Result<()> {
     // Neue Ausfälle
-    let down: Vec<(i64, String, i64)> = sqlx::query_as(
-        "SELECT d.id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
-                (EXTRACT(EPOCH FROM now() - d.status_since) / 60)::bigint
+    // Geräte hinter einem ebenfalls ausgefallenen Elterngerät (Switch, AP …) werden nicht einzeln gemeldet –
+    // die Meldung des Elterngeräts nennt stattdessen die Zahl der betroffenen Geräte.
+    let down: Vec<(i64, String, i64, i64)> = sqlx::query_as(
+        "WITH RECURSIVE anc(child, ancestor, depth) AS (
+             SELECT id, parent_id, 1 FROM devices WHERE parent_id IS NOT NULL
+           UNION ALL
+             SELECT anc.child, p.parent_id, anc.depth + 1 FROM anc JOIN devices p ON p.id = anc.ancestor
+              WHERE p.parent_id IS NOT NULL AND anc.depth < 8
+         )
+         SELECT d.id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) || ' (' || host(d.ip) || ')',
+                (EXTRACT(EPOCH FROM now() - d.status_since) / 60)::bigint,
+                (SELECT count(DISTINCT c.id) FROM anc JOIN devices c ON c.id = anc.child
+                  WHERE anc.ancestor = d.id AND c.status = 'down' AND c.monitored)
            FROM devices d
           WHERE d.monitored AND d.status = 'down'
             AND d.status_since <= now() - make_interval(mins => $1)
-            AND ($2::bigint IS NULL OR d.id = $2)",
+            AND ($2::bigint IS NULL OR d.id = $2)
+            AND NOT EXISTS (SELECT 1 FROM anc JOIN devices a ON a.id = anc.ancestor
+                             WHERE anc.child = d.id AND a.status = 'down' AND a.monitored)",
     )
     .bind(rule.duration_min)
     .bind(rule.device_id)
     .fetch_all(&state.db)
     .await?;
-    for (device_id, label, minutes) in down {
-        let message = if minutes > 0 { format!("{label} ist seit {minutes} Min. nicht erreichbar") } else { format!("{label} ist nicht erreichbar") };
+    for (device_id, label, minutes, dependents) in down {
+        let mut message = if minutes > 0 { format!("{label} ist seit {minutes} Min. nicht erreichbar") } else { format!("{label} ist nicht erreichbar") };
+        if dependents > 0 {
+            message.push_str(&if dependents == 1 {
+                " – dahinter ist 1 abhängiges Gerät ebenfalls nicht erreichbar".to_string()
+            } else {
+                format!(" – dahinter sind {dependents} abhängige Geräte ebenfalls nicht erreichbar")
+            });
+        }
         if open_alert(state, rule, Some(device_id), &message, None).await? {
             let n = Notification::new(format!("Offline: {label}"), message, Severity::Critical, device_link(state, device_id))
                 .device(device_id);
@@ -261,6 +280,7 @@ async fn check_down(state: &AppState, rule: &Rule) -> Result<()> {
                 n = n.var("wert", format!("seit {minutes} Min."));
             }
             n.device_id = device_id;
+            n.check_id = Some(check_id);
             dispatch(state, rule, n).await;
         }
     }
@@ -274,7 +294,7 @@ async fn check_down(state: &AppState, rule: &Rule) -> Result<()> {
     .fetch_all(&state.db)
     .await?;
     if rule.notify_recovery {
-        for (_, name, target, device_id, minutes) in resolved {
+        for (check_id, name, target, device_id, minutes) in resolved {
             let mut n = Notification::new(
                 format!("Dienst wieder da: {name}"),
                 format!("Dienst „{name}“ ({target}) funktioniert wieder (Ausfall {minutes} Min.)"),
@@ -284,6 +304,7 @@ async fn check_down(state: &AppState, rule: &Rule) -> Result<()> {
             .var("geraet", &name)
             .var("ip", format!("({target})"));
             n.device_id = device_id;
+            n.check_id = Some(check_id);
             dispatch(state, rule, n).await;
         }
     }
@@ -316,6 +337,7 @@ async fn cert_expiry(state: &AppState, rule: &Rule) -> Result<()> {
                 .var("ip", format!("({target})"))
                 .var("wert", format!("noch {left} Tage"));
             n.device_id = device_id;
+            n.check_id = Some(check_id);
             dispatch(state, rule, n).await;
         }
     }
@@ -402,6 +424,11 @@ async fn open_alert(state: &AppState, rule: &Rule, device_id: Option<i64>, messa
 
 /// Platzhalter ergänzen, im Browser anzeigen und an alle Kanäle der Regel zustellen
 async fn dispatch(state: &AppState, rule: &Rule, mut n: Notification) {
+    // Wartungsfenster: aufzeichnen ja, benachrichtigen nein
+    if let Some(window) = crate::maintenance::active_for(&state.db, n.device_id, n.check_id).await {
+        tracing::info!("„{}“ nicht gemeldet – Wartungsfenster „{window}“ aktiv", n.title);
+        return;
+    }
     n.vars.insert("regel".into(), rule.name.clone());
     n.vars.insert(
         "zeit".into(),

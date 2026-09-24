@@ -22,7 +22,8 @@ const DEVICE_COLUMNS: &str = "id, host(ip) AS ip, mac, hostname, name, notes, op
                               last_rtt_ms, monitored, first_seen, last_seen, last_check, vendor, \
                               COALESCE(device_type, 'unknown') AS device_type, device_type_manual, os, model, \
                               inventory_at, inventory_error, wan_interface, wan_interface_manual, reported_name, integration, \
-                              EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = devices.id) AS has_credentials";
+                              EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = devices.id) AS has_credentials, \
+                              parent_id, parent_manual";
 
 const EVENT_SELECT: &str = "SELECT e.id, e.time, e.device_id, \
                             COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS device_label, e.kind, e.message \
@@ -56,6 +57,8 @@ pub struct Device {
     reported_name: Option<String>,
     integration: Option<String>,
     has_credentials: bool,
+    parent_id: Option<i64>,
+    parent_manual: bool,
 }
 
 #[derive(Serialize, FromRow)]
@@ -267,6 +270,8 @@ pub struct DeviceUpdate {
     device_type: Option<String>,
     /// Internet-Schnittstelle von Hand setzen; leerer Text = automatisch erkennen
     wan_interface: Option<String>,
+    /// Elterngerät (Switch/AP/Router), an dem das Gerät hängt; 0 = keins, -1 = automatisch (UniFi)
+    parent_id: Option<i64>,
 }
 
 pub async fn update(
@@ -286,6 +291,21 @@ pub async fn update(
             return Err(ApiError::BadRequest(format!("Unbekannter Gerätetyp: {kind}")));
         }
     }
+    if let Some(parent) = req.parent_id.filter(|p| *p > 0) {
+        // Kein Kreis: das neue Elterngerät darf nicht (indirekt) an diesem Gerät hängen
+        let (cycle,): (bool,) = sqlx::query_as(
+            "WITH RECURSIVE up(id, depth) AS (SELECT $1::bigint, 0 UNION ALL
+               SELECT d.parent_id, up.depth + 1 FROM up JOIN devices d ON d.id = up.id WHERE d.parent_id IS NOT NULL AND up.depth < 20)
+             SELECT EXISTS (SELECT 1 FROM up WHERE id = $2)",
+        )
+        .bind(parent)
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if cycle {
+            return Err(ApiError::BadRequest("Das gewählte Gerät hängt selbst (indirekt) an diesem Gerät".into()));
+        }
+    }
 
     // Nicht mitgeschickte Felder bleiben unverändert, leere Texte löschen den Wert
     let sql = format!(
@@ -298,7 +318,9 @@ pub async fn update(
             device_type = CASE WHEN $5::text IS NULL OR $5 = 'auto' THEN device_type ELSE $5 END,
             device_type_manual = CASE WHEN $5::text IS NULL THEN device_type_manual ELSE $5 <> 'auto' END,
             wan_interface = CASE WHEN $6::text IS NULL THEN wan_interface ELSE NULLIF(trim($6), '') END,
-            wan_interface_manual = CASE WHEN $6::text IS NULL THEN wan_interface_manual ELSE trim($6) <> '' END
+            wan_interface_manual = CASE WHEN $6::text IS NULL THEN wan_interface_manual ELSE trim($6) <> '' END,
+            parent_id = CASE WHEN $7::bigint IS NULL OR $7 = -1 THEN parent_id WHEN $7 = 0 THEN NULL ELSE $7 END,
+            parent_manual = CASE WHEN $7::bigint IS NULL THEN parent_manual ELSE $7 <> -1 END
           WHERE id = $1
           RETURNING {DEVICE_COLUMNS}"
     );
@@ -309,6 +331,7 @@ pub async fn update(
         .bind(req.monitored)
         .bind(&req.device_type)
         .bind(&req.wan_interface)
+        .bind(req.parent_id)
         .fetch_optional(&st.db)
         .await?
         .ok_or(ApiError::NotFound)?;

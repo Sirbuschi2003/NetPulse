@@ -68,6 +68,9 @@ pub struct Notification {
     /// Betroffenes Gerät (für Vorlagen, Wartungsfenster und Abhängigkeiten)
     #[serde(default)]
     pub device_id: Option<i64>,
+    /// Betroffener Dienst-Check (für Wartungsfenster)
+    #[serde(default)]
+    pub check_id: Option<i64>,
     /// Platzhalter für Vorlagen ({{geraet}}, {{ip}}, {{regel}}, {{wert}} …)
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
@@ -75,7 +78,7 @@ pub struct Notification {
 
 impl Notification {
     pub fn new(title: impl Into<String>, message: impl Into<String>, severity: Severity, link: Option<String>) -> Self {
-        Self { title: title.into(), message: message.into(), severity, link, device_id: None, vars: BTreeMap::new() }
+        Self { title: title.into(), message: message.into(), severity, link, device_id: None, check_id: None, vars: BTreeMap::new() }
     }
 
     pub fn device(mut self, device_id: i64) -> Self {

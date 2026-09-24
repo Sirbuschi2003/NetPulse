@@ -751,7 +751,7 @@ const AUDIT_LABEL = {
   credential_add: 'Zugangsdaten angelegt', credential_update: 'Zugangsdaten geändert', credential_delete: 'Zugangsdaten gelöscht',
   channel_add: 'Kanal angelegt', channel_update: 'Kanal geändert', channel_delete: 'Kanal gelöscht',
   discovery_schedule: 'Such-Zeitplan geändert', live_settings: 'Echtzeit-Abfrage geändert',
-  smtp_update: 'E-Mail-Server geändert', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
+  smtp_update: 'E-Mail-Server geändert', maintenance_add: 'Wartung angelegt', maintenance_update: 'Wartung geändert', maintenance_delete: 'Wartung gelöscht', check_add: 'Dienst angelegt', check_update: 'Dienst geändert', check_delete: 'Dienst gelöscht', totp_enabled: '2FA eingeschaltet', totp_disabled: '2FA ausgeschaltet', totp_reset: '2FA zurückgesetzt', push_subscribe: 'Push-Gerät angemeldet',
   rule_add: 'Regel angelegt', rule_update: 'Regel geändert', rule_delete: 'Regel gelöscht',
 };
 
@@ -980,4 +980,87 @@ async function viewAccount() {
       ev.target.reset();
     }, 'Passwort geändert');
   });
+}
+
+// ---------------------------------------------------------------------------
+// Wartungsfenster
+// ---------------------------------------------------------------------------
+
+const WEEKDAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+
+function describeWindow(w) {
+  if (w.kind === 'once') return `${fmtTime(w.starts_at)} bis ${fmtTime(w.ends_at)}`;
+  const days = w.days.length === 7 ? 'täglich' : w.days.map((d) => WEEKDAYS[d - 1]).join(', ');
+  return `${days} ${w.time_from}–${w.time_to} Uhr`;
+}
+
+async function viewMaintenance() {
+  const [data, devices, checks] = await Promise.all([api('/maintenance'), api('/devices'), api('/checks')]);
+  const nameOf = (list, id, label) => { const x = list.find((i) => i.id === id); return x ? label(x) : `#${id}`; };
+  const targets = (w) => (!w.device_ids.length && !w.check_ids.length ? 'alle Geräte und Dienste'
+    : [...w.device_ids.map((id) => nameOf(devices, id, deviceLabel)), ...w.check_ids.map((id) => nameOf(checks, id, (c) => c.name))].join(', '));
+  view().innerHTML = `
+    <div class="notice info">${icon('clock')}<span>Während eines Wartungsfensters werden keine Alarme verschickt (Überwachung und Verlauf laufen weiter).
+      Praktisch für nächtliche Updates, geplante Neustarts oder Umbauten.</span></div>
+    <div class="card"><header><h2>${icon('calendar-time')}Wartungsfenster</h2>${isAdmin() ? `<button type="button" id="mw-add">${icon('plus')}Hinzufügen</button>` : ''}</header>
+      ${data.windows.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Wann</th><th>Betrifft</th><th>Status</th><th></th></tr></thead>
+      <tbody>${data.windows.map((w) => `<tr><td>${esc(w.name)}</td><td class="small">${esc(describeWindow(w))}</td><td class="small">${esc(targets(w))}</td>
+        <td>${!w.enabled ? '<span class="badge plain">aus</span>' : w.active ? '<span class="badge warn">aktiv</span>' : '<span class="badge plain">geplant</span>'}</td>
+        <td class="actions">${isAdmin() ? `<button class="ghost sm" data-edit="${w.id}" type="button">${icon('edit', 'i-sm')}</button>
+          <button class="ghost sm" data-del="${w.id}" type="button">${icon('trash', 'i-sm')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
+      : empty('Keine Wartungsfenster.', 'calendar-time')}</div>`;
+  $('#mw-add')?.addEventListener('click', () => windowDialog(null));
+  $$('[data-edit]').forEach((b) => b.addEventListener('click', () => windowDialog(data.windows.find((w) => w.id === Number(b.dataset.edit)))));
+  $$('[data-del]').forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Wartungsfenster löschen?')) return;
+    attempt(async () => { await api(`/maintenance/${b.dataset.del}`, { method: 'DELETE' }); await viewMaintenance(); }, 'Gelöscht');
+  }));
+
+  function windowDialog(w) {
+    const localInput = (iso) => { if (!iso) return ''; const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+    const now = new Date();
+    const m = w || { kind: 'weekly', days: [1, 2, 3, 4, 5, 6, 7], time_from: '03:00', time_to: '04:00', device_ids: [], check_ids: [], enabled: true,
+      starts_at: now.toISOString(), ends_at: new Date(now.getTime() + 3600000).toISOString() };
+    const pick = (name, list, chosen, label) => `<div class="pick-list">${list.map((x) => `<label class="inline"><input type="checkbox" name="${name}" value="${x.id}"${chosen.includes(x.id) ? ' checked' : ''}>
+      <span class="ellipsis">${esc(label(x))}</span></label>`).join('') || '<span class="muted small">keine</span>'}</div>`;
+    const dlg = openModal(w ? 'Wartungsfenster bearbeiten' : 'Wartungsfenster anlegen', `<form class="form" id="mw-form">
+      <label>Name<input name="name" required maxlength="100" value="${esc(m.name || '')}" placeholder="z. B. Nächtliche Updates"></label>
+      <div class="seg"><label class="inline"><input type="radio" name="kind" value="weekly"${m.kind === 'weekly' ? ' checked' : ''}> wöchentlich</label>
+        <label class="inline"><input type="radio" name="kind" value="once"${m.kind === 'once' ? ' checked' : ''}> einmalig</label></div>
+      <div data-kind="weekly" class="form"><div class="checks">${WEEKDAYS.map((d, i) => `<label class="inline"><input type="checkbox" name="day" value="${i + 1}"${m.days.includes(i + 1) ? ' checked' : ''}> ${d}</label>`).join('')}</div>
+        <div class="form-row"><label>von<input name="time_from" type="time" value="${esc(m.time_from || '03:00')}"></label>
+          <label>bis<input name="time_to" type="time" value="${esc(m.time_to || '04:00')}"></label></div>
+        <p class="hint">Über Mitternacht möglich, z. B. 23:00 bis 02:00.</p></div>
+      <div data-kind="once" class="form-row"><label>Beginn<input name="starts_at" type="datetime-local" value="${localInput(m.starts_at)}"></label>
+        <label>Ende<input name="ends_at" type="datetime-local" value="${localInput(m.ends_at)}"></label></div>
+      <h3 class="sub">Betrifft (nichts gewählt = alles)</h3>
+      <input type="search" id="mw-filter" placeholder="Geräte/Dienste filtern …">
+      <div class="form-row"><div><div class="muted small">Geräte</div>${pick('dev', devices, m.device_ids, (d) => `${deviceLabel(d)} – ${d.ip}`)}</div>
+        <div><div class="muted small">Dienste</div>${pick('chk', checks, m.check_ids, (c) => c.name)}</div></div>
+      <label class="inline"><input type="checkbox" name="enabled"${m.enabled ? ' checked' : ''}> Aktiv</label>
+      <div class="actions"><button type="submit">${icon('check')}Speichern</button></div></form>`);
+    dlg.classList.add('wide');
+    const form = $('#mw-form', dlg);
+    const sync = () => { const k = form.elements.kind.value; $$('[data-kind]', form).forEach((el) => { el.hidden = el.dataset.kind !== k; }); };
+    $$('input[name="kind"]', form).forEach((r) => r.addEventListener('change', sync));
+    sync();
+    $('#mw-filter', dlg).addEventListener('input', (ev) => {
+      const q = ev.target.value.toLowerCase();
+      $$('.pick-list label', dlg).forEach((l) => { l.hidden = q && !l.textContent.toLowerCase().includes(q); });
+    });
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const e = form.elements;
+      const ids = (n) => $$(`input[name="${n}"]:checked`, form).map((c) => Number(c.value));
+      const body = { name: e.name.value.trim(), kind: e.kind.value, days: ids('day'), time_from: e.time_from.value, time_to: e.time_to.value,
+        starts_at: e.starts_at.value ? new Date(e.starts_at.value).toISOString() : null, ends_at: e.ends_at.value ? new Date(e.ends_at.value).toISOString() : null,
+        device_ids: ids('dev'), check_ids: ids('chk'), enabled: e.enabled.checked };
+      attempt(async () => {
+        if (w) await api(`/maintenance/${w.id}`, { method: 'PATCH', body });
+        else await api('/maintenance', { method: 'POST', body });
+        dlg.close();
+        await viewMaintenance();
+      }, 'Wartungsfenster gespeichert');
+    });
+  }
 }

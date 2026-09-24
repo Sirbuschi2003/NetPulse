@@ -1000,6 +1000,7 @@ const ROUTES = {
   users: { title: 'Benutzer', view: () => viewUsers(), admin: true },
   audit: { title: 'Audit-Log', view: () => viewAudit(), admin: true },
   logs: { title: 'System-Log', view: () => viewLogs(), admin: true },
+  maintenance: { title: 'Wartung', view: () => viewMaintenance(), admin: true },
   account: { title: 'Mein Konto', view: () => viewAccount() },
 };
 

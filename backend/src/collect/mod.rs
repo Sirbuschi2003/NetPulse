@@ -563,6 +563,24 @@ async fn apply_unifi(state: &AppState, unifi: &Value) -> Result<()> {
         .execute(&state.db)
         .await?;
     }
+    // Abhängigkeiten: Client hängt an Access Point/Switch (nur, wenn nicht von Hand gesetzt)
+    let (child_macs, parent_macs): (Vec<String>, Vec<String>) = unifi["clients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| Some((c["mac"].as_str()?.to_lowercase(), c["uplink_mac"].as_str()?.to_lowercase())))
+        .unzip();
+    if !child_macs.is_empty() {
+        sqlx::query(
+            "UPDATE devices d SET parent_id = p.id
+               FROM UNNEST($1::text[], $2::text[]) AS u(mac, up) JOIN devices p ON lower(p.mac) = u.up
+              WHERE lower(d.mac) = u.mac AND NOT d.parent_manual AND d.id <> p.id AND d.parent_id IS DISTINCT FROM p.id",
+        )
+        .bind(&child_macs)
+        .bind(&parent_macs)
+        .execute(&state.db)
+        .await?;
+    }
     // Client-Namen aus dem Controller für Geräte ohne eigenen Namen
     let (client_macs, client_names): (Vec<String>, Vec<String>) = unifi["clients"]
         .as_array()

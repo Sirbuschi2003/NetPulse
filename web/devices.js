@@ -130,6 +130,7 @@ async function viewDevice(id) {
   let tab = 'overview';
   let data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
   const credentials = isAdmin() ? await api('/credentials').catch(() => []) : [];
+  const allDevices = isAdmin() ? await api('/devices').catch(() => []) : [];
 
   const tabs = () => {
     const inv = data.inventory || {};
@@ -716,7 +717,11 @@ async function viewDevice(id) {
   function tabSettings() {
     const d = data.device;
     const assigned = new Set(data.credential_ids);
-    const kindLabel = { snmp_v2c: 'SNMP v2c', snmp_v3: 'SNMP v3', ssh_password: 'SSH (Passwort)', ssh_key: 'SSH (Schlüssel)', http: 'HTTP / Shelly' };
+    const kindLabel = { snmp_v2c: 'SNMP v2c', snmp_v3: 'SNMP v3', ssh_password: 'SSH (Passwort)', ssh_key: 'SSH (Schlüssel)', http: 'HTTP / Shelly', unifi: 'UniFi' };
+    const parent = allDevices.find((x) => x.id === d.parent_id);
+    const parentOptions = allDevices.filter((x) => x.id !== d.id)
+      .sort((a, b) => (['router', 'firewall', 'switch', 'access_point'].includes(b.device_type) - ['router', 'firewall', 'switch', 'access_point'].includes(a.device_type)) || deviceLabel(a).localeCompare(deviceLabel(b), 'de'))
+      .map((x) => `<option value="${x.id}"${d.parent_manual && x.id === d.parent_id ? ' selected' : ''}>${esc(deviceLabel(x))} – ${esc(x.ip)}</option>`).join('');
     return `<div class="grid">
       <section class="span-1"><h3>Allgemein</h3><form class="form" id="dev-form">
         <label>Anzeigename<input name="name" maxlength="200" value="${esc(d.name || '')}" placeholder="${esc(d.hostname || d.ip)}"></label>
@@ -726,6 +731,10 @@ async function viewDevice(id) {
         </select></label>
         <label>Notizen<textarea name="notes" maxlength="5000">${esc(d.notes || '')}</textarea></label>
         <label class="inline"><input type="checkbox" name="monitored"${d.monitored ? ' checked' : ''}> Erreichbarkeit überwachen</label>
+        <label>Hängt ab von (Switch, Access Point, Router)<select name="parent_id">
+          <option value="-1"${!d.parent_manual ? ' selected' : ''}>Automatisch${!d.parent_manual && parent ? ` (${esc(deviceLabel(parent))})` : ' (aus UniFi)'}</option>
+          <option value="0"${d.parent_manual && !d.parent_id ? ' selected' : ''}>– keins –</option>${parentOptions}</select></label>
+        <p class="hint">Fällt das übergeordnete Gerät aus, kommt nur dafür ein Alarm – nicht zusätzlich für jedes Gerät dahinter.</p>
         <div class="actions"><button type="submit">${icon('check')}Speichern</button></div>
       </form></section>
       <section class="span-1"><h3>Zugangsdaten für tiefe Abfragen</h3>
@@ -752,7 +761,7 @@ async function viewDevice(id) {
       attempt(async () => {
         data.device = await api(`/devices/${id}`, {
           method: 'PATCH',
-          body: { name: f.get('name'), notes: f.get('notes'), monitored: f.get('monitored') === 'on', device_type: f.get('device_type') },
+          body: { name: f.get('name'), notes: f.get('notes'), monitored: f.get('monitored') === 'on', device_type: f.get('device_type'), parent_id: Number(f.get('parent_id')) },
         });
         render();
       }, 'Gespeichert');

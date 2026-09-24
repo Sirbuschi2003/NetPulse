@@ -347,3 +347,135 @@ pub async fn system(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<
         "monitor_interval_s": st.config.monitor_interval.as_secs(),
     })))
 }
+
+// ---------------------------------------------------------------------------
+// Wartungsfenster
+// ---------------------------------------------------------------------------
+
+pub async fn list_maintenance(State(st): State<AppState>, _user: CurrentUser) -> ApiResult<Json<Value>> {
+    let windows: Vec<crate::maintenance::Window> =
+        sqlx::query_as(&format!("{} ORDER BY enabled DESC, name", crate::maintenance::SELECT)).fetch_all(&st.db).await?;
+    let now = Utc::now();
+    let tz = scanner::schedule::timezone();
+    let list: Vec<Value> = windows
+        .iter()
+        .map(|w| {
+            let mut v = json!(w);
+            v["active"] = json!(w.active_at(now, tz));
+            v
+        })
+        .collect();
+    // Für die Oberfläche: was ist gerade in Wartung?
+    let active: Vec<&crate::maintenance::Window> = windows.iter().filter(|w| w.active_at(now, tz)).collect();
+    let all = active.iter().any(|w| w.device_ids.is_empty() && w.check_ids.is_empty());
+    let device_ids: Vec<i64> = active.iter().flat_map(|w| w.device_ids.clone()).collect();
+    let check_ids: Vec<i64> = active.iter().flat_map(|w| w.check_ids.clone()).collect();
+    Ok(Json(json!({ "windows": list, "active": { "all": all, "device_ids": device_ids, "check_ids": check_ids } })))
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MaintenanceInput {
+    name: String,
+    kind: String,
+    starts_at: Option<DateTime<Utc>>,
+    ends_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    days: Vec<i32>,
+    time_from: Option<String>,
+    time_to: Option<String>,
+    #[serde(default)]
+    device_ids: Vec<i64>,
+    #[serde(default)]
+    check_ids: Vec<i64>,
+    enabled: Option<bool>,
+}
+
+fn validate_maintenance(m: &MaintenanceInput) -> ApiResult<()> {
+    if m.name.trim().is_empty() || m.name.len() > 100 {
+        return Err(ApiError::BadRequest("Bitte einen Namen angeben".into()));
+    }
+    match m.kind.as_str() {
+        "once" => match (m.starts_at, m.ends_at) {
+            (Some(a), Some(b)) if a < b => Ok(()),
+            _ => Err(ApiError::BadRequest("Beginn und Ende angeben (Ende nach Beginn)".into())),
+        },
+        "weekly" => {
+            let ok = |t: &Option<String>| t.as_deref().is_some_and(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").is_ok());
+            if m.days.is_empty() || m.days.iter().any(|d| !(1..=7).contains(d)) {
+                return Err(ApiError::BadRequest("Mindestens einen Wochentag wählen".into()));
+            }
+            if !ok(&m.time_from) || !ok(&m.time_to) {
+                return Err(ApiError::BadRequest("Uhrzeiten im Format 03:00 angeben".into()));
+            }
+            Ok(())
+        }
+        _ => Err(ApiError::BadRequest("Unbekannte Art".into())),
+    }
+}
+
+pub async fn create_maintenance(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Json(m): Json<MaintenanceInput>,
+) -> ApiResult<Json<Value>> {
+    validate_maintenance(&m)?;
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO maintenance_windows (name, kind, starts_at, ends_at, days, time_from, time_to, device_ids, check_ids, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+    )
+    .bind(m.name.trim())
+    .bind(&m.kind)
+    .bind(m.starts_at)
+    .bind(m.ends_at)
+    .bind(&m.days)
+    .bind(&m.time_from)
+    .bind(&m.time_to)
+    .bind(&m.device_ids)
+    .bind(&m.check_ids)
+    .bind(m.enabled.unwrap_or(true))
+    .fetch_one(&st.db)
+    .await?;
+    audit::by(&st.db, &user, "maintenance_add", json!({ "id": id, "window": m })).await;
+    Ok(Json(json!({ "id": id })))
+}
+
+pub async fn update_maintenance(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(id): Path<i64>,
+    Json(m): Json<MaintenanceInput>,
+) -> ApiResult<Json<Value>> {
+    validate_maintenance(&m)?;
+    let done = sqlx::query(
+        "UPDATE maintenance_windows SET name = $2, kind = $3, starts_at = $4, ends_at = $5, days = $6, time_from = $7,
+                time_to = $8, device_ids = $9, check_ids = $10, enabled = COALESCE($11, enabled) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(m.name.trim())
+    .bind(&m.kind)
+    .bind(m.starts_at)
+    .bind(m.ends_at)
+    .bind(&m.days)
+    .bind(&m.time_from)
+    .bind(&m.time_to)
+    .bind(&m.device_ids)
+    .bind(&m.check_ids)
+    .bind(m.enabled)
+    .execute(&st.db)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    audit::by(&st.db, &user, "maintenance_update", json!({ "id": id })).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn delete_maintenance(State(st): State<AppState>, AdminUser(user): AdminUser, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let (name,): (String,) = sqlx::query_as("DELETE FROM maintenance_windows WHERE id = $1 RETURNING name")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    audit::by(&st.db, &user, "maintenance_delete", json!({ "id": id, "name": name })).await;
+    Ok(Json(json!({ "ok": true })))
+}

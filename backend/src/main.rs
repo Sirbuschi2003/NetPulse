@@ -21,6 +21,7 @@ mod collect;
 mod config;
 mod error;
 mod logbuf;
+mod maintenance;
 mod mib;
 mod oui;
 mod perf;

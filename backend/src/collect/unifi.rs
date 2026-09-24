@@ -164,8 +164,13 @@ async fn integration(http: &Client, base: &str, key: &str) -> Result<Value> {
                 "radios": d["interfaces"]["radios"],
             }));
         }
+        let mac_of: std::collections::HashMap<&str, String> = site_devices
+            .iter()
+            .filter_map(|d| Some((d["id"].as_str()?, d["macAddress"].as_str()?.to_lowercase())))
+            .collect();
         for c in site_clients {
             clients.push(json!({
+                "uplink_mac": c["uplinkDeviceId"].as_str().and_then(|id| mac_of.get(id)),
                 "name": c["name"],
                 "mac": c["macAddress"].as_str().map(str::to_lowercase),
                 "ip": c["ipAddress"],
@@ -265,6 +270,7 @@ async fn classic(http: &Client, base: &str, user: &str, password: &str) -> Resul
                 "mac": c["mac"].as_str().map(str::to_lowercase),
                 "ip": c["ip"],
                 "type": if c["is_wired"].as_bool() == Some(true) { "wired" } else { "wireless" },
+                "uplink_mac": c["ap_mac"].as_str().or(c["sw_mac"].as_str()).map(str::to_lowercase),
             }));
         }
         out_sites.push(json!({ "name": label, "devices": list.len(), "clients": sta.len() }));
