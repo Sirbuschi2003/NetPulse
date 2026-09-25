@@ -550,3 +550,47 @@ pub async fn end_user_sessions(State(st): State<AppState>, AdminUser(admin): Adm
     audit::by(&st.db, &admin, "sessions_revoked", json!({ "user_id": id, "count": done.rows_affected() })).await;
     Ok(Json(json!({ "ended": done.rows_affected() })))
 }
+
+// ---------------------------------------------------------------------------
+// Sicherheit: 2FA-Pflicht
+// ---------------------------------------------------------------------------
+
+pub async fn get_security(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    let (without,): (i64,) = sqlx::query_as("SELECT count(*) FROM users WHERE NOT totp_enabled").fetch_one(&st.db).await?;
+    Ok(Json(json!({
+        "require_totp": crate::auth::totp_required(&st).await,
+        "forced_by_env": st.config.require_totp,
+        "users_without_totp": without,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SecuritySettings {
+    require_totp: bool,
+}
+
+pub async fn set_security(
+    State(st): State<AppState>,
+    AdminUser(user): AdminUser,
+    Json(req): Json<SecuritySettings>,
+) -> ApiResult<Json<Value>> {
+    if st.config.require_totp && !req.require_totp {
+        return Err(ApiError::BadRequest("Die 2FA-Pflicht ist über REQUIRE_TOTP fest eingeschaltet".into()));
+    }
+    if req.require_totp {
+        // Nicht aussperren: Wer die Pflicht einschaltet, muss 2FA selbst schon nutzen
+        let (own,): (bool,) = sqlx::query_as("SELECT totp_enabled FROM users WHERE id = $1").bind(user.id).fetch_one(&st.db).await?;
+        if !own {
+            return Err(ApiError::BadRequest("Bitte zuerst für dein eigenes Konto 2FA einrichten (Mein Konto)".into()));
+        }
+    }
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('security', jsonb_build_object('require_totp', $1::bool))
+         ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value",
+    )
+    .bind(req.require_totp)
+    .execute(&st.db)
+    .await?;
+    audit::by(&st.db, &user, "security_settings", json!({ "require_totp": req.require_totp })).await;
+    get_security(State(st), AdminUser(user)).await
+}

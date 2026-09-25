@@ -91,7 +91,8 @@ pub async fn login(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
 
     let max_age = i64::from(st.config.session_hours) * 3600;
     let cookie = auth::session_cookie(&token, max_age, st.config.cookie_secure);
-    let user = CurrentUser { id, username: name, role };
+    let totp_setup_required = !totp_enabled && auth::totp_required(&st).await;
+    let user = CurrentUser { id, username: name, role, totp_setup_required };
     Ok(([(header::SET_COOKIE, cookie)], Json(user)).into_response())
 }
 
@@ -157,7 +158,7 @@ pub async fn change_password(
 
 pub async fn totp_status(State(st): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
     let (enabled,): (bool,) = sqlx::query_as("SELECT totp_enabled FROM users WHERE id = $1").bind(user.id).fetch_one(&st.db).await?;
-    Ok(Json(json!({ "enabled": enabled })))
+    Ok(Json(json!({ "enabled": enabled, "required": auth::totp_required(&st).await })))
 }
 
 /// Neues Geheimnis erzeugen (noch nicht aktiv) und als QR-Code liefern
@@ -202,6 +203,9 @@ pub struct TotpDisable {
 }
 
 pub async fn totp_disable(State(st): State<AppState>, user: CurrentUser, headers: HeaderMap, Json(req): Json<TotpDisable>) -> ApiResult<Json<Value>> {
+    if auth::totp_required(&st).await {
+        return Err(ApiError::BadRequest("Zwei-Faktor-Anmeldung ist für alle Benutzer Pflicht und kann nicht ausgeschaltet werden".into()));
+    }
     let ip = auth::client_ip(&headers).unwrap_or_else(|| "unbekannt".into());
     if !st.login_limiter.try_attempt(&user.username, &ip) {
         return Err(ApiError::TooManyRequests);

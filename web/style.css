@@ -657,3 +657,6 @@ select[size]:not([size="0"]):not([size="1"]) { padding: 4px; }
 .st-live.off { color: var(--warn); }
 .st-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up); margin-right: 6px; animation: blink 1.4s infinite; }
 .st-live.off .st-live-dot { background: var(--warn); animation: none; }
+
+/* 2FA-Pflicht noch nicht erfüllt: Navigation ausblenden, nur „Mein Konto“ */
+body.totp-lock #nav, body.totp-lock #global-search { display: none !important; }

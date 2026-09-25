@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.7#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.8#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -35,6 +35,10 @@ async function api(path, { method = 'GET', body } = {}) {
   if (res.status === 401 && path !== '/login') {
     showLogin();
     throw new Error('Sitzung abgelaufen – bitte neu anmelden');
+  }
+  if (res.status === 403 && data && data.totp_setup_required && state.user && !state.user.totp_setup_required) {
+    // 2FA wurde inzwischen zur Pflicht gemacht: App neu starten, dann greift die Sperre
+    location.reload();
   }
   if (!res.ok) throw new Error((data && data.error) || `Fehler ${res.status}`);
   return data;
@@ -1300,7 +1304,7 @@ async function route() {
   $('#sidebar').classList.remove('open');
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
   const [name, arg] = path.split('/');
-  const key = ROUTES[name] ? name : 'dashboard';
+  const key = state.user.totp_setup_required ? 'account' : ROUTES[name] ? name : 'dashboard';
   const r = ROUTES[key];
   $('#page-title').textContent = r.title;
   document.title = `${r.title} · NetPulse`;
@@ -1397,6 +1401,13 @@ function startApp() {
   $('#app').hidden = false;
   document.body.classList.toggle('is-admin', isAdmin());
   $('#user-name').textContent = state.user.username;
+  // 2FA ist Pflicht, fehlt aber noch: nur „Mein Konto“ zeigen, bis sie eingerichtet ist
+  document.body.classList.toggle('totp-lock', !!state.user.totp_setup_required);
+  if (state.user.totp_setup_required) {
+    if (location.hash !== '#/account') location.hash = '#/account';
+    else route();
+    return;
+  }
   refreshShell();
   connectStream();
   registerServiceWorker();

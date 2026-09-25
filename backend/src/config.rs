@@ -35,6 +35,8 @@ pub struct Config {
     /// Erlaubte Trap-Communities (leer = alle)
     pub trap_communities: Vec<String>,
     pub syslog_retention_days: i32,
+    /// Zwei-Faktor-Anmeldung für alle Benutzer erzwingen (fest, in der Oberfläche nicht abschaltbar)
+    pub require_totp: bool,
 }
 
 impl Config {
@@ -67,6 +69,7 @@ impl Config {
                 .map(|s| s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
                 .unwrap_or_default(),
             syslog_retention_days: number("RETENTION_SYSLOG_DAYS", 30)?,
+            require_totp: matches!(optional("REQUIRE_TOTP").as_deref(), Some("true" | "1" | "yes")),
         })
     }
 }

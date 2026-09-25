@@ -220,6 +220,7 @@ sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (
 | `RETENTION_AUDIT_DAYS` | 365 | Aufbewahrung des Audit-Logs |
 | `INVENTORY_INTERVAL_MIN` | 5 | Abstand der tiefen Abfragen (SNMP/SSH) |
 | `PUBLIC_URL` | = `SITE_ADDRESS` | Adresse für Links in Benachrichtigungen |
+| `REQUIRE_TOTP` | false | `true` = alle Benutzer müssen Zwei-Faktor-Anmeldung nutzen (fest); sonst unter **Benutzer** schaltbar |
 | `SECRET_KEY` | – (wird erzeugt) | Tresor-Schlüssel (64 Hex-Zeichen), falls nicht aus `/data/secret.key` |
 | `DB_PORT` / `APP_PORT` | 5433 / 18080 | Interne Ports auf dem Host (nur 127.0.0.1) |
 
@@ -235,6 +236,14 @@ sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (
 - Strenge Content-Security-Policy, HSTS und keine externen Skripte oder CDNs.
 - Gescannt werden nur Netze, die ein Admin ausdrücklich freigegeben hat (höchstens /16 je Eintrag).
 - Das Audit-Log protokolliert alle Anmeldungen und Änderungen.
+- Zwei-Faktor-Anmeldung (TOTP) kann für alle Benutzer vorgeschrieben werden (**Benutzer → Zwei-Faktor-Pflicht** oder `REQUIRE_TOTP=true`).
+  Wer sie noch nicht hat, kommt nach der Anmeldung nur an die Einrichtung.
+- Auch der Datenbank-Container läuft ohne unnötige Linux-Rechte (`cap_drop: ALL`, nur das für den Start Nötige).
+- Die Images werden aus diesem Repository gebaut, mit Sigstore signiert und mit Herkunftsangabe (Provenance) und SBOM versehen;
+  alle GitHub-Actions sind auf feste Commits gepinnt. Signatur prüfen:
+  ```bash
+  cosign verify ghcr.io/sirbuschi2003/netpulse:latest     --certificate-identity-regexp 'https://github.com/Sirbuschi2003/NetPulse/'     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
 
 ## Backup
 

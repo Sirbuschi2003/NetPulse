@@ -180,6 +180,27 @@ pub struct CurrentUser {
     pub id: i64,
     pub username: String,
     pub role: String,
+    /// 2FA ist Pflicht, aber noch nicht eingerichtet → nur „Mein Konto“ ist erreichbar
+    pub totp_setup_required: bool,
+}
+
+/// Ist die Zwei-Faktor-Anmeldung für alle Pflicht? (Umgebungsvariable oder Einstellung)
+pub async fn totp_required(state: &AppState) -> bool {
+    if state.config.require_totp {
+        return true;
+    }
+    sqlx::query_scalar::<_, bool>("SELECT COALESCE((value->>'require_totp')::bool, false) FROM settings WHERE key = 'security'")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// Solange 2FA fehlt, sind nur diese Pfade erlaubt: Konto ansehen, 2FA einrichten, Passwort ändern, abmelden
+fn allowed_without_totp(path: &str) -> bool {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    matches!(path, "/me" | "/me/totp" | "/me/totp/setup" | "/me/totp/enable" | "/me/password" | "/me/sessions" | "/logout")
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -188,13 +209,19 @@ impl FromRequestParts<AppState> for CurrentUser {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let token = session_token(&parts.headers).ok_or(ApiError::Unauthorized)?;
         let user = sqlx::query_as::<_, CurrentUser>(
-            "SELECT u.id, u.username, u.role
+            "SELECT u.id, u.username, u.role,
+                    (NOT u.totp_enabled AND ($2 OR COALESCE((SELECT (value->>'require_totp')::bool FROM settings WHERE key = 'security'), false)))
+                        AS totp_setup_required
                FROM sessions s JOIN users u ON u.id = s.user_id
               WHERE s.token_hash = $1 AND s.expires_at > now()",
         )
         .bind(token_hash(&token))
+        .bind(state.config.require_totp)
         .fetch_optional(&state.db)
         .await?;
+        if user.as_ref().is_some_and(|u| u.totp_setup_required) && !allowed_without_totp(parts.uri.path()) {
+            return Err(ApiError::TotpSetupRequired);
+        }
         if user.is_some() {
             // „Zuletzt aktiv“ höchstens einmal pro Minute schreiben
             let db = state.db.clone();

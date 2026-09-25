@@ -723,7 +723,7 @@ async function viewChannels() {
 
 async function viewUsers() {
   const render = async () => {
-    const users = await api('/users');
+    const [users, sec] = await Promise.all([api('/users'), api('/settings/security')]);
     view().innerHTML = `
       <div class="grid">
         <section class="card span-2 table-wrap"><table>
@@ -735,6 +735,14 @@ async function viewUsers() {
             <td class="actions">${u.id === state.user.id ? '<span class="muted small">(du)</span>' : `<button class="ghost sm" data-kick="${u.id}" data-name="${esc(u.username)}" type="button" title="Überall abmelden">${icon('logout', 'i-sm')}</button>
               <button class="ghost sm" data-del="${u.id}" data-name="${esc(u.username)}" type="button">${icon('trash', 'i-sm')}</button>`}</td></tr>`).join('')}
           </tbody></table></section>
+        <section class="card span-1"><header><h2>${icon('shield-lock')}Zwei-Faktor-Pflicht</h2></header>
+          <form class="form" id="sec-form">
+            <label class="inline"><input type="checkbox" name="require"${sec.require_totp ? ' checked' : ''}${sec.forced_by_env ? ' disabled' : ''}>
+              Alle Benutzer müssen 2FA nutzen</label>
+            <p class="hint">${sec.forced_by_env ? 'Fest eingeschaltet über <code>REQUIRE_TOTP=true</code>.'
+              : 'Wer 2FA noch nicht hat, muss sie nach der nächsten Anmeldung zuerst einrichten und kommt vorher an nichts anderes heran.'}
+              ${sec.users_without_totp ? `<br>Noch ohne 2FA: <b>${esc(sec.users_without_totp)}</b> Benutzer.` : ''}</p>
+          </form></section>
         <section class="card span-1"><header><h2>${icon('plus')}Benutzer anlegen</h2></header>
           <form class="form" id="user-form">
             <label>Benutzername<input name="username" required minlength="3" maxlength="32" autocomplete="off"></label>
@@ -743,6 +751,15 @@ async function viewUsers() {
             <button type="submit">Anlegen</button>
           </form></section>
       </div>`;
+    $('#sec-form input[name="require"]').addEventListener('change', (ev) => {
+      const on = ev.target.checked;
+      if (on && !confirm('2FA für alle Benutzer vorschreiben? Benutzer ohne 2FA müssen sie bei der nächsten Aktion zuerst einrichten.')) {
+        ev.target.checked = false;
+        return;
+      }
+      attempt(async () => { await api('/settings/security', { method: 'PUT', body: { require_totp: on } }); await render(); },
+        on ? '2FA ist jetzt Pflicht' : '2FA-Pflicht aufgehoben').then((ok) => { if (!ok) ev.target.checked = !on; });
+    });
     $('#user-form').addEventListener('submit', (ev) => {
       ev.preventDefault();
       const f = new FormData(ev.target);
@@ -865,7 +882,12 @@ async function viewLogs() {
 // ----- Zwei-Faktor-Anmeldung -----
 async function renderTotp() {
   const box = $('#totp-box');
-  const { enabled } = await api('/me/totp');
+  const { enabled, required } = await api('/me/totp');
+  if (enabled && required) {
+    box.innerHTML = `<p><span class="badge st-up">aktiv</span> Bei der Anmeldung wird zusätzlich der Code aus der Authenticator-App abgefragt.</p>
+      <p class="muted small">Für alle Benutzer vorgeschrieben – kann nicht ausgeschaltet werden.</p>`;
+    return;
+  }
   if (enabled) {
     box.innerHTML = `<p><span class="badge st-up">aktiv</span> Bei der Anmeldung wird zusätzlich der Code aus der Authenticator-App abgefragt.</p>
       <form class="form" id="totp-off"><label>Zum Ausschalten: Passwort<input name="password" type="password" required autocomplete="current-password"></label>
@@ -890,8 +912,17 @@ async function renderTotp() {
       <button type="submit">${icon('check')}Aktivieren</button></form>`;
     $('#totp-on').addEventListener('submit', (ev) => {
       ev.preventDefault();
-      attempt(async () => { await api('/me/totp/enable', { method: 'POST', body: { code: ev.target.elements.code.value } }); await renderTotp(); },
-        'Zwei-Faktor-Anmeldung ist aktiv');
+      attempt(async () => {
+        await api('/me/totp/enable', { method: 'POST', body: { code: ev.target.elements.code.value } });
+        if (state.user.totp_setup_required) {
+          // Sperre aufheben: App mit vollem Zugriff neu starten
+          state.user = await api('/me');
+          startApp();
+          location.hash = '#/dashboard';
+          return;
+        }
+        await renderTotp();
+      }, 'Zwei-Faktor-Anmeldung ist aktiv');
     });
   }));
 }
@@ -1013,6 +1044,8 @@ async function renderPush() {
 
 async function viewAccount() {
   view().innerHTML = `
+    ${state.user.totp_setup_required ? `<div class="notice warn">${icon('shield-lock')}<span><b>Zwei-Faktor-Anmeldung ist Pflicht.</b>
+      Bitte jetzt unten einrichten – danach ist NetPulse wieder vollständig nutzbar.</span></div>` : ''}
     <div class="grid">
       <section class="card span-1"><header><h2>${icon('user')}Angemeldet als</h2></header>
         <dl class="details"><dt>Benutzer</dt><dd>${esc(state.user.username)}</dd>

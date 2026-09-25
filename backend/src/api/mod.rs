@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/scan/status", get(admin::scan_status))
         .route("/settings/discovery", get(admin::get_discovery).put(admin::set_discovery))
         .route("/settings/live", get(admin::get_live).put(admin::set_live))
+        .route("/settings/security", get(admin::get_security).put(admin::set_security))
         .route("/stream", get(stream::events))
         // Zugangsdaten
         .route("/credentials", get(credentials::list).post(credentials::create))

@@ -1,0 +1,15 @@
+# Hält die gepinnten GitHub-Actions und die Rust-Abhängigkeiten aktuell (Pull Requests, nichts automatisch)
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

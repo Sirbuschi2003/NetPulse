@@ -14,6 +14,8 @@ pub enum ApiError {
     Forbidden,
     NotFound,
     TooManyRequests,
+    /// 2FA ist Pflicht, aber für diesen Benutzer noch nicht eingerichtet
+    TotpSetupRequired,
     /// Interne Fehler werden geloggt, der Browser bekommt aber keine Details zu sehen.
     Internal(anyhow::Error),
 }
@@ -22,6 +24,13 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if matches!(self, ApiError::TotpSetupRequired) {
+            let body = json!({
+                "error": "Zwei-Faktor-Anmeldung ist Pflicht – bitte zuerst unter „Mein Konto“ einrichten",
+                "totp_setup_required": true,
+            });
+            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+        }
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "Nicht angemeldet".into()),
@@ -34,6 +43,7 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Zu viele Fehlversuche – bitte in einigen Minuten erneut versuchen".into(),
             ),
+            ApiError::TotpSetupRequired => unreachable!(),
             ApiError::Internal(e) => {
                 tracing::error!("{e:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Interner Fehler".into())

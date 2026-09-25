@@ -29,6 +29,9 @@ services:
       POSTGRES_DB: netpulse
     volumes:
       - db-data:/var/lib/postgresql/data
+    # Nur die Rechte, die Postgres zum Start braucht (Dateirechte setzen, Benutzer wechseln)
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DB_PORT:-5433} -U netpulse"]
       interval: 10s
@@ -67,6 +70,8 @@ services:
       INVENTORY_INTERVAL_MIN: ${INVENTORY_INTERVAL_MIN:-5}
       # Für Links in Benachrichtigungen (Standard: SITE_ADDRESS)
       PUBLIC_URL: ${PUBLIC_URL:-${SITE_ADDRESS:-}}
+      # true = alle Benutzer müssen 2FA nutzen (in der Oberfläche nicht abschaltbar); sonst unter Benutzer einstellbar
+      REQUIRE_TOTP: ${REQUIRE_TOTP:-false}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       # Enthält den Tresor-Schlüssel (secret.key) für gespeicherte Zugangsdaten – mitsichern!
