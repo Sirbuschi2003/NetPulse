@@ -690,3 +690,7 @@ body.totp-lock #nav, body.totp-lock #global-search { display: none !important; }
 .en-bar-cell { width: 30%; min-width: 80px; }
 .en-bar-cell .bar { display: block; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.notice.ok { background: var(--up-soft); }
+.notice.ok svg { color: var(--up); }
+.notice.warn { background: var(--warn-soft); }
+.notice.warn svg { color: var(--warn); }

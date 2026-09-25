@@ -2,6 +2,7 @@
 
 mod admin;
 mod alerts;
+mod backup;
 mod checks;
 mod credentials;
 mod dashboard;
@@ -98,6 +99,12 @@ pub fn router(state: AppState) -> Router {
         .route("/logs", get(admin::system_log))
         .route("/system", get(admin::system))
         .route("/remote-logs", get(admin::remote_logs))
+        // Sicherung
+        .route("/backup/export", post(backup::export))
+        .route("/backup/restore", post(backup::restore).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)))
+        .route("/backup/auto", get(backup::get_auto).put(backup::set_auto))
+        .route("/backup/auto/run", post(backup::run_auto))
+        .route("/backup/files/{name}", get(backup::get_file).delete(backup::delete_file))
         .route("/maintenance", get(admin::list_maintenance).post(admin::create_maintenance))
         .route("/maintenance/{id}", axum::routing::patch(admin::update_maintenance).delete(admin::delete_maintenance))
         .layer(middleware::from_fn(auth::csrf_guard));

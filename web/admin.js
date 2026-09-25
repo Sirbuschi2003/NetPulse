@@ -1093,6 +1093,138 @@ function describeWindow(w) {
   return `${days} ${w.time_from}–${w.time_to} Uhr`;
 }
 
+// ---------------------------------------------------------------------------
+// Sicherung & Wiederherstellung
+// ---------------------------------------------------------------------------
+
+/** Datei vom Server holen und im Browser speichern (POST/GET mit CSRF-Header) */
+async function downloadFile(path, body) {
+  const res = await fetch('/api' + path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', 'X-NetPulse-Csrf': '1' },
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    let msg = `Fehler ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* keine JSON-Antwort */ }
+    throw new Error(msg);
+  }
+  const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || 'netpulse.npbackup';
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return name;
+}
+
+const REPORT_LABEL = { networks: 'Netze', devices: 'Geräte', credentials: 'Zugangsdaten', channels: 'Benachrichtigungskanäle', checks: 'Dienste',
+  alert_rules: 'Alarm-Regeln', maintenance: 'Wartungsfenster', users: 'Benutzer', settings: 'Einstellungen', energy_days: 'Energie-Tageswerte' };
+
+async function viewBackup() {
+  view().innerHTML = `
+    <div class="grid">
+      <section class="card span-1"><header><h2>${icon('cloud-download')}Sicherung herunterladen</h2></header>
+        <form class="form" id="bk-export">
+          <p class="muted small">Enthält alles Eingestellte: Netze, Geräte mit Namen und Rollen, Zugangsdaten, Benachrichtigungen, Regeln, Dienste,
+            Wartungsfenster, Benutzer, Dashboards, Statusseite und Energie-Tageswerte. Messverläufe und Protokolle sind nicht enthalten.</p>
+          <label>Passwort für die Sicherung (mind. 12 Zeichen)<input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+          <label>Passwort wiederholen<input name="repeat" type="password" required minlength="12" autocomplete="new-password"></label>
+          <label>Dein Konto-Passwort zur Bestätigung<input name="account" type="password" required autocomplete="current-password"></label>
+          <button type="submit">${icon('cloud-download')}Herunterladen</button>
+          <p class="hint"><b>Passwort gut aufheben</b> – ohne es lässt sich die Sicherung nicht öffnen. Die Datei enthält alle Zugangsdaten (verschlüsselt).</p>
+        </form></section>
+      <section class="card span-1"><header><h2>${icon('refresh')}Sicherung einspielen</h2></header>
+        <form class="form" id="bk-restore">
+          <label>Sicherungsdatei (.npbackup)<input name="file" type="file" accept=".npbackup,application/json" required></label>
+          <label>Passwort der Sicherung<input name="password" type="password" required autocomplete="off"></label>
+          <label>Dein Konto-Passwort zur Bestätigung<input name="account" type="password" required autocomplete="current-password"></label>
+          <button type="submit">${icon('refresh')}Einspielen</button>
+          <p class="hint">Einträge werden über IP, Name bzw. Netz zugeordnet und aktualisiert oder neu angelegt. Es wird nichts gelöscht,
+            und der Messverlauf vorhandener Geräte bleibt erhalten. Benutzer aus der Sicherung bekommen ihr damaliges Passwort und ihre 2FA zurück.</p>
+          <div id="bk-report"></div>
+        </form></section>
+      <section class="card span-1"><header><h2>${icon('calendar-time')}Automatische Sicherung</h2></header><div id="bk-auto"><div class="empty">Lade …</div></div></section>
+      <section class="card span-3"><header><h2>${icon('database')}Gespeicherte Sicherungen</h2>
+        <button type="button" class="ghost sm" id="bk-now">${icon('player-play', 'i-sm')}Jetzt sichern</button></header><div id="bk-files"></div></section>
+    </div>`;
+
+  $('#bk-export').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = ev.target.elements;
+    if (e.password.value !== e.repeat.value) { toast('Die Passwörter stimmen nicht überein', true); return; }
+    const btn = ev.target.querySelector('button');
+    btn.disabled = true;
+    attempt(async () => {
+      const name = await downloadFile('/backup/export', { password: e.password.value, account_password: e.account.value });
+      ev.target.reset();
+      toast(`Sicherung „${name}“ heruntergeladen`);
+    }).finally(() => { btn.disabled = false; });
+  });
+
+  $('#bk-restore').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const e = ev.target.elements;
+    const f = e.file.files[0];
+    if (!f) return;
+    if (f.size > 60 * 1024 * 1024) { toast('Die Datei ist zu groß', true); return; }
+    if (!confirm('Sicherung jetzt einspielen? Vorhandene Einstellungen mit gleichem Namen werden überschrieben.')) return;
+    const btn = ev.target.querySelector('button');
+    btn.disabled = true;
+    attempt(async () => {
+      let file;
+      try { file = JSON.parse(await f.text()); } catch { throw new Error('Das ist keine NetPulse-Sicherung'); }
+      const r = await api('/backup/restore', { method: 'POST', body: { file, password: e.password.value, account_password: e.account.value } });
+      ev.target.reset();
+      $('#bk-report').innerHTML = `<div class="notice ok">${icon('circle-check')}<span><b>Wiederhergestellt</b> (Sicherung vom ${esc(fmtTime(r.created_at))}):
+        ${Object.entries(r.report).filter(([, n]) => n).map(([k, n]) => `${esc(n)} ${esc(REPORT_LABEL[k] || k)}`).join(', ') || 'nichts'}.</span></div>`;
+      toast('Sicherung eingespielt');
+    }).finally(() => { btn.disabled = false; });
+  });
+
+  const renderAuto = async () => {
+    const a = await api('/backup/auto');
+    $('#bk-auto').innerHTML = `<form class="form" id="bk-auto-form">
+        <label class="inline"><input type="checkbox" name="enabled"${a.enabled ? ' checked' : ''}> Jeden Tag automatisch sichern</label>
+        <div class="form-row"><label>Uhrzeit<select name="hour">${Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === a.hour ? ' selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('')}</select></label>
+          <label>Aufheben (Anzahl)<input name="keep" type="number" min="1" max="365" value="${esc(a.keep)}"></label></div>
+        <label>${a.has_password ? 'Neues Passwort (leer = beibehalten)' : 'Passwort für die Sicherungen (mind. 12 Zeichen)'}
+          <input name="password" type="password" minlength="12" autocomplete="new-password"${a.has_password ? '' : ' placeholder="wird zum Öffnen gebraucht"'}></label>
+        <button type="submit">${icon('check')}Speichern</button>
+        <p class="hint">Die Dateien liegen im Daten-Volume unter <code>${esc(a.directory)}</code>. Kopiere sie regelmäßig auf ein anderes Gerät
+          (z. B. per Hyper Backup) – eine Sicherung nur auf demselben NAS schützt nicht vor einem Plattenausfall.</p></form>`;
+    $('#bk-files').innerHTML = a.files.length ? `<div class="table-wrap"><table><thead><tr><th>Datei</th><th>Erstellt</th><th class="num">Größe</th><th></th></tr></thead><tbody>
+        ${a.files.map((f) => `<tr><td class="mono small">${esc(f.name)}</td><td>${esc(fmtTime(f.time))}</td><td class="num">${esc(fmtBytes(f.size))}</td>
+          <td class="actions"><button type="button" class="ghost sm" data-dl="${esc(f.name)}" title="Herunterladen">${icon('cloud-download', 'i-sm')}</button>
+          <button type="button" class="ghost sm" data-del="${esc(f.name)}" title="Löschen">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}
+        </tbody></table></div>` : `<p class="muted">Noch keine gespeicherten Sicherungen.</p>`;
+    $('#bk-auto-form').addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const e = ev.target.elements;
+      attempt(async () => {
+        await api('/backup/auto', { method: 'PUT', body: { enabled: e.enabled.checked, hour: Number(e.hour.value), keep: Number(e.keep.value), password: e.password.value || null } });
+        await renderAuto();
+      }, 'Gespeichert');
+    });
+    $$('[data-dl]', $('#bk-files')).forEach((b) => b.addEventListener('click', () => attempt(() => downloadFile(`/backup/files/${encodeURIComponent(b.dataset.dl)}`))));
+    $$('[data-del]', $('#bk-files')).forEach((b) => b.addEventListener('click', () => {
+      if (!confirm(`Sicherung „${b.dataset.del}“ löschen?`)) return;
+      attempt(async () => { await api(`/backup/files/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' }); await renderAuto(); }, 'Gelöscht');
+    }));
+  };
+  $('#bk-now').addEventListener('click', (ev) => {
+    ev.currentTarget.disabled = true;
+    const btn = ev.currentTarget;
+    attempt(async () => { const r = await api('/backup/auto/run', { method: 'POST' }); toast(`Gespeichert: ${r.file}`); await renderAuto(); })
+      .finally(() => { btn.disabled = false; });
+  });
+  await renderAuto();
+}
+
 async function viewMaintenance() {
   const [data, devices, checks] = await Promise.all([api('/maintenance'), api('/devices'), api('/checks')]);
   const nameOf = (list, id, label) => { const x = list.find((i) => i.id === id); return x ? label(x) : `#${id}`; };

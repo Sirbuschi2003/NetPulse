@@ -15,6 +15,7 @@ mod alerts;
 mod api;
 mod audit;
 mod auth;
+mod backup;
 mod checks;
 mod classify;
 mod collect;
@@ -122,6 +123,7 @@ async fn main() -> Result<()> {
     tokio::spawn(alerts::deliver::run(state.clone()));
     tokio::spawn(checks::run(state.clone()));
     tokio::spawn(energy::run(state.clone()));
+    tokio::spawn(backup::run(state.clone()));
     syslog::start(&state);
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));

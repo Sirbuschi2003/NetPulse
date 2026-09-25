@@ -247,9 +247,22 @@ sehen nur den verschlüsselten Inhalt. Alternativ ohne Zugriff von außen: VPN (
 
 ## Backup
 
+**In der Oberfläche (empfohlen):** Unter **Verwaltung → Sicherung**
+- eine verschlüsselte Sicherung herunterladen (eigenes Passwort, Argon2id + AES-256-GCM),
+- eine Sicherung einspielen – auch auf einer neuen Installation; Geräte werden über die IP zugeordnet,
+  nichts wird gelöscht und der Messverlauf vorhandener Geräte bleibt erhalten,
+- eine tägliche automatische Sicherung einschalten (Dateien unter `/data/backups` im Volume `app-data`;
+  bitte zusätzlich auf ein anderes Gerät kopieren).
+
+Enthalten sind alle Einstellungen, Geräte, Zugangsdaten, Benachrichtigungen, Regeln, Dienste, Wartungsfenster,
+Benutzer (inkl. 2FA), Dashboards, Statusseite und Energie-Tageswerte – keine Messverläufe und Protokolle.
+
+**Komplette Datenbank inkl. Messverlauf:**
+
 ```bash
 docker compose exec db pg_dump -U netpulse -p 5433 -h 127.0.0.1 netpulse | gzip > netpulse-backup.sql.gz
 ```
+Dazu gehört dann auch `/data/secret.key` aus dem Volume `app-data` – ohne ihn sind die gespeicherten Zugangsdaten nicht lesbar.
 
 ## Projektstruktur
 

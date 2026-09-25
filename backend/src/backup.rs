@@ -1,0 +1,766 @@
+//! Sicherung und Wiederherstellung der Konfiguration.
+//!
+//! Eine Sicherung enthält alles, was man eingestellt hat: Netze, Geräte (Namen, Typen, Rollen, Notizen …),
+//! Zugangsdaten, Benachrichtigungen, Alarm-Regeln, Dienste, Wartungsfenster, Benutzer, Dashboards,
+//! Einstellungen und die Energie-Tageswerte – aber keine Messverläufe und Protokolle.
+//!
+//! Die Datei ist mit einem eigenen Passwort verschlüsselt (Argon2id → AES-256-GCM, vorher gzip).
+//! Gespeicherte Geheimnisse stehen darin entschlüsselt, damit die Sicherung auch auf einer neuen
+//! Installation mit anderem Tresor-Schlüssel funktioniert – deshalb ist das Passwort Pflicht.
+//!
+//! Beim Einspielen werden Einträge über natürliche Schlüssel zugeordnet (Gerät → IP, Netz → CIDR,
+//! Benutzer → Name …) und aktualisiert oder neu angelegt. Nichts Vorhandenes wird gelöscht, und der
+//! Messverlauf bekannter Geräte bleibt erhalten.
+
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    path::PathBuf,
+    time::Duration,
+};
+
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
+use anyhow::{anyhow, bail, Context, Result};
+use argon2::password_hash::rand_core::{OsRng, RngCore};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use sqlx::{PgPool, Postgres, Transaction};
+
+use crate::AppState;
+
+pub const FORMAT: &str = "netpulse-backup";
+const VERSION: u32 = 1;
+/// Einstellungen, die mitgesichert werden (keine Laufzeit-Zustände wie „letzter Scan“)
+const SETTINGS: &[&str] = &["discovery_schedule", "smtp", "status_page", "security", "energy", "live_settings"];
+const KDF_M: u32 = 64 * 1024;
+const KDF_T: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// Verschlüsselung
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct Envelope {
+    pub format: String,
+    pub version: u32,
+    pub created_at: String,
+    kdf: String,
+    m: u32,
+    t: u32,
+    p: u32,
+    salt: String,
+    nonce: String,
+    data: String,
+}
+
+fn derive_key(password: &str, salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8; 32]> {
+    // Obergrenzen, damit eine manipulierte Datei den Server nicht lahmlegt
+    if m > 256 * 1024 || t > 10 || p > 4 {
+        bail!("Unbekannte Schlüssel-Parameter in der Sicherung");
+    }
+    let params = argon2::Params::new(m, t, p, Some(32)).map_err(|e| anyhow!("{e}"))?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon.hash_password_into(password.as_bytes(), salt, &mut key).map_err(|e| anyhow!("{e}"))?;
+    Ok(key)
+}
+
+pub fn encrypt(payload: &Value, password: &str) -> Result<Envelope> {
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&serde_json::to_vec(payload)?)?;
+    let plain = gz.finish()?;
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let key = derive_key(password, &salt, KDF_M, KDF_T, 1)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
+        .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
+        .map_err(|_| anyhow!("Verschlüsselung fehlgeschlagen"))?;
+    Ok(Envelope {
+        format: FORMAT.into(),
+        version: VERSION,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        kdf: "argon2id".into(),
+        m: KDF_M,
+        t: KDF_T,
+        p: 1,
+        salt: B64.encode(salt),
+        nonce: B64.encode(nonce),
+        data: B64.encode(cipher),
+    })
+}
+
+pub fn decrypt(env: &Envelope, password: &str) -> Result<Value> {
+    if env.format != FORMAT || env.kdf != "argon2id" {
+        bail!("Das ist keine NetPulse-Sicherung");
+    }
+    if env.version > VERSION {
+        bail!("Die Sicherung stammt von einer neueren NetPulse-Version – bitte zuerst NetPulse aktualisieren");
+    }
+    let salt = B64.decode(&env.salt).context("Sicherung beschädigt")?;
+    let nonce = B64.decode(&env.nonce).context("Sicherung beschädigt")?;
+    let data = B64.decode(&env.data).context("Sicherung beschädigt")?;
+    if nonce.len() != 12 {
+        bail!("Sicherung beschädigt");
+    }
+    let key = derive_key(password, &salt, env.m, env.t, env.p)?;
+    let plain = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
+        .decrypt(Nonce::from_slice(&nonce), data.as_slice())
+        .map_err(|_| anyhow!("Passwort falsch oder Datei beschädigt"))?;
+    // Entpacken mit Obergrenze (Schutz vor „Zip-Bomben“)
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(plain.as_slice()).take(512 * 1024 * 1024).read_to_end(&mut out)?;
+    let payload: Value = serde_json::from_slice(&out).context("Sicherung beschädigt")?;
+    if payload["format"] != FORMAT {
+        bail!("Das ist keine NetPulse-Sicherung");
+    }
+    Ok(payload)
+}
+
+// ---------------------------------------------------------------------------
+// Sichern
+// ---------------------------------------------------------------------------
+
+async fn rows(db: &PgPool, sql: &str) -> Result<Vec<Value>> {
+    let v: Value = sqlx::query_scalar(&format!("SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM ({sql}) t")).fetch_one(db).await?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
+/// Alles Einstellbare als JSON; Geheimnisse entschlüsselt
+pub async fn export(state: &AppState) -> Result<Value> {
+    let db = &state.db;
+    let vault = &state.vault;
+    let open = |sealed: &Value| -> Value {
+        sealed.as_str().and_then(|s| vault.open_value::<Value>(s).ok()).unwrap_or(Value::Null)
+    };
+
+    let mut credentials = rows(db, "SELECT id, name, kind, username, port, secret, auto FROM credentials").await?;
+    for c in &mut credentials {
+        c["secret"] = open(&c["secret"]);
+    }
+    let mut channels = rows(db, "SELECT id, name, kind, config, enabled FROM notification_channels").await?;
+    for c in &mut channels {
+        c["config"] = open(&c["config"]);
+    }
+    let mut users = rows(db, "SELECT id, username, password_hash, role, totp_secret, totp_enabled FROM users").await?;
+    for u in &mut users {
+        u["totp_secret"] = open(&u["totp_secret"]);
+    }
+    let mut settings = rows(db, &format!(
+        "SELECT key, value FROM settings WHERE key IN ({})",
+        SETTINGS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(", ")
+    ))
+    .await?;
+    for s in &mut settings {
+        if s["key"] == "smtp" {
+            s["value"] = json!({ "plain": open(&s["value"]["sealed"]) });
+        }
+    }
+
+    Ok(json!({
+        "format": FORMAT,
+        "version": VERSION,
+        "created_at": chrono::Utc::now(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "networks": rows(db, "SELECT cidr::text AS cidr, name, enabled FROM networks").await?,
+        "credentials": credentials,
+        "devices": rows(db, "SELECT id, host(ip) AS ip, mac, hostname, name, notes, monitored, device_type, device_type_manual,
+                                    wan_interface, wan_interface_manual, parent_id, parent_manual, energy_role, ssh_host_key, tls_pin,
+                                    vendor, model, os, reported_name, integration, first_seen, open_ports
+                               FROM devices").await?,
+        "device_credentials": rows(db, "SELECT device_id, credential_id FROM device_credentials").await?,
+        "channels": channels,
+        "checks": rows(db, "SELECT id, name, kind, target, config, interval_s, timeout_s, device_id, enabled FROM checks").await?,
+        "alert_rules": rows(db, "SELECT name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled,
+                                        repeat_min, check_id, pattern FROM alert_rules").await?,
+        "maintenance": rows(db, "SELECT name, kind, starts_at, ends_at, days, time_from, time_to, device_ids, check_ids, enabled
+                                   FROM maintenance_windows").await?,
+        "users": users,
+        "dashboards": rows(db, "SELECT user_id, layout FROM dashboards").await?,
+        "settings": settings,
+        "energy_daily": rows(db, "SELECT day, device_id, pos_wh, neg_wh, minutes FROM energy_daily").await?,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Einspielen
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Default, Debug)]
+pub struct RestoreReport {
+    pub networks: usize,
+    pub devices: usize,
+    pub credentials: usize,
+    pub channels: usize,
+    pub checks: usize,
+    pub alert_rules: usize,
+    pub maintenance: usize,
+    pub users: usize,
+    pub settings: usize,
+    pub energy_days: usize,
+}
+
+type Ids = HashMap<i64, i64>;
+
+fn list<'a>(p: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+    p[key].as_array().map(|a| a.iter()).into_iter().flatten()
+}
+
+fn map_id(ids: &Ids, v: &Value) -> Option<i64> {
+    v.as_i64().and_then(|id| ids.get(&id).copied())
+}
+
+fn map_ids(ids: &Ids, v: &Value) -> Vec<i64> {
+    v.as_array().map(|a| a.iter().filter_map(|x| map_id(ids, x)).collect()).unwrap_or_default()
+}
+
+/// Vorhandene ID über eine Suche finden, sonst None
+async fn find(tx: &mut Transaction<'_, Postgres>, sql: &str, binds: &[&str]) -> Result<Option<i64>> {
+    let mut q = sqlx::query_scalar::<_, i64>(sql);
+    for b in binds {
+        q = q.bind(*b);
+    }
+    Ok(q.fetch_optional(&mut **tx).await?)
+}
+
+pub async fn restore(state: &AppState, p: &Value) -> Result<RestoreReport> {
+    let vault = &state.vault;
+    let mut report = RestoreReport::default();
+    let mut tx = state.db.begin().await?;
+    let s = |v: &Value| v.as_str().map(str::to_string);
+
+    // Netze
+    for n in list(p, "networks") {
+        sqlx::query(
+            "INSERT INTO networks (cidr, name, enabled) VALUES ($1::cidr, $2, $3)
+             ON CONFLICT (cidr) DO UPDATE SET name = EXCLUDED.name, enabled = EXCLUDED.enabled",
+        )
+        .bind(s(&n["cidr"]))
+        .bind(s(&n["name"]))
+        .bind(n["enabled"].as_bool().unwrap_or(true))
+        .execute(&mut *tx)
+        .await?;
+        report.networks += 1;
+    }
+
+    // Zugangsdaten (Name + Art)
+    let mut cred_ids = Ids::new();
+    for c in list(p, "credentials") {
+        let (Some(old), Some(name), Some(kind)) = (c["id"].as_i64(), c["name"].as_str(), c["kind"].as_str()) else { continue };
+        if c["secret"].is_null() {
+            continue; // Geheimnis war nicht lesbar – lieber auslassen als leer anlegen
+        }
+        let sealed = vault.seal(&c["secret"])?;
+        let port = c["port"].as_i64().map(|v| v as i32);
+        let id = match find(&mut tx, "SELECT id FROM credentials WHERE name = $1 AND kind = $2 ORDER BY id LIMIT 1", &[name, kind]).await? {
+            Some(id) => {
+                sqlx::query("UPDATE credentials SET username = $2, port = $3, secret = $4, auto = $5 WHERE id = $1")
+                    .bind(id)
+                    .bind(s(&c["username"]))
+                    .bind(port)
+                    .bind(&sealed)
+                    .bind(c["auto"].as_bool().unwrap_or(false))
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+            None => {
+                sqlx::query_scalar(
+                    "INSERT INTO credentials (name, kind, username, port, secret, auto) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                )
+                .bind(name)
+                .bind(kind)
+                .bind(s(&c["username"]))
+                .bind(port)
+                .bind(&sealed)
+                .bind(c["auto"].as_bool().unwrap_or(false))
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
+        cred_ids.insert(old, id);
+        report.credentials += 1;
+    }
+
+    // Geräte (IP): Eingestelltes aus der Sicherung, Erkanntes nur ergänzen
+    let mut dev_ids = Ids::new();
+    for d in list(p, "devices") {
+        let Some(old) = d["id"].as_i64() else { continue };
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO devices (ip, mac, hostname, name, notes, monitored, device_type, device_type_manual, wan_interface,
+                                  wan_interface_manual, parent_manual, energy_role, ssh_host_key, tls_pin, vendor, model, os,
+                                  reported_name, integration, first_seen, open_ports)
+             SELECT r.ip::inet, r.mac, r.hostname, r.name, r.notes, COALESCE(r.monitored, true), r.device_type,
+                    COALESCE(r.device_type_manual, false), r.wan_interface, COALESCE(r.wan_interface_manual, false),
+                    COALESCE(r.parent_manual, false), r.energy_role, r.ssh_host_key, r.tls_pin, r.vendor, r.model, r.os,
+                    r.reported_name, r.integration, COALESCE(r.first_seen, now()), COALESCE(r.open_ports, '{}')
+               FROM jsonb_to_record($1) AS r(ip text, mac text, hostname text, name text, notes text, monitored bool,
+                    device_type text, device_type_manual bool, wan_interface text, wan_interface_manual bool, parent_manual bool,
+                    energy_role text, ssh_host_key text, tls_pin text, vendor text, model text, os text, reported_name text,
+                    integration text, first_seen timestamptz, open_ports int[])
+             ON CONFLICT (ip) DO UPDATE SET
+                    name = EXCLUDED.name, notes = EXCLUDED.notes, monitored = EXCLUDED.monitored,
+                    device_type = CASE WHEN EXCLUDED.device_type_manual THEN EXCLUDED.device_type ELSE devices.device_type END,
+                    device_type_manual = EXCLUDED.device_type_manual,
+                    wan_interface = CASE WHEN EXCLUDED.wan_interface_manual THEN EXCLUDED.wan_interface ELSE devices.wan_interface END,
+                    wan_interface_manual = EXCLUDED.wan_interface_manual,
+                    parent_manual = EXCLUDED.parent_manual, energy_role = EXCLUDED.energy_role,
+                    ssh_host_key = COALESCE(devices.ssh_host_key, EXCLUDED.ssh_host_key),
+                    tls_pin = COALESCE(devices.tls_pin, EXCLUDED.tls_pin),
+                    mac = COALESCE(devices.mac, EXCLUDED.mac), hostname = COALESCE(devices.hostname, EXCLUDED.hostname),
+                    vendor = COALESCE(devices.vendor, EXCLUDED.vendor), model = COALESCE(devices.model, EXCLUDED.model),
+                    first_seen = LEAST(devices.first_seen, EXCLUDED.first_seen)
+             RETURNING id",
+        )
+        .bind(d)
+        .fetch_one(&mut *tx)
+        .await?;
+        dev_ids.insert(old, id);
+        report.devices += 1;
+    }
+    // „Hängt ab von“ erst, wenn alle Geräte da sind
+    for d in list(p, "devices") {
+        if let (Some(id), Some(parent)) = (map_id(&dev_ids, &d["id"]), map_id(&dev_ids, &d["parent_id"])) {
+            sqlx::query("UPDATE devices SET parent_id = $2 WHERE id = $1").bind(id).bind(parent).execute(&mut *tx).await?;
+        }
+    }
+    for dc in list(p, "device_credentials") {
+        if let (Some(dev), Some(cred)) = (map_id(&dev_ids, &dc["device_id"]), map_id(&cred_ids, &dc["credential_id"])) {
+            sqlx::query("INSERT INTO device_credentials (device_id, credential_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(dev)
+                .bind(cred)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    // Benachrichtigungskanäle (Name)
+    let mut chan_ids = Ids::new();
+    for c in list(p, "channels") {
+        let (Some(old), Some(name), Some(kind)) = (c["id"].as_i64(), c["name"].as_str(), c["kind"].as_str()) else { continue };
+        if c["config"].is_null() {
+            continue;
+        }
+        let sealed = vault.seal(&c["config"])?;
+        let enabled = c["enabled"].as_bool().unwrap_or(true);
+        let id = match find(&mut tx, "SELECT id FROM notification_channels WHERE name = $1 ORDER BY id LIMIT 1", &[name]).await? {
+            Some(id) => {
+                sqlx::query("UPDATE notification_channels SET kind = $2, config = $3, enabled = $4 WHERE id = $1")
+                    .bind(id)
+                    .bind(kind)
+                    .bind(&sealed)
+                    .bind(enabled)
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+            None => {
+                sqlx::query_scalar("INSERT INTO notification_channels (name, kind, config, enabled) VALUES ($1, $2, $3, $4) RETURNING id")
+                    .bind(name)
+                    .bind(kind)
+                    .bind(&sealed)
+                    .bind(enabled)
+                    .fetch_one(&mut *tx)
+                    .await?
+            }
+        };
+        chan_ids.insert(old, id);
+        report.channels += 1;
+    }
+
+    // Dienste (Name + Art + Ziel)
+    let mut check_ids = Ids::new();
+    for c in list(p, "checks") {
+        let (Some(old), Some(name), Some(kind), Some(target)) =
+            (c["id"].as_i64(), c["name"].as_str(), c["kind"].as_str(), c["target"].as_str())
+        else {
+            continue;
+        };
+        let device = map_id(&dev_ids, &c["device_id"]);
+        let interval = c["interval_s"].as_i64().unwrap_or(60) as i32;
+        let timeout = c["timeout_s"].as_i64().unwrap_or(10) as i32;
+        let enabled = c["enabled"].as_bool().unwrap_or(true);
+        let existing =
+            find(&mut tx, "SELECT id FROM checks WHERE name = $1 AND kind = $2 AND target = $3 ORDER BY id LIMIT 1", &[name, kind, target])
+                .await?;
+        let id = match existing {
+            Some(id) => {
+                sqlx::query("UPDATE checks SET config = $2, interval_s = $3, timeout_s = $4, device_id = $5, enabled = $6 WHERE id = $1")
+                    .bind(id)
+                    .bind(&c["config"])
+                    .bind(interval)
+                    .bind(timeout)
+                    .bind(device)
+                    .bind(enabled)
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+            None => {
+                sqlx::query_scalar(
+                    "INSERT INTO checks (name, kind, target, config, interval_s, timeout_s, device_id, enabled)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                )
+                .bind(name)
+                .bind(kind)
+                .bind(target)
+                .bind(&c["config"])
+                .bind(interval)
+                .bind(timeout)
+                .bind(device)
+                .bind(enabled)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
+        check_ids.insert(old, id);
+        report.checks += 1;
+    }
+
+    // Alarm-Regeln (Name + Art)
+    for r in list(p, "alert_rules") {
+        let (Some(name), Some(kind)) = (r["name"].as_str(), r["kind"].as_str()) else { continue };
+        // Regel für ein bestimmtes Gerät/einen Dienst, das es nicht mehr gibt → auslassen statt „für alle“
+        let device = map_id(&dev_ids, &r["device_id"]);
+        let check = map_id(&check_ids, &r["check_id"]);
+        if (!r["device_id"].is_null() && device.is_none()) || (!r["check_id"].is_null() && check.is_none()) {
+            continue;
+        }
+        let existing = find(&mut tx, "SELECT id FROM alert_rules WHERE name = $1 AND kind = $2 ORDER BY id LIMIT 1", &[name, kind]).await?;
+        sqlx::query(
+            "INSERT INTO alert_rules (id, name, kind, device_id, threshold, duration_min, channel_ids, notify_recovery, enabled,
+                                      repeat_min, check_id, pattern)
+             VALUES (COALESCE($1, nextval(pg_get_serial_sequence('alert_rules', 'id'))), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT (id) DO UPDATE SET device_id = EXCLUDED.device_id, threshold = EXCLUDED.threshold,
+                    duration_min = EXCLUDED.duration_min, channel_ids = EXCLUDED.channel_ids, notify_recovery = EXCLUDED.notify_recovery,
+                    enabled = EXCLUDED.enabled, repeat_min = EXCLUDED.repeat_min, check_id = EXCLUDED.check_id, pattern = EXCLUDED.pattern",
+        )
+        .bind(existing)
+        .bind(name)
+        .bind(kind)
+        .bind(device)
+        .bind(r["threshold"].as_f64().map(|v| v as f32))
+        .bind(r["duration_min"].as_i64().map(|v| v as i32))
+        .bind(map_ids(&chan_ids, &r["channel_ids"]))
+        .bind(r["notify_recovery"].as_bool().unwrap_or(true))
+        .bind(r["enabled"].as_bool().unwrap_or(true))
+        .bind(r["repeat_min"].as_i64().map(|v| v as i32))
+        .bind(check)
+        .bind(s(&r["pattern"]))
+        .execute(&mut *tx)
+        .await?;
+        report.alert_rules += 1;
+    }
+
+    // Wartungsfenster (Name)
+    for m in list(p, "maintenance") {
+        let Some(name) = m["name"].as_str() else { continue };
+        let mut row = m.clone();
+        row["device_ids"] = json!(map_ids(&dev_ids, &m["device_ids"]));
+        row["check_ids"] = json!(map_ids(&check_ids, &m["check_ids"]));
+        let existing = find(&mut tx, "SELECT id FROM maintenance_windows WHERE name = $1 ORDER BY id LIMIT 1", &[name]).await?;
+        if let Some(id) = existing {
+            sqlx::query("DELETE FROM maintenance_windows WHERE id = $1").bind(id).execute(&mut *tx).await?;
+        }
+        sqlx::query(
+            "INSERT INTO maintenance_windows (name, kind, starts_at, ends_at, days, time_from, time_to, device_ids, check_ids, enabled)
+             SELECT r.name, r.kind, r.starts_at, r.ends_at, r.days, r.time_from, r.time_to, COALESCE(r.device_ids, '{}'),
+                    COALESCE(r.check_ids, '{}'), COALESCE(r.enabled, true)
+               FROM jsonb_to_record($1) AS r(name text, kind text, starts_at timestamptz, ends_at timestamptz, days int[],
+                    time_from text, time_to text, device_ids bigint[], check_ids bigint[], enabled bool)",
+        )
+        .bind(&row)
+        .execute(&mut *tx)
+        .await?;
+        report.maintenance += 1;
+    }
+
+    // Benutzer (Name)
+    let mut user_ids = Ids::new();
+    for u in list(p, "users") {
+        let (Some(old), Some(name), Some(hash), Some(role)) =
+            (u["id"].as_i64(), u["username"].as_str(), u["password_hash"].as_str(), u["role"].as_str())
+        else {
+            continue;
+        };
+        let totp: Option<String> = match u["totp_secret"].as_str() {
+            Some(secret) => Some(vault.seal(&secret)?),
+            None => None,
+        };
+        let totp_enabled = u["totp_enabled"].as_bool().unwrap_or(false) && totp.is_some();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (username, password_hash, role, totp_secret, totp_enabled) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = EXCLUDED.role,
+                    totp_secret = EXCLUDED.totp_secret, totp_enabled = EXCLUDED.totp_enabled, totp_last_step = NULL
+             RETURNING id",
+        )
+        .bind(name)
+        .bind(hash)
+        .bind(role)
+        .bind(totp)
+        .bind(totp_enabled)
+        .fetch_one(&mut *tx)
+        .await?;
+        user_ids.insert(old, id);
+        report.users += 1;
+    }
+
+    // Dashboards: Geräte-Verweise in den Kacheln umschreiben
+    for d in list(p, "dashboards") {
+        let Some(user) = map_id(&user_ids, &d["user_id"]) else { continue };
+        let mut layout = d["layout"].clone();
+        if let Some(widgets) = layout.as_array_mut() {
+            for w in widgets {
+                remap_widget(w, &dev_ids);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO dashboards (user_id, layout) VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET layout = EXCLUDED.layout, updated_at = now()",
+        )
+        .bind(user)
+        .bind(&layout)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Einstellungen
+    for st in list(p, "settings") {
+        let Some(key) = st["key"].as_str().filter(|k| SETTINGS.contains(k)) else { continue };
+        let mut value = st["value"].clone();
+        match key {
+            "smtp" => {
+                let plain: Map<String, Value> = value["plain"].as_object().cloned().unwrap_or_default();
+                value = json!({ "sealed": vault.seal(&plain)? });
+            }
+            "status_page" => {
+                if let Some(items) = value["items"].as_array_mut() {
+                    items.retain_mut(|i| {
+                        let ids = if i["kind"] == "check" { &check_ids } else { &dev_ids };
+                        match map_id(ids, &i["id"]) {
+                            Some(new) => {
+                                i["id"] = json!(new);
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                }
+            }
+            "energy" => value["main_id"] = json!(map_id(&dev_ids, &value["main_id"])),
+            _ => {}
+        }
+        sqlx::query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+            .bind(key)
+            .bind(&value)
+            .execute(&mut *tx)
+            .await?;
+        report.settings += 1;
+    }
+
+    // Energie-Tageswerte: vollständigere Tage gewinnen
+    let (mut days, mut devs, mut pos, mut neg, mut minutes) = (vec![], vec![], vec![], vec![], vec![]);
+    for e in list(p, "energy_daily") {
+        let (Some(day), Some(dev)) = (e["day"].as_str().and_then(|d| d.parse::<chrono::NaiveDate>().ok()), map_id(&dev_ids, &e["device_id"])) else {
+            continue;
+        };
+        days.push(day);
+        devs.push(dev);
+        pos.push(e["pos_wh"].as_f64().unwrap_or(0.0));
+        neg.push(e["neg_wh"].as_f64().unwrap_or(0.0));
+        minutes.push(e["minutes"].as_i64().unwrap_or(0) as i32);
+    }
+    report.energy_days = days.len();
+    sqlx::query(
+        "INSERT INTO energy_daily (day, device_id, pos_wh, neg_wh, minutes)
+         SELECT * FROM UNNEST($1::date[], $2::bigint[], $3::float8[], $4::float8[], $5::int[])
+         ON CONFLICT (day, device_id) DO UPDATE SET pos_wh = EXCLUDED.pos_wh, neg_wh = EXCLUDED.neg_wh, minutes = EXCLUDED.minutes
+          WHERE EXCLUDED.minutes > energy_daily.minutes",
+    )
+    .bind(&days)
+    .bind(&devs)
+    .bind(&pos)
+    .bind(&neg)
+    .bind(&minutes)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(report)
+}
+
+/// Geräte-IDs in einer Dashboard-Kachel auf die neuen IDs umschreiben
+fn remap_widget(w: &mut Value, ids: &Ids) {
+    for key in ["device_id", "main_id"] {
+        if !w[key].is_null() {
+            w[key] = json!(map_id(ids, &w[key]));
+        }
+    }
+    if w["include"].is_array() {
+        w["include"] = json!(map_ids(ids, &w["include"]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Automatische Sicherung
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AutoSettings {
+    pub enabled: bool,
+    /// Uhrzeit (Stunde, Ortszeit)
+    pub hour: u32,
+    /// Wie viele Sicherungen behalten
+    pub keep: u32,
+    /// Passwort für die Dateien – im Tresor verschlüsselt, nie an den Browser
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_sealed: Option<String>,
+}
+
+impl Default for AutoSettings {
+    fn default() -> Self {
+        Self { enabled: false, hour: 2, keep: 14, password_sealed: None }
+    }
+}
+
+pub async fn load_auto(db: &PgPool) -> AutoSettings {
+    sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'backup_auto'")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+pub async fn save_auto(db: &PgPool, s: &AutoSettings) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('backup_auto', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+        .bind(serde_json::to_value(s).unwrap_or_default())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub fn dir(state: &AppState) -> PathBuf {
+    PathBuf::from(&state.config.data_dir).join("backups")
+}
+
+/// Gültiger Dateiname einer automatischen Sicherung (Schutz vor Pfad-Tricks beim Herunterladen)
+pub fn valid_name(name: &str) -> bool {
+    name.starts_with("netpulse-")
+        && name.ends_with(".npbackup")
+        && name.len() < 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && !name.contains("..")
+}
+
+/// Sicherung erstellen und im Datenverzeichnis ablegen; alte Dateien aufräumen
+pub async fn write_auto(state: &AppState, password: &str, keep: u32) -> Result<String> {
+    let payload = export(state).await?;
+    let password = password.to_string();
+    let env = tokio::task::spawn_blocking(move || encrypt(&payload, &password)).await??;
+    let dir = dir(state);
+    tokio::fs::create_dir_all(&dir).await.with_context(|| format!("{} nicht anlegbar", dir.display()))?;
+    let now = chrono::Utc::now().with_timezone(&crate::scanner::schedule::timezone());
+    let name = format!("netpulse-{}.npbackup", now.format("%Y-%m-%d-%H%M%S"));
+    let path = dir.join(&name);
+    tokio::fs::write(&path, serde_json::to_vec(&env)?).await?;
+    // Nur für den App-Benutzer lesbar
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    // Älteste löschen
+    let mut files: Vec<String> = list_files(state).await.into_iter().map(|f| f.0).collect();
+    files.sort();
+    while files.len() > keep.max(1) as usize {
+        let old = files.remove(0);
+        let _ = tokio::fs::remove_file(dir.join(old)).await;
+    }
+    Ok(name)
+}
+
+/// (Name, Größe in Byte, geändert) aller abgelegten Sicherungen, neueste zuerst
+pub async fn list_files(state: &AppState) -> Vec<(String, u64, Option<chrono::DateTime<chrono::Utc>>)> {
+    let mut out = vec![];
+    if let Ok(mut rd) = tokio::fs::read_dir(dir(state)).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !valid_name(&name) {
+                continue;
+            }
+            let meta = entry.metadata().await.ok();
+            out.push((
+                name,
+                meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                meta.and_then(|m| m.modified().ok()).map(chrono::DateTime::<chrono::Utc>::from),
+            ));
+        }
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out
+}
+
+/// Hintergrund-Aufgabe: einmal täglich zur eingestellten Stunde sichern
+pub async fn run(state: AppState) {
+    let mut last_day = None;
+    loop {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        let cfg = load_auto(&state.db).await;
+        if !cfg.enabled {
+            continue;
+        }
+        let now = chrono::Utc::now().with_timezone(&crate::scanner::schedule::timezone());
+        use chrono::Timelike;
+        if now.hour() != cfg.hour || last_day == Some(now.date_naive()) {
+            continue;
+        }
+        last_day = Some(now.date_naive());
+        let Some(password) = cfg.password_sealed.as_deref().and_then(|s| state.vault.open_value::<String>(s).ok()) else {
+            tracing::warn!("Automatische Sicherung: Passwort nicht lesbar – bitte unter System neu setzen");
+            continue;
+        };
+        match write_auto(&state, &password, cfg.keep).await {
+            Ok(name) => tracing::info!("Automatische Sicherung erstellt: {name}"),
+            Err(e) => tracing::warn!("Automatische Sicherung fehlgeschlagen: {e:#}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verschluesseln_und_entschluesseln() {
+        let payload = json!({ "format": FORMAT, "devices": [{ "ip": "10.0.0.1" }] });
+        let env = encrypt(&payload, "ein-langes-passwort").unwrap();
+        assert_eq!(decrypt(&env, "ein-langes-passwort").unwrap(), payload);
+        assert!(decrypt(&env, "falsches-passwort").is_err());
+    }
+
+    #[test]
+    fn dateinamen() {
+        assert!(valid_name("netpulse-2026-09-25-020000.npbackup"));
+        assert!(!valid_name("../secret.key"));
+        assert!(!valid_name("netpulse-../../x.npbackup"));
+        assert!(!valid_name("netpulse-x/y.npbackup"));
+    }
+
+    #[test]
+    fn dashboard_ids() {
+        let ids = Ids::from([(4, 40), (2, 20)]);
+        let mut w = json!({ "type": "power", "include": [4, 9], "main_id": 4 });
+        remap_widget(&mut w, &ids);
+        assert_eq!(w, json!({ "type": "power", "include": [40], "main_id": 40 }));
+        let mut w = json!({ "type": "device", "device_id": 2 });
+        remap_widget(&mut w, &ids);
+        assert_eq!(w["device_id"], 20);
+    }
+}
