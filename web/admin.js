@@ -759,6 +759,7 @@ async function viewUsers() {
             <td>${u.totp_enabled ? `<span class="badge st-up">aktiv</span>${u.id !== state.user.id ? ` <button class="ghost sm" data-totp="${u.id}" data-name="${esc(u.username)}" type="button" title="Zwei-Faktor zurücksetzen (z. B. Handy verloren)">${icon('refresh', 'i-sm')}</button>` : ''}` : '<span class="badge warn">aus</span>'}</td>
             <td class="small">${esc(fmtTime(u.created_at))}</td><td class="small">${esc(fmtTime(u.last_login))}</td>
             <td class="actions">${u.id === state.user.id ? '<span class="muted small">(du)</span>' : `<button class="ghost sm" data-kick="${u.id}" data-name="${esc(u.username)}" type="button" title="Überall abmelden">${icon('logout', 'i-sm')}</button>
+              <button class="ghost sm" data-pw="${u.id}" data-name="${esc(u.username)}" type="button" title="Neues Passwort setzen">${icon('key', 'i-sm')}</button>
               <button class="ghost sm" data-del="${u.id}" data-name="${esc(u.username)}" type="button">${icon('trash', 'i-sm')}</button>`}</td></tr>`).join('')}
           </tbody></table></section>
         <section class="card span-1"><header><h2>${icon('shield-lock')}Zwei-Faktor-Pflicht</h2></header>
@@ -801,6 +802,19 @@ async function viewUsers() {
     $$('[data-totp]').forEach((btn) => btn.addEventListener('click', () => {
       if (!confirm(`Zwei-Faktor-Anmeldung von „${btn.dataset.name}“ zurücksetzen? Die Anmeldung geht danach nur mit Passwort, bis 2FA neu eingerichtet ist.`)) return;
       attempt(async () => { await api(`/users/${btn.dataset.totp}/totp`, { method: 'DELETE' }); await render(); }, 'Zwei-Faktor-Anmeldung zurückgesetzt');
+    }));
+    $$('[data-pw]').forEach((btn) => btn.addEventListener('click', () => {
+      const dlg = openModal(`Neues Passwort für „${btn.dataset.name}“`, `<form class="form" id="pw-reset-form">
+          <label>Neues Passwort (mind. 12 Zeichen)<input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+          <label>Wiederholen<input name="repeat" type="password" required minlength="12" autocomplete="new-password"></label>
+          <p class="hint">Der Benutzer wird überall abgemeldet und sollte das Passwort danach unter „Mein Konto“ selbst ändern.</p>
+          <div class="actions"><button type="submit">${icon('check')}Setzen</button></div></form>`);
+      $('#pw-reset-form', dlg).addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const e = ev.target.elements;
+        if (e.password.value !== e.repeat.value) { toast('Die Passwörter stimmen nicht überein', true); return; }
+        attempt(async () => { await api(`/users/${btn.dataset.pw}/password`, { method: 'PUT', body: { password: e.password.value } }); dlg.close(); }, 'Passwort gesetzt');
+      });
     }));
     $$('[data-del]').forEach((btn) => btn.addEventListener('click', () => {
       if (!confirm(`Benutzer „${btn.dataset.name}“ löschen?`)) return;

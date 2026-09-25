@@ -98,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/users", get(admin::list_users).post(admin::add_user))
         .route("/users/{id}", delete(admin::delete_user))
         .route("/users/{id}/totp", delete(admin::reset_totp))
+        .route("/users/{id}/password", axum::routing::put(admin::reset_user_password))
         .route("/users/{id}/sessions", delete(admin::end_user_sessions))
         .route("/audit", get(admin::audit_log))
         .route("/logs", get(admin::system_log))

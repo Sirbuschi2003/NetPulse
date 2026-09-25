@@ -85,6 +85,11 @@ async fn main() -> Result<()> {
         .run(&db)
         .await
         .context("Datenbank-Migration fehlgeschlagen")?;
+    // Notfall: „netpulse reset-password <benutzer> [--2fa]“ (nur mit Zugriff auf den Docker-Host möglich)
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("reset-password") {
+        return reset_password_cli(&db, &args[2..]).await;
+    }
     apply_retention(&db, &config).await?;
     bootstrap(&db, &config).await?;
 
@@ -209,6 +214,46 @@ async fn apply_retention(db: &PgPool, config: &Config) -> Result<()> {
 }
 
 /// Erster Start: Admin-Konto und ggf. Netze aus der Konfiguration anlegen.
+/// Neues zufälliges Passwort für einen Benutzer setzen, alle seine Sitzungen beenden; mit `--2fa` auch die
+/// Zwei-Faktor-Anmeldung zurücksetzen. Aufruf: `docker exec -it netpulse-app netpulse reset-password admin`
+async fn reset_password_cli(db: &PgPool, args: &[String]) -> Result<()> {
+    let Some(username) = args.iter().find(|a| !a.starts_with("--")) else {
+        let names: Vec<(String, String)> = sqlx::query_as("SELECT username, role FROM users ORDER BY username").fetch_all(db).await?;
+        eprintln!("Aufruf: netpulse reset-password <benutzer> [--2fa]");
+        eprintln!("Vorhandene Benutzer:");
+        for (name, role) in names {
+            eprintln!("  {name} ({role})");
+        }
+        return Ok(());
+    };
+    let reset_2fa = args.iter().any(|a| a == "--2fa");
+    let password = auth::random_token(12);
+    let hash = auth::hash_password(password.clone()).await?;
+    let updated = sqlx::query(
+        "UPDATE users SET password_hash = $2,
+                totp_enabled = CASE WHEN $3 THEN false ELSE totp_enabled END,
+                totp_secret = CASE WHEN $3 THEN NULL ELSE totp_secret END,
+                totp_last_step = CASE WHEN $3 THEN NULL ELSE totp_last_step END
+          WHERE username = lower($1)",
+    )
+    .bind(username)
+    .bind(&hash)
+    .bind(reset_2fa)
+    .execute(db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        anyhow::bail!("Benutzer „{username}“ gibt es nicht");
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = lower($1))").bind(username).execute(db).await?;
+    audit::log(db, None, Some(username), "password_reset_cli", serde_json::json!({ "reset_2fa": reset_2fa })).await;
+    eprintln!("Neues Passwort für „{username}“: {password}");
+    if reset_2fa {
+        eprintln!("Zwei-Faktor-Anmeldung wurde zurückgesetzt – bitte nach der Anmeldung neu einrichten.");
+    }
+    eprintln!("Bitte nach der Anmeldung unter „Mein Konto“ ein eigenes Passwort setzen.");
+    Ok(())
+}
+
 async fn bootstrap(db: &PgPool, config: &Config) -> Result<()> {
     let (users,): (i64,) = sqlx::query_as("SELECT count(*) FROM users").fetch_one(db).await?;
     if users == 0 {

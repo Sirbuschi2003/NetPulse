@@ -604,3 +604,31 @@ pub async fn set_security(
     audit::by(&st.db, &user, "security_settings", json!({ "require_totp": req.require_totp })).await;
     get_security(State(st), AdminUser(user)).await
 }
+
+/// Neues Passwort für einen anderen Benutzer (z. B. vergessen); alle seine Sitzungen werden beendet
+#[derive(Deserialize)]
+pub struct PasswordReset {
+    password: String,
+}
+
+pub async fn reset_user_password(
+    State(st): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<PasswordReset>,
+) -> ApiResult<Json<Value>> {
+    if id == admin.id {
+        return Err(ApiError::BadRequest("Das eigene Passwort bitte unter „Mein Konto“ ändern".into()));
+    }
+    crate::auth::validate_password(&req.password).map_err(ApiError::BadRequest)?;
+    let hash = crate::auth::hash_password(req.password).await?;
+    let target: Option<(String,)> = sqlx::query_as("UPDATE users SET password_hash = $2 WHERE id = $1 RETURNING username")
+        .bind(id)
+        .bind(hash)
+        .fetch_optional(&st.db)
+        .await?;
+    let (username,) = target.ok_or(ApiError::NotFound)?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(&st.db).await?;
+    audit::by(&st.db, &admin, "password_reset", json!({ "username": username })).await;
+    Ok(Json(json!({ "ok": true })))
+}
