@@ -60,9 +60,36 @@ async function addDeviceDialog() {
   });
 }
 
+/** UniFi-Clients je NetPulse-Gerät (leer, wenn kein Controller eingebunden ist) */
+async function loadUnifiClients() {
+  try {
+    const r = await api('/unifi/clients');
+    return { byDevice: new Map(r.clients.filter((c) => c.device_id).map((c) => [c.device_id, c])), all: r.clients, controllers: r.controllers };
+  } catch {
+    return { byDevice: new Map(), all: [], controllers: [] };
+  }
+}
+
+/** Kurzfassung der Verbindung laut UniFi: AP/Switch, Signal, Datenrate */
+function connSummary(c, compact = false) {
+  if (!c) return '';
+  const wired = c.type === 'wired';
+  const via = esc(c.uplink_name || (wired ? 'Kabel' : 'WLAN'));
+  const detail = wired ? (c.switch_port != null ? `Port ${esc(c.switch_port)}` : '')
+    : esc([c.ssid, c.band].filter(Boolean).join(' · '));
+  const rate = c.down_bps != null || c.up_bps != null ? `↓ ${esc(fmtBps(c.down_bps))} ↑ ${esc(fmtBps(c.up_bps))}` : '';
+  if (compact) {
+    return `<div class="conn">${icon(wired ? 'plug-connected' : 'wifi', 'i-sm')}<span class="ellipsis">${via}</span>
+      ${!wired && c.signal_dbm != null ? signalBadge(c.signal_dbm) : ''}${rate ? `<span class="conn-rate">${rate}</span>` : ''}</div>`;
+  }
+  return `<div class="conn-cell">${icon(wired ? 'plug-connected' : 'wifi', 'i-sm')}<div><div class="nowrap">${via}</div>
+    ${detail ? `<div class="muted small nowrap">${detail}</div>` : ''}
+    ${!wired && c.signal_dbm != null ? signalBadge(c.signal_dbm) : ''}${rate ? `<div class="small nowrap muted">${rate}</div>` : ''}</div></div>`;
+}
+
 async function viewDevices(_arg, params) {
-  let devices = await api('/devices');
-  const filters = { q: (params.get('q') || '').toLowerCase(), status: params.get('status') || '', type: params.get('type') || '' };
+  let [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]);
+  const filters = { q: (params.get('q') || '').toLowerCase(), status: params.get('status') || '', type: params.get('type') || '', conn: params.get('conn') || '' };
   let mode = readPref('np-dev-view', 'cards');
 
   const typesPresent = [...new Set(devices.map((d) => d.device_type))].sort((a, b) => typeInfo(a).label.localeCompare(typeInfo(b).label));
@@ -76,25 +103,64 @@ async function viewDevices(_arg, params) {
         </select>
         <select id="type-filter" aria-label="Gerätetyp"><option value="">Alle Typen</option>
           ${typesPresent.map((t) => `<option value="${esc(t)}">${esc(typeInfo(t).label)}</option>`).join('')}</select>
+        <span id="conn-filter-slot"></span>
       </div>
       <div class="actions"><span class="muted" id="count"></span>
         <button type="button" id="dev-add" class="admin-only">${icon('plus')}Gerät hinzufügen</button>
         <div class="seg"><button type="button" data-mode="cards" title="Karten">${icon('layout-grid')}</button>
         <button type="button" data-mode="table" title="Tabelle">${icon('list')}</button></div></div>
     </div>
+    <div id="unifi-hint"></div>
     <div id="dev-list"></div>`;
   $('#q').value = filters.q;
   $('#status-filter').value = filters.status;
   $('#type-filter').value = filters.type;
 
+  // Verbindungs-Filter (nur mit UniFi-Controller): WLAN, Kabel oder ein bestimmter Access Point/Switch
+  const renderConnFilter = () => {
+    if (!uc.controllers.length) { $('#conn-filter-slot').innerHTML = ''; return; }
+    const ups = [...new Map(uc.all.filter((c) => c.uplink_mac).map((c) => [c.uplink_mac, c.uplink_name || c.uplink_mac])).entries()]
+      .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'de'));
+    $('#conn-filter-slot').innerHTML = `<select id="conn-filter" aria-label="Verbindung"><option value="">Alle Verbindungen</option>
+        <option value="wireless">nur WLAN</option><option value="wired">nur Kabel</option>
+        ${ups.length ? `<optgroup label="Access Point / Switch">${ups.map(([mac, name]) => `<option value="ap:${esc(mac)}">${esc(name)}</option>`).join('')}</optgroup>` : ''}</select>`;
+    $('#conn-filter').value = filters.conn;
+    $('#conn-filter').addEventListener('change', (ev) => { filters.conn = ev.target.value; render(); });
+  };
+  // Clients, die der Controller kennt, NetPulse aber noch nicht
+  const renderHint = () => {
+    const known = new Set(devices.filter((d) => d.mac).map((d) => d.mac.toLowerCase()));
+    const missing = uc.all.filter((c) => c.mac && c.ip && !known.has(c.mac.toLowerCase()));
+    $('#unifi-hint').innerHTML = missing.length && isAdmin() ? `<div class="notice info">${icon('access-point')}<span>
+        Der UniFi-Controller kennt <b>${esc(missing.length)}</b> ${missing.length === 1 ? 'Client' : 'Clients'}, ${missing.length === 1 ? 'das' : 'die'} hier noch fehlen
+        (z. B. aus anderen Netzen/VLANs, die nicht gescannt werden).</span>
+        <button type="button" class="sm" id="unifi-import">${icon('plus', 'i-sm')}Als Geräte übernehmen</button></div>` : '';
+    $('#unifi-import')?.addEventListener('click', (ev) => {
+      ev.currentTarget.disabled = true;
+      attempt(async () => {
+        const r = await api('/unifi/clients/import', { method: 'POST' });
+        toast(`${r.added} ${r.added === 1 ? 'Gerät' : 'Geräte'} übernommen – sie werden ab jetzt überwacht`);
+        [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]);
+        renderHint();
+        render();
+      });
+    });
+  };
+
   const matches = (d) => {
     if (filters.type && d.device_type !== filters.type) return false;
+    if (filters.conn) {
+      const c = uc.byDevice.get(d.id);
+      if (!c) return false;
+      if (filters.conn.startsWith('ap:') ? c.uplink_mac !== filters.conn.slice(3) : c.type !== filters.conn) return false;
+    }
     if (filters.status === 'unmonitored' && d.monitored) return false;
     if (filters.status === 'new' && Date.now() - new Date(d.first_seen).getTime() > 86400000) return false;
     if (['up', 'down', 'unknown'].includes(filters.status) && (!d.monitored || d.status !== filters.status)) return false;
     if (!filters.q) return true;
+    const c = uc.byDevice.get(d.id) || {};
     const hay = [d.name, d.reported_name, d.hostname, d.ip, d.mac, d.vendor, d.os, d.model, d.notes, typeInfo(d.device_type).label,
-      ...(d.open_ports || []).map(portLabel)].join(' ').toLowerCase();
+      c.uplink_name, c.ssid, c.network, ...(d.open_ports || []).map(portLabel)].join(' ').toLowerCase();
     return hay.includes(filters.q);
   };
 
@@ -103,6 +169,7 @@ async function viewDevices(_arg, params) {
       <div class="top">${devIcon(d)}<div class="ellipsis"><div class="name">${esc(deviceLabel(d))}${inventoryWarn(d)}</div>
         <div class="sub mono">${esc(d.ip)}</div></div></div>
       <div class="sub">${esc([d.vendor, d.os || d.model].filter(Boolean).join(' · ') || typeInfo(d.device_type).label)}</div>
+      ${connSummary(uc.byDevice.get(d.id), true)}
       <div class="meta">${statusBadge(d)}${liveWatt(d)}<span>${esc(fmtMs(d.last_rtt_ms))}</span>
         <span>${d.has_credentials ? icon('key', 'i-sm') : ''} ${(d.open_ports || []).length === 1 ? '1 Dienst' : `${(d.open_ports || []).length} Dienste`}</span></div>
     </a>`;
@@ -115,10 +182,13 @@ async function viewDevices(_arg, params) {
       <td class="mono">${esc(d.ip)}</td>
       <td><div class="mono small">${esc(d.mac || '–')}</div><div class="muted small">${esc(d.vendor || '')}</div></td>
       <td class="small">${esc(d.os || typeInfo(d.device_type).label)}</td>
+      ${hasConn() ? `<td class="small">${connSummary(uc.byDevice.get(d.id))}</td>` : ''}
       <td>${portChips(d.open_ports)}</td>
       <td>${esc(fmtMs(d.last_rtt_ms))}</td>
       <td title="${esc(fmtTime(d.last_seen))}">${esc(fmtAgo(d.last_seen))}</td>
     </tr>`;
+
+  const hasConn = () => uc.byDevice.size > 0;
 
   const render = () => {
     const shown = devices.filter(matches);
@@ -130,7 +200,7 @@ async function viewDevices(_arg, params) {
       $('#dev-list').innerHTML = `<div class="dev-grid">${shown.map(card).join('')}</div>`;
     } else {
       $('#dev-list').innerHTML = `<div class="card table-wrap"><table>
-        <thead><tr><th>Gerät</th><th>Status</th><th>IP</th><th>MAC / Hersteller</th><th>System</th><th>Dienste</th><th>Antwort</th><th>Gesehen</th></tr></thead>
+        <thead><tr><th>Gerät</th><th>Status</th><th>IP</th><th>MAC / Hersteller</th><th>System</th>${hasConn() ? '<th>Verbindung</th>' : ''}<th>Dienste</th><th>Antwort</th><th>Gesehen</th></tr></thead>
         <tbody>${shown.map(row).join('')}</tbody></table></div>`;
     }
   };
@@ -145,8 +215,16 @@ async function viewDevices(_arg, params) {
     const tr = ev.target.closest('tr[data-id]');
     if (tr) location.hash = `#/device/${tr.dataset.id}`;
   });
+  renderConnFilter();
+  renderHint();
   render();
-  autoRefresh(async () => { devices = await api('/devices'); render(); });
+  autoRefresh(async () => { [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]); renderHint(); render(); });
+  // Nach jeder Minuten-Abfrage des UniFi-Controllers Signal und Datenraten nachführen
+  onLive(async (msg) => {
+    if (msg.type !== 'unifi' || isEditing()) return;
+    uc = await loadUnifiClients();
+    render();
+  });
   // Leistung der Shellys laufend nachführen, ohne die Liste neu aufzubauen
   onLive((msg) => {
     if (msg.type !== 'shelly') return;
@@ -1262,7 +1340,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.9.3#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.9.4#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

@@ -780,3 +780,31 @@ pub async fn unifi_clients(State(st): State<AppState>, _user: CurrentUser) -> Ap
         "updated_at": controllers.iter().filter_map(|c| c.3).max(),
     })))
 }
+
+/// Clients aus dem UniFi-Controller, die NetPulse noch nicht kennt, als Geräte anlegen
+pub async fn unifi_import(State(st): State<AppState>, AdminUser(user): AdminUser) -> ApiResult<Json<Value>> {
+    let ids: Vec<(i64,)> = sqlx::query_as(
+        r"WITH c AS (
+             SELECT DISTINCT ON (lower(e->>'mac')) lower(e->>'mac') AS mac, e->>'ip' AS ip,
+                    NULLIF(e->>'name', '') AS name, NULLIF(e->>'vendor', '') AS vendor
+               FROM devices d, jsonb_array_elements(d.inventory->'unifi'->'clients') e
+              WHERE d.inventory ? 'unifi' AND e->>'mac' IS NOT NULL AND e->>'ip' ~ '^\d{1,3}(\.\d{1,3}){3}$'),
+           ins AS (
+             INSERT INTO devices (ip, mac, reported_name, vendor, status)
+             SELECT c.ip::inet, c.mac, c.name, c.vendor, 'unknown' FROM c
+              WHERE NOT EXISTS (SELECT 1 FROM devices x WHERE lower(x.mac) = c.mac)
+             ON CONFLICT (ip) DO NOTHING
+             RETURNING id, host(ip) AS ip, reported_name),
+           ev AS (
+             INSERT INTO events (device_id, kind, message)
+             SELECT id, 'added', 'Aus dem UniFi-Controller übernommen: ' || COALESCE(reported_name, ip) || ' (' || ip || ')' FROM ins)
+         SELECT id FROM ins",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    for (id,) in &ids {
+        crate::scanner::reclassify(&st.db, *id).await?;
+    }
+    audit::by(&st.db, &user, "unifi_import", json!({ "count": ids.len() })).await;
+    Ok(Json(json!({ "ok": true, "added": ids.len() })))
+}
