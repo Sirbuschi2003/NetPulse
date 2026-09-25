@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.8#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.8.9#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -1276,6 +1276,7 @@ const ROUTES = {
   events: { title: 'Ereignisse', view: () => viewEvents() },
   checks: { title: 'Dienste', view: () => viewChecks() },
   map: { title: 'Netzwerkkarte', view: () => viewMap() },
+  energy: { title: 'Energie', view: (a, p) => viewEnergy(a, p) },
   syslog: { title: 'Protokolle', view: (a, p) => viewSyslog(a, p), admin: true },
   statuspage: { title: 'Statusseite', view: () => viewStatusPage(), admin: true },
   networks: { title: 'Netzwerke', view: () => viewNetworks(), admin: true },

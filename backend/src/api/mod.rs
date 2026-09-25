@@ -6,6 +6,7 @@ mod checks;
 mod credentials;
 mod dashboard;
 mod devices;
+mod energy;
 mod public;
 mod session;
 mod stream;
@@ -52,6 +53,8 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/interfaces/history", get(devices::interface_history))
         .route("/devices/{id}/snmp", get(devices::snmp_explorer))
         .route("/events", get(devices::events))
+        .route("/energy", get(energy::report))
+        .route("/energy/settings", get(energy::get_settings).put(energy::set_settings))
         .route("/topology", get(public::topology))
         .route("/public/status", get(public::public_status))
         .route("/settings/status-page", get(public::get_config).put(public::set_config))

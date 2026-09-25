@@ -660,3 +660,33 @@ select[size]:not([size="0"]):not([size="1"]) { padding: 4px; }
 
 /* 2FA-Pflicht noch nicht erfüllt: Navigation ausblenden, nur „Mein Konto“ */
 body.totp-lock #nav, body.totp-lock #global-search { display: none !important; }
+
+/* ---------- Energie-Auswertung ---------- */
+:root { --en-grid: #4f46e5; --en-pv: #0891b2; --en-export: #b45309; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --en-grid: #6366f1; --en-pv: #0891b2; --en-export: #b45309; } }
+:root[data-theme="dark"] { --en-grid: #6366f1; --en-pv: #0891b2; --en-export: #b45309; }
+.en-c-grid { fill: var(--en-grid); background: var(--en-grid); }
+.en-c-pv { fill: var(--en-pv); background: var(--en-pv); }
+.en-c-export { fill: var(--en-export); background: var(--en-export); }
+.legend i.sw, .en-tip i.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.en-period { min-width: 120px; text-align: center; font-size: 15px; }
+.seg-links a { padding: 7px 12px; color: var(--muted); text-decoration: none; background: var(--surface); }
+.seg-links a.active { background: var(--accent-soft); color: var(--accent); }
+.en-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.en-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; box-shadow: var(--shadow); }
+.en-tile strong { font-size: 22px; font-variant-numeric: tabular-nums; color: var(--text); }
+.en-tile.prod strong { color: var(--up); }
+.en-chart { position: relative; }
+.en-chart svg { width: 100%; height: auto; display: block; }
+.en-grid-line { stroke: var(--border); stroke-width: 1; }
+.en-axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.en-hit { fill: transparent; cursor: default; }
+.en-hit:hover { fill: color-mix(in srgb, var(--text) 5%, transparent); }
+.en-tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg); padding: 8px 10px; font-size: 12.5px; min-width: 190px; z-index: 5; }
+.en-tip strong { display: block; margin-bottom: 4px; }
+.en-tip div { display: flex; align-items: center; gap: 2px; color: var(--text-2); }
+.en-tip div b { margin-left: auto; padding-left: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.en-bar-cell { width: 30%; min-width: 80px; }
+.en-bar-cell .bar { display: block; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
