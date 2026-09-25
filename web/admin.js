@@ -983,6 +983,37 @@ async function renderTotp() {
   }));
 }
 
+// ----- Alarmtöne -----
+function renderSounds() {
+  const box = $('#sound-box');
+  const s = soundSettings();
+  const options = (sel) => Object.entries(ALARM_SOUNDS).map(([k, v]) => `<option value="${k}"${k === sel ? ' selected' : ''}>${esc(v.label)}</option>`).join('');
+  const row = (key, label) => `<div class="sound-row"><label>${label}<select name="${key}">${options(s[key])}</select></label>
+      <button type="button" class="ghost sm" data-play="${key}">${icon('player-play', 'i-sm')}Probe</button></div>`;
+  box.innerHTML = `<form class="form" id="sound-form">
+      <div class="sound-grid">${row('critical', 'Kritischer Alarm (z. B. Gerät offline)')}${row('warning', 'Warnung (z. B. CPU hoch, Dienst gestört)')}
+        ${row('resolved', 'Entwarnung (Problem behoben)')}${row('info', 'Hinweis (z. B. neues Gerät)')}</div>
+      <div class="form-row"><label>Lautstärke<input name="volume" type="range" min="0" max="1" step="0.05" value="${esc(s.volume)}"></label>
+        <label class="inline"><input type="checkbox" name="repeat"${s.repeat ? ' checked' : ''}> Kritische Alarme alle 10 s wiederholen, bis der Hinweis geschlossen wird (höchstens 5 min)</label></div>
+      <p class="hint">Die Töne spielt NetPulse, solange die Oberfläche bzw. App geöffnet ist – auch als Tab im Hintergrund. Die Auswahl gilt nur für
+        dieses Gerät/diesen Browser. <b>Push-Nachrichten</b> bei geschlossener App klingen mit dem Ton, den du in den Android-Einstellungen
+        für NetPulse wählst (dort ist jeder Ton des Handys möglich, auch ein Alarmton). Eigene Töne je Priorität und einen Dauer-Alarm
+        bietet außerdem die App <b>ntfy</b> (Kanal „ntfy“ – kritische Alarme kommen dort mit höchster Priorität).</p></form>`;
+  const form = $('#sound-form');
+  const save = () => {
+    const e = form.elements;
+    saveSoundSettings({ critical: e.critical.value, warning: e.warning.value, resolved: e.resolved.value, info: e.info.value,
+      volume: Number(e.volume.value), repeat: e.repeat.checked });
+  };
+  form.addEventListener('change', save);
+  form.addEventListener('input', (ev) => { if (ev.target.name === 'volume') save(); });
+  $$('[data-play]', form).forEach((b) => b.addEventListener('click', () => {
+    save();
+    const s2 = soundSettings();
+    if (!playSound(s2[b.dataset.play], s2.volume) && s2[b.dataset.play] !== 'none') toast('Ton nicht abspielbar – Lautstärke des Geräts prüfen', true);
+  }));
+}
+
 // ----- Sitzungen -----
 function describeAgent(ua) {
   if (!ua) return 'Unbekanntes Gerät';
@@ -1129,10 +1160,12 @@ async function viewAccount() {
       <section class="card span-3"><header><h2>${icon('shield-lock')}Angemeldete Geräte (Sitzungen)</h2>
         <button type="button" class="ghost sm" id="sess-others">${icon('logout', 'i-sm')}Alle anderen abmelden</button></header><div id="sess-box"><div class="empty">Lade …</div></div></section>
       <section class="card span-3"><header><h2>${icon('device-mobile')}NetPulse-App &amp; Push-Nachrichten</h2></header><div id="push-box"><div class="empty">Lade …</div></div></section>
+      <section class="card span-3"><header><h2>${icon('bell')}Alarmtöne auf diesem Gerät</h2></header><div id="sound-box"></div></section>
     </div>`;
   renderTotp();
   renderSessions();
   renderPush();
+  renderSounds();
   $('#sess-others').addEventListener('click', () => {
     if (!confirm('Alle anderen Geräte abmelden? Dort muss man sich danach neu anmelden.')) return;
     attempt(async () => { const r = await api('/me/sessions/others', { method: 'DELETE' }); toast(`${r.ended} Sitzung(en) beendet`); await renderSessions(); });

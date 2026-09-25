@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.12#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.13#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -466,6 +466,93 @@ const SEVERITY = {
   resolved: { label: 'Behoben', icon: 'circle-check' },
 };
 
+// ---------------------------------------------------------------------------
+// Alarmtöne (im Browser erzeugt – keine Tondateien, keine externen Dienste)
+// ---------------------------------------------------------------------------
+
+/**
+ * Jeder Ton ist eine kleine Folge von Klängen: [Startzeit s, Dauer s, Wellenform, Frequenz Hz (oder [von, bis]), Lautstärke 0–1]
+ * „Wellenform“: sine = weich, triangle = rund, square = hart (Piepser), sawtooth = scharf (Sirene)
+ */
+const ALARM_SOUNDS = {
+  none: { label: 'Kein Ton', notes: [] },
+  beep: { label: 'Piepton (3×)', notes: [[0, 0.14, 'square', 880, 0.5], [0.22, 0.14, 'square', 880, 0.5], [0.44, 0.14, 'square', 880, 0.5]] },
+  siren: { label: 'Sirene', notes: [[0, 0.7, 'sawtooth', [600, 1200], 0.35], [0.7, 0.7, 'sawtooth', [1200, 600], 0.35], [1.4, 0.7, 'sawtooth', [600, 1200], 0.35]] },
+  klaxon: { label: 'Alarmhupe', notes: [[0, 0.3, 'square', 440, 0.45], [0.35, 0.3, 'square', 370, 0.45], [0.7, 0.3, 'square', 440, 0.45], [1.05, 0.3, 'square', 370, 0.45]] },
+  alarm: { label: 'Wecker (schnell)', notes: Array.from({ length: 8 }, (_, i) => [i * 0.12, 0.07, 'square', 2000, 0.4]) },
+  gong: { label: 'Gong', notes: [[0, 1.6, 'sine', 196, 0.7], [0, 1.6, 'sine', 392, 0.25], [0.9, 1.6, 'sine', 165, 0.6]] },
+  chime: { label: 'Glocke', notes: [[0, 0.9, 'sine', 1047, 0.4], [0.18, 0.9, 'sine', 1319, 0.35], [0.36, 1.2, 'sine', 1568, 0.3]] },
+  sonar: { label: 'Sonar', notes: [[0, 0.5, 'sine', 1200, 0.55], [0.6, 0.5, 'sine', 1200, 0.25], [1.2, 0.5, 'sine', 1200, 0.1]] },
+  soft: { label: 'Sanfter Hinweis', notes: [[0, 0.25, 'triangle', 660, 0.4], [0.22, 0.4, 'triangle', 880, 0.35]] },
+  success: { label: 'Entwarnung (aufsteigend)', notes: [[0, 0.18, 'triangle', 523, 0.4], [0.15, 0.18, 'triangle', 659, 0.4], [0.3, 0.35, 'triangle', 784, 0.4]] },
+};
+
+const SOUND_DEFAULTS = { critical: 'siren', warning: 'beep', info: 'none', resolved: 'success', volume: 0.7, repeat: true };
+
+function soundSettings() {
+  try { return { ...SOUND_DEFAULTS, ...JSON.parse(localStorage.getItem('np-sounds') || '{}') }; } catch { return { ...SOUND_DEFAULTS }; }
+}
+function saveSoundSettings(s) {
+  try { localStorage.setItem('np-sounds', JSON.stringify(s)); } catch { /* privater Modus */ }
+}
+
+let audioCtx = null;
+/** Browser erlauben Ton erst nach einer Bedienung – beim ersten Klick/Tastendruck vorbereiten */
+function unlockAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch { /* kein Web Audio */ }
+}
+['pointerdown', 'keydown'].forEach((ev) => window.addEventListener(ev, unlockAudio, { passive: true }));
+
+/** Einen Alarmton abspielen; liefert die Dauer in ms */
+function playSound(name, volume = soundSettings().volume) {
+  const def = ALARM_SOUNDS[name];
+  if (!def || !def.notes.length) return 0;
+  unlockAudio();
+  if (!audioCtx) return 0;
+  const t0 = audioCtx.currentTime + 0.02;
+  const master = audioCtx.createGain();
+  master.gain.value = Math.max(0, Math.min(1, volume));
+  master.connect(audioCtx.destination);
+  let end = 0;
+  def.notes.forEach(([start, dur, type, freq, vol]) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    const [f0, f1] = Array.isArray(freq) ? freq : [freq, freq];
+    osc.frequency.setValueAtTime(f0, t0 + start);
+    if (f1 !== f0) osc.frequency.linearRampToValueAtTime(f1, t0 + start + dur);
+    // Kurz ein- und ausblenden (kein Knacken); Glocke/Gong klingen länger aus
+    gain.gain.setValueAtTime(0.0001, t0 + start);
+    gain.gain.exponentialRampToValueAtTime(vol, t0 + start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + start + dur);
+    osc.connect(gain);
+    gain.connect(master);
+    osc.start(t0 + start);
+    osc.stop(t0 + start + dur + 0.05);
+    end = Math.max(end, start + dur);
+  });
+  return Math.round(end * 1000);
+}
+
+/** Ton zum Alarm; kritische wiederholen sich (alle 10 s, höchstens 5 min), bis man den Hinweis schließt */
+function alarmSound(severity, popup) {
+  const s = soundSettings();
+  const name = s[severity] || 'none';
+  if (name === 'none') return;
+  playSound(name, s.volume);
+  if (severity === 'critical' && s.repeat && popup) {
+    let rounds = 0;
+    const timer = setInterval(() => {
+      rounds += 1;
+      if (!popup.isConnected || popup.classList.contains('out') || rounds > 30) { clearInterval(timer); return; }
+      playSound(name, s.volume);
+    }, 10000);
+  }
+}
+
 /** Alarm als Hinweis oben rechts; kritische bleiben stehen, bis man sie schließt */
 function alertPopup(a) {
   let stack = $('#alert-stack');
@@ -489,6 +576,7 @@ function alertPopup(a) {
   $('a', el).addEventListener('click', close);
   stack.prepend(el);
   while (stack.children.length > 5) stack.lastElementChild.remove();
+  alarmSound(a.severity, el);
   if (a.severity !== 'critical') setTimeout(close, 15000);
   // Tab im Hintergrund: Titel blinkt, bis man zurückkommt
   if (document.hidden) {

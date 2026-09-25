@@ -741,3 +741,8 @@ td.uc-meter .meter { margin-bottom: 3px; }
 .ch-error .i { vertical-align: -2px; }
 .ch-warn { color: var(--warn); margin-top: 2px; }
 .ch-warn .i { vertical-align: -2px; }
+
+/* Alarmtöne */
+.sound-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 18px; }
+.sound-row { display: flex; align-items: flex-end; gap: 8px; }
+.sound-row label { flex: 1; }

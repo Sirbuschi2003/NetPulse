@@ -744,7 +744,13 @@ auf den Docker-Host (Portainer: Container `netpulse-app` → *Console* → Befeh
 - **Zwei-Faktor-Anmeldung** – einrichten (QR-Code oder Schlüssel von Hand), ausschalten (Passwort + aktueller Code).
 - **Angemeldete Geräte (Sitzungen)** – alle Browser/Handys, in denen du angemeldet bist (Gerät, Browser, IP, zuletzt
   aktiv); einzeln abmelden oder **„Alle anderen abmelden“**.
-- **NetPulse-App & Push** – Push auf diesem Gerät aktivieren, Test-Nachricht, Liste der Geräte mit Push.
+- **NetPulse-App & Push** – Push auf diesem Gerät aktivieren, Test-Nachricht, Liste der Geräte mit Push (je Gerät
+  „zuletzt zugestellt“, „auf dem Gerät angezeigt“ bzw. der Fehler).
+- **Alarmtöne auf diesem Gerät** – eigener Ton je Schwere (kritisch, Warnung, Entwarnung, Hinweis): Sirene, Alarmhupe,
+  Wecker, Piepton, Gong, Glocke, Sonar, sanfter Hinweis, Entwarnung oder kein Ton; Lautstärke; kritische Alarme auf
+  Wunsch alle 10 s wiederholen, bis der Hinweis geschlossen wird. Gilt, solange NetPulse offen ist (auch als Tab im
+  Hintergrund), und je Gerät/Browser. Den Ton von Push-Nachrichten bei geschlossener App legt Android fest
+  ([Kapitel 14](#14-netpulse-app-und-push-nachrichten)); eigene Töne je Priorität und Dauer-Alarm bietet auch die App **ntfy**.
 
 ---
 
