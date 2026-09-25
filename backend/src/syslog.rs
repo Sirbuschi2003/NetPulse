@@ -6,8 +6,12 @@
 //! zugeordnet (über die Absender-IP) und live an die Oberfläche geschickt.
 
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::Duration,
 };
 
@@ -31,6 +35,89 @@ pub struct LogMsg {
 }
 
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Empfangs-Diagnose: läuft der Empfang, was kam an, wer wurde abgewiesen?
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct Stats {
+    /// Listener → None = läuft, Some(Fehler)
+    listeners: HashMap<&'static str, Option<String>>,
+    received: HashMap<&'static str, (u64, Option<DateTime<Utc>>)>,
+    /// Abgewiesene Absender (nicht in den erlaubten Netzen): IP → (Anzahl, zuletzt, Art)
+    rejected: HashMap<IpAddr, (u64, DateTime<Utc>, &'static str)>,
+}
+
+static STATS: Mutex<Option<Stats>> = Mutex::new(None);
+
+fn with_stats(f: impl FnOnce(&mut Stats)) {
+    if let Ok(mut guard) = STATS.lock() {
+        f(guard.get_or_insert_with(Stats::default));
+    }
+}
+
+fn note_listener(kind: &'static str, error: Option<String>) {
+    with_stats(|s| {
+        s.listeners.insert(kind, error);
+    });
+}
+
+fn note_received(kind: &'static str) {
+    with_stats(|s| {
+        let e = s.received.entry(kind).or_default();
+        e.0 += 1;
+        e.1 = Some(Utc::now());
+    });
+}
+
+fn note_rejected(ip: IpAddr, kind: &'static str) {
+    with_stats(|s| {
+        // Begrenzen, damit viele verschiedene Absender den Speicher nicht füllen
+        if s.rejected.len() >= 50 && !s.rejected.contains_key(&ip) {
+            return;
+        }
+        let e = s.rejected.entry(ip).or_insert((0, Utc::now(), kind));
+        e.0 += 1;
+        e.1 = Utc::now();
+        e.2 = kind;
+    });
+}
+
+/// Zustand des Empfangs für die Oberfläche
+pub fn status() -> serde_json::Value {
+    let guard = STATS.lock().ok();
+    let s = guard.as_ref().and_then(|g| g.as_ref());
+    let listener = |k: &str| match s.and_then(|s| s.listeners.get(k)) {
+        Some(None) => json!({ "running": true }),
+        Some(Some(e)) => json!({ "running": false, "error": e }),
+        None => json!({ "running": false }),
+    };
+    let received = |k: &str| {
+        let (n, last) = s.and_then(|s| s.received.get(k)).copied().unwrap_or_default();
+        json!({ "count": n, "last": last })
+    };
+    let mut rejected: Vec<_> = s
+        .map(|s| s.rejected.iter().map(|(ip, (n, last, kind))| json!({ "ip": ip, "count": n, "last": last, "kind": kind })).collect())
+        .unwrap_or_default();
+    rejected.sort_by(|a, b| b["last"].as_str().cmp(&a["last"].as_str()));
+    json!({
+        "syslog": listener("syslog"),
+        "trap": listener("trap"),
+        "received_syslog": received("syslog"),
+        "received_trap": received("trap"),
+        "rejected": rejected,
+        "allow_fixed": std::env::var("SYSLOG_ALLOW").ok().filter(|s| !s.trim().is_empty()),
+    })
+}
+
+/// Testmeldung an den eigenen Empfänger schicken (prüft, ob der Empfang arbeitet)
+pub async fn send_test(port: u16) -> anyhow::Result<()> {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).await?;
+    let msg = "<14>1 - netpulse netpulse-test - - - Testmeldung: Der Protokoll-Empfang von NetPulse funktioniert.";
+    socket.send_to(msg.as_bytes(), ("127.0.0.1", port)).await?;
+    Ok(())
+}
 
 /// Von wem werden Meldungen angenommen? `SYSLOG_ALLOW`: Liste von Netzen (CIDR) oder `any`;
 /// Standard: nur aus den freigegebenen Scan-Netzen (Liste wird jede Minute neu geladen)
@@ -112,16 +199,20 @@ async fn syslog_listener(port: u16, tx: mpsc::Sender<LogMsg>, allow: Allow) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Syslog-Empfang auf UDP {port} nicht möglich: {e} (Port belegt? SYSLOG_PORT ändern oder 0 = aus)");
+            note_listener("syslog", Some(e.to_string()));
             return;
         }
     };
     tracing::info!("Syslog-Empfang auf UDP {port}");
+    note_listener("syslog", None);
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else { continue };
         if !allow.permits(from.ip()) {
+            note_rejected(from.ip(), "syslog");
             continue;
         }
+        note_received("syslog");
         let text = String::from_utf8_lossy(&buf[..n]);
         let (facility, severity, host, app, message) = parse_syslog(&text);
         queue(&tx, LogMsg { time: Utc::now(), source: from.ip(), facility, severity, host, app, message });
@@ -219,16 +310,20 @@ async fn trap_listener(state: AppState, port: u16, tx: mpsc::Sender<LogMsg>, all
         Ok(s) => s,
         Err(e) => {
             tracing::error!("SNMP-Trap-Empfang auf UDP {port} nicht möglich: {e} (TRAP_PORT ändern oder 0 = aus)");
+            note_listener("trap", Some(e.to_string()));
             return;
         }
     };
     tracing::info!("SNMP-Trap-Empfang auf UDP {port}");
+    note_listener("trap", None);
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else { continue };
         if !allow.permits(from.ip()) {
+            note_rejected(from.ip(), "trap");
             continue;
         }
+        note_received("trap");
         match parse_trap(&buf[..n]) {
             Some(trap) => {
                 let communities = &state.config.trap_communities;

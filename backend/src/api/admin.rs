@@ -541,7 +541,17 @@ pub async fn remote_logs(State(st): State<AppState>, _admin: AdminUser, Query(q)
         "last_hour": last_hour,
         "syslog_port": st.config.syslog_port,
         "trap_port": st.config.trap_port,
+        "receiver": crate::syslog::status(),
     })))
+}
+
+/// Testmeldung an den eigenen Syslog-Empfang schicken
+pub async fn remote_logs_test(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    if st.config.syslog_port == 0 {
+        return Err(ApiError::BadRequest("Der Syslog-Empfang ist ausgeschaltet (SYSLOG_PORT=0)".into()));
+    }
+    crate::syslog::send_test(st.config.syslog_port).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// Alle Sitzungen eines Benutzers beenden (z. B. Handy verloren)

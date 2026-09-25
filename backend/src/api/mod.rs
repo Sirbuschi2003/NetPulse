@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         .route("/logs", get(admin::system_log))
         .route("/system", get(admin::system))
         .route("/remote-logs", get(admin::remote_logs))
+        .route("/remote-logs/test", post(admin::remote_logs_test))
         // Sicherung
         .route("/backup/export", post(backup::export))
         .route("/backup/restore", post(backup::restore).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)))

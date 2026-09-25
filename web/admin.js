@@ -196,55 +196,65 @@ async function viewEvents() {
 // ---------------------------------------------------------------------------
 
 async function viewNetworks() {
-  // Nur die Netzliste wird laufend aktualisiert – die Formulare darunter bleiben beim Tippen unberührt
-  view().innerHTML = '<div id="net-area"></div><div class="grid" id="sched-area"></div>';
+  // Nur Netzliste und Scan-Fortschritt werden laufend aktualisiert – die Formulare bleiben beim Tippen unberührt
+  view().innerHTML = `
+    <div class="notice">${icon('shield-lock')}<span>Nur eigene oder ausdrücklich freigegebene Netze eintragen – das Scannen fremder
+      Netze kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /16; kleinere Netze (z. B. /24) sind deutlich schneller.</span></div>
+    <div id="scan-area"></div>
+    <div class="grid">
+      <section class="card span-2"><header><h2>${icon('topology-star-3')}Freigegebene Netze</h2>
+        <button type="button" class="ghost sm" id="scan-all">${icon('radar', 'i-sm')}Alle scannen</button></header>
+        <div id="net-list"><div class="empty">Lade …</div></div></section>
+      <section class="card span-1"><header><h2>${icon('plus')}Netz hinzufügen</h2></header>
+        <form class="form" id="net-form">
+          <label>Netz (CIDR)<input name="cidr" placeholder="192.168.178.0/24" required></label>
+          <label>Name<input name="name" placeholder="Heimnetz" maxlength="100" required></label>
+          <button type="submit">${icon('radar')}Hinzufügen &amp; sofort scannen</button>
+          <p class="hint">Ein neues Netz wird sofort gescannt – auch wenn gerade ein anderer Scan läuft.</p>
+        </form></section>
+    </div>
+    <div class="grid" id="sched-area"></div>`;
+
   const render = async () => {
     const [networks, scan] = await Promise.all([api('/networks'), api('/scan/status')]);
-    $('#net-area').innerHTML = `
-      <div class="notice">${icon('shield-lock')}<span>Nur eigene oder ausdrücklich freigegebene Netze eintragen – das Scannen fremder
-        Netze kann strafbar sein (§§ 202a ff. StGB). Pro Eintrag höchstens /16; kleinere Netze (z. B. /24) sind deutlich schneller.</span></div>
-      ${scanBanner(scan)}
-      <div class="grid">
-        <section class="card span-2"><header><h2>${icon('topology-star-3')}Freigegebene Netze</h2>
-          <button type="button" class="ghost sm" id="scan-all">${icon('radar', 'i-sm')}Alle scannen</button></header>
-          ${networks.length ? `<div class="table-wrap"><table><thead><tr><th>Netz</th><th>Geräte</th><th>Letzter Scan</th><th></th></tr></thead>
-          <tbody>${networks.map((n) => {
-            const running = scan.running && scan.network === n.cidr;
-            return `<tr><td><div class="mono">${esc(n.cidr)}</div><div class="muted small">${esc(n.name)}</div></td>
-            <td>${n.device_count}</td>
-            <td class="small">${running ? `<span class="badge accent">läuft · ${pct(scan.done, scan.total)} %</span>`
-              : n.last_scan_at ? `${esc(fmtAgo(n.last_scan_at))} · ${n.last_scan_found} aktiv · ${n.last_scan_duration_s} s` : '<span class="muted">noch nicht</span>'}</td>
-            <td class="actions"><button class="ghost sm" data-scan="${n.id}" type="button" title="Jetzt scannen">${icon('refresh', 'i-sm')}</button>
-              <button class="ghost sm" data-del="${n.id}" data-cidr="${esc(n.cidr)}" type="button" title="Entfernen">${icon('trash', 'i-sm')}</button></td></tr>`;
-          }).join('')}</tbody></table></div>` : empty('Noch keine Netze – rechts eines hinzufügen.', 'topology-star-3')}
-        </section>
-        <section class="card span-1"><header><h2>${icon('plus')}Netz hinzufügen</h2></header>
-          <form class="form" id="net-form">
-            <label>Netz (CIDR)<input name="cidr" placeholder="192.168.178.0/24" required></label>
-            <label>Name<input name="name" placeholder="Heimnetz" maxlength="100" required></label>
-            <button type="submit">${icon('radar')}Hinzufügen &amp; sofort scannen</button>
-            <p class="hint">Ein neues Netz wird sofort gescannt – auch wenn gerade ein anderer Scan läuft.</p>
-          </form></section>
-      </div>`;
+    $('#scan-area').innerHTML = scanBanner(scan);
+    $('#net-list').innerHTML = networks.length ? `<div class="table-wrap"><table><thead><tr><th>Netz</th><th>Geräte</th><th>Letzter Scan</th><th></th></tr></thead>
+      <tbody>${networks.map((n) => {
+        const running = scan.running && scan.network === n.cidr;
+        return `<tr><td><div class="mono">${esc(n.cidr)}</div><div class="muted small">${esc(n.name)}</div></td>
+        <td>${n.device_count}</td>
+        <td class="small">${running ? `<span class="badge accent">läuft · ${pct(scan.done, scan.total)} %</span>`
+          : n.last_scan_at ? `${esc(fmtAgo(n.last_scan_at))} · ${n.last_scan_found} aktiv · ${n.last_scan_duration_s} s` : '<span class="muted">noch nicht</span>'}</td>
+        <td class="actions"><button class="ghost sm" data-scan="${n.id}" type="button" title="Jetzt scannen">${icon('refresh', 'i-sm')}</button>
+          <button class="ghost sm" data-del="${n.id}" data-cidr="${esc(n.cidr)}" type="button" title="Entfernen">${icon('trash', 'i-sm')}</button></td></tr>`;
+      }).join('')}</tbody></table></div>` : empty('Noch keine Netze – rechts eines hinzufügen.', 'topology-star-3');
     applyWidths(view());
-    $('#scan-all').addEventListener('click', () => attempt(() => api('/scan', { method: 'POST' }), 'Scan aller Netze gestartet'));
-    $('#net-form').addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      const f = new FormData(ev.target);
-      attempt(async () => {
-        await api('/networks', { method: 'POST', body: { cidr: f.get('cidr'), name: f.get('name') } });
-        setTimeout(render, 1500);
-      }, 'Netz hinzugefügt – Scan startet');
-    });
-    $$('[data-scan]').forEach((b) => b.addEventListener('click', () => attempt(async () => {
-      await api(`/networks/${b.dataset.scan}/scan`, { method: 'POST' });
-      setTimeout(render, 1500);
-    }, 'Scan gestartet')));
-    $$('[data-del]').forEach((b) => b.addEventListener('click', () => {
-      if (!confirm(`Netz ${b.dataset.cidr} entfernen? Bereits gefundene Geräte bleiben erhalten.`)) return;
-      attempt(async () => { await api(`/networks/${b.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Netz entfernt');
-    }));
   };
+
+  // Ereignisse einmal binden (Liste per Delegation, da sie neu aufgebaut wird)
+  $('#scan-all').addEventListener('click', () => attempt(() => api('/scan', { method: 'POST' }), 'Scan aller Netze gestartet'));
+  $('#net-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const form = ev.target;
+    const f = new FormData(form);
+    attempt(async () => {
+      await api('/networks', { method: 'POST', body: { cidr: f.get('cidr'), name: f.get('name') } });
+      form.reset();
+      setTimeout(render, 1500);
+    }, 'Netz hinzugefügt – Scan startet');
+  });
+  $('#net-list').addEventListener('click', (ev) => {
+    const scanBtn = ev.target.closest('[data-scan]');
+    if (scanBtn) {
+      attempt(async () => { await api(`/networks/${scanBtn.dataset.scan}/scan`, { method: 'POST' }); setTimeout(render, 1500); }, 'Scan gestartet');
+      return;
+    }
+    const del = ev.target.closest('[data-del]');
+    if (del) {
+      if (!confirm(`Netz ${del.dataset.cidr} entfernen? Bereits gefundene Geräte bleiben erhalten.`)) return;
+      attempt(async () => { await api(`/networks/${del.dataset.del}`, { method: 'DELETE' }); await render(); }, 'Netz entfernt');
+    }
+  });
   await render();
   await renderSchedule();
   autoRefresh(render, 5);
@@ -1402,6 +1412,28 @@ function logRows(items, withDevice = true) {
     <td class="small log-msg">${esc(m.message)}</td></tr>`).join('');
 }
 
+/** Zustand des Empfangs: läuft er, was kam an, wer wurde abgewiesen? */
+function receiverBox(r) {
+  const rc = r.receiver || {};
+  const line = (label, l, rec, port) => {
+    if (!port) return `<span class="muted">${label}: aus</span>`;
+    const state = l && l.running ? `<span class="badge st-up">empfängt</span>` : `<span class="badge st-down">läuft nicht</span>`;
+    const err = l && l.error ? ` <span class="small">(${esc(l.error)})</span>` : '';
+    const got = rec && rec.count ? `${esc(rec.count)} seit Start, zuletzt ${esc(fmtAgo(rec.last))}` : 'seit Start nichts angekommen';
+    return `<span>${label} UDP <b>${esc(port)}</b> ${state}${err} · ${got}</span>`;
+  };
+  const rejected = (rc.rejected || []);
+  return `<div class="card sl-receiver"><div class="sl-recv-lines">
+      ${line('Syslog', rc.syslog, rc.received_syslog, r.syslog_port)}
+      ${line('SNMP-Traps', rc.trap, rc.received_trap, r.trap_port)}
+      <button type="button" class="ghost sm" id="sl-test">${icon('send', 'i-sm')}Testmeldung senden</button></div>
+    ${rejected.length ? `<div class="notice warn">${icon('alert-triangle')}<span><b>Abgewiesen</b> – diese Absender liegen in keinem erlaubten Netz:
+      ${rejected.map((x) => `<br><code>${esc(x.ip)}</code> · ${esc(x.count)}× ${x.kind === 'trap' ? 'Trap' : 'Syslog'}, zuletzt ${esc(fmtAgo(x.last))}`).join('')}
+      <br>${rc.allow_fixed ? `Erlaubt ist nur <code>SYSLOG_ALLOW=${esc(rc.allow_fixed)}</code> – dort das Netz ergänzen.`
+        : 'Angenommen wird nur aus den Netzen unter <a href="#/networks">Netzwerke</a>. Netz dort freigeben oder in Portainer <code>SYSLOG_ALLOW</code> setzen (z. B. <code>10.10.10.0/24,172.16.0.0/12</code>).'}</span></div>` : ''}
+  </div>`;
+}
+
 async function viewSyslog(_arg, params) {
   const devices = await api('/devices');
   const f = { device: params.get('device') || '', severity: '7', q: '', source: '', hours: '24' };
@@ -1434,12 +1466,13 @@ async function viewSyslog(_arg, params) {
     if (f.source) qs.set('source', f.source);
     const r = await api(`/remote-logs?${qs}`);
     items = r.items;
-    $('#sl-setup').innerHTML = r.last_hour ? '' : `<div class="notice info">${icon('file-text')}<span>
+    $('#sl-setup').innerHTML = receiverBox(r) + (r.last_hour ? '' : `<div class="notice info">${icon('file-text')}<span>
       Noch keine Meldungen empfangen. So schicken Geräte ihre Protokolle an NetPulse (IP-Adresse des NetPulse-Hosts eintragen):<br>
       <b>OPNsense:</b> System → Einstellungen → Protokollierung → Remote → Ziel hinzufügen: UDP, Port <b>${esc(r.syslog_port)}</b><br>
       <b>UniFi:</b> Einstellungen → Control Plane → Integrations/System → „Remote Syslog Server“, Port ${esc(r.syslog_port)}<br>
       <b>Synology:</b> Protokoll-Center → Protokolle senden · <b>Linux:</b> rsyslog <code>*.* @IP:${esc(r.syslog_port)}</code><br>
-      <b>SNMP-Traps:</b> Trap-Ziel = NetPulse, Port <b>${esc(r.trap_port)}</b> (v1/v2c).</span></div>`;
+      <b>SNMP-Traps:</b> Trap-Ziel = NetPulse, Port <b>${esc(r.trap_port)}</b> (v1/v2c).<br>
+      <span class="muted">Wichtig: Port <b>${esc(r.syslog_port)}</b> statt des üblichen 514 eintragen.</span></span></div>`);
     paint();
   };
   let debounce;
@@ -1447,6 +1480,11 @@ async function viewSyslog(_arg, params) {
     f[key] = e.target.value.trim();
     clearTimeout(debounce);
     debounce = setTimeout(load, ev === 'input' ? 300 : 0);
+  });
+  $('#sl-setup').addEventListener('click', (ev) => {
+    if (!ev.target.closest('#sl-test')) return;
+    attempt(async () => { await api('/remote-logs/test', { method: 'POST' }); setTimeout(() => load().catch(() => {}), 1500); },
+      'Testmeldung gesendet – sie sollte gleich in der Liste erscheinen');
   });
   on('#sl-device', 'device'); on('#sl-sev', 'severity'); on('#sl-src', 'source'); on('#sl-hours', 'hours'); on('#sl-q', 'q', 'input');
   await load();

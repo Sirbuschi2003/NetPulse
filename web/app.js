@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.0#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.1#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -1290,16 +1290,25 @@ const ROUTES = {
   account: { title: 'Mein Konto', view: () => viewAccount() },
 };
 
+/** Tippt der Benutzer gerade oder gibt es ungespeicherte Eingaben? Dann nicht neu aufbauen. */
+function isEditing() {
+  const el = document.activeElement;
+  if (el && view().contains(el) && el.matches('input:not([type="search"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) return true;
+  return view().dataset.dirty === '1';
+}
+
 function autoRefresh(fn, seconds = 30) {
   clearInterval(state.refreshTimer);
-  // Im Hintergrund-Tab nicht nachladen – spart Last auf Server und Datenbank
-  state.refreshTimer = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, seconds * 1000);
+  // Im Hintergrund-Tab nicht nachladen – spart Last auf Server und Datenbank;
+  // während einer Eingabe auch nicht, sonst wäre das Getippte weg
+  state.refreshTimer = setInterval(() => { if (!document.hidden && !isEditing()) fn().catch(() => {}); }, seconds * 1000);
 }
 
 async function route() {
   if (!state.user) return;
   // Jede Navigation bekommt eine Nummer – noch laufende Ladevorgänge der alten Seite schreiben dann nichts mehr
   state.nav = (state.nav || 0) + 1;
+  delete view().dataset.dirty;
   clearInterval(state.refreshTimer);
   state.liveStops.forEach((stop) => stop());
   state.liveStops = [];
@@ -1438,6 +1447,10 @@ function init() {
     if (ev.key === 'Enter') location.hash = `#/devices?q=${encodeURIComponent(ev.target.value.trim())}`;
   });
   window.addEventListener('hashchange', route);
+  view().addEventListener('input', (ev) => {
+    if (ev.target.closest('form') && ev.target.type !== 'search') view().dataset.dirty = '1';
+  });
+  view().addEventListener('submit', () => { delete view().dataset.dirty; }, true);
   $('#logout').addEventListener('click', async () => {
     try { await api('/logout', { method: 'POST' }); } catch { /* lokal trotzdem abmelden */ }
     showLogin();
