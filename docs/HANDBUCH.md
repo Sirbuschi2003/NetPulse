@@ -749,8 +749,12 @@ auf den Docker-Host (Portainer: Container `netpulse-app` → *Console* → Befeh
 - **Alarmtöne auf diesem Gerät** – eigener Ton je Schwere (kritisch, Warnung, Entwarnung, Hinweis): Sirene, Alarmhupe,
   Wecker, Piepton, Gong, Glocke, Sonar, sanfter Hinweis, Entwarnung oder kein Ton; Lautstärke; kritische Alarme auf
   Wunsch alle 10 s wiederholen, bis der Hinweis geschlossen wird. Gilt, solange NetPulse offen ist (auch als Tab im
-  Hintergrund), und je Gerät/Browser. Den Ton von Push-Nachrichten bei geschlossener App legt Android fest
-  ([Kapitel 14](#14-netpulse-app-und-push-nachrichten)); eigene Töne je Priorität und Dauer-Alarm bietet auch die App **ntfy**.
+  Hintergrund), und je Gerät/Browser.
+- **Alarmton auch bei geschlossener App (Android):** Eine Web-App darf keinen eigenen Ton mitschicken – Android nimmt den
+  Ton der App-Kategorie. Deshalb lässt sich jeder Alarmton mit ⬇ **als Tondatei speichern** (`NetPulse-….wav` unter
+  *Downloads*) und dann unter *Einstellungen → Apps → NetPulse → Benachrichtigungen → Kategorie → Ton → „+“ / „Ton
+  hinzufügen“* auswählen (notfalls die Datei mit *Dateien* in den Ordner `Notifications` verschieben). Android erlaubt
+  einen Ton je App; getrennte Töne je Priorität und Dauer-Alarm bietet die App **ntfy**.
 
 ---
 

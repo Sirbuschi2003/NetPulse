@@ -989,16 +989,25 @@ function renderSounds() {
   const s = soundSettings();
   const options = (sel) => Object.entries(ALARM_SOUNDS).map(([k, v]) => `<option value="${k}"${k === sel ? ' selected' : ''}>${esc(v.label)}</option>`).join('');
   const row = (key, label) => `<div class="sound-row"><label>${label}<select name="${key}">${options(s[key])}</select></label>
-      <button type="button" class="ghost sm" data-play="${key}">${icon('player-play', 'i-sm')}Probe</button></div>`;
+      <button type="button" class="ghost sm" data-play="${key}" title="Probe hören">${icon('player-play', 'i-sm')}</button>
+      <button type="button" class="ghost sm" data-wav="${key}" title="Als Tondatei speichern (für Android)">${icon('cloud-download', 'i-sm')}</button></div>`;
   box.innerHTML = `<form class="form" id="sound-form">
       <div class="sound-grid">${row('critical', 'Kritischer Alarm (z. B. Gerät offline)')}${row('warning', 'Warnung (z. B. CPU hoch, Dienst gestört)')}
         ${row('resolved', 'Entwarnung (Problem behoben)')}${row('info', 'Hinweis (z. B. neues Gerät)')}</div>
       <div class="form-row"><label>Lautstärke<input name="volume" type="range" min="0" max="1" step="0.05" value="${esc(s.volume)}"></label>
         <label class="inline"><input type="checkbox" name="repeat"${s.repeat ? ' checked' : ''}> Kritische Alarme alle 10 s wiederholen, bis der Hinweis geschlossen wird (höchstens 5 min)</label></div>
       <p class="hint">Die Töne spielt NetPulse, solange die Oberfläche bzw. App geöffnet ist – auch als Tab im Hintergrund. Die Auswahl gilt nur für
-        dieses Gerät/diesen Browser. <b>Push-Nachrichten</b> bei geschlossener App klingen mit dem Ton, den du in den Android-Einstellungen
-        für NetPulse wählst (dort ist jeder Ton des Handys möglich, auch ein Alarmton). Eigene Töne je Priorität und einen Dauer-Alarm
-        bietet außerdem die App <b>ntfy</b> (Kanal „ntfy“ – kritische Alarme kommen dort mit höchster Priorität).</p></form>`;
+        dieses Gerät/diesen Browser.</p>
+      <div class="notice info">${icon('device-mobile')}<span><b>Auch bei geschlossener App (Android):</b> Push-Nachrichten klingen immer mit dem Ton,
+        den Android für NetPulse eingestellt hat – eine Web-App darf keinen eigenen Ton mitschicken. So wird es trotzdem dein Alarmton:
+        <ol class="steps small">
+          <li>Beim gewünschten Ton auf ${icon('cloud-download', 'i-sm')} tippen – die Datei <code>NetPulse-….wav</code> landet unter <i>Downloads</i>.</li>
+          <li><i>Einstellungen → Apps → NetPulse → Benachrichtigungen</i> → Kategorie mit deiner Adresse antippen → <b>Ton</b>.</li>
+          <li>Dort <b>„+“ / „Ton hinzufügen“ / „Vom Gerät“</b> wählen und die Datei aus <i>Downloads</i> auswählen.
+            (Fehlt die Möglichkeit: die Datei mit der App <i>Dateien</i> in den Ordner <code>Notifications</code> verschieben, dann erscheint sie in der Liste.)</li>
+        </ol>
+        Android erlaubt einen Ton je App – nimm am besten den für kritische Alarme. Getrennte Töne je Schwere und einen Dauer-Alarm bei geschlossener App
+        bietet die App <b>ntfy</b> (Kanal „ntfy“; kritisch = höchste Priorität, Warnung = hoch).</span></div></form>`;
   const form = $('#sound-form');
   const save = () => {
     const e = form.elements;
@@ -1007,6 +1016,21 @@ function renderSounds() {
   };
   form.addEventListener('change', save);
   form.addEventListener('input', (ev) => { if (ev.target.name === 'volume') save(); });
+  $$('[data-wav]', form).forEach((b) => b.addEventListener('click', () => attempt(async () => {
+    save();
+    const name = soundSettings()[b.dataset.wav];
+    if (name === 'none') throw new Error('Für „Kein Ton“ gibt es keine Datei');
+    // Kurze Töne zweimal hintereinander, damit sie als Benachrichtigung deutlich genug sind
+    const blob = await soundWav(name, ALARM_SOUNDS[name].notes.reduce((m, n) => Math.max(m, n[0] + n[1]), 0) < 1 ? 2 : 1);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `NetPulse-${ALARM_SOUNDS[name].label.replace(/[^A-Za-zÄÖÜäöüß0-9]+/g, '-').replace(/-+$/, '')}.wav`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }, 'Tondatei gespeichert – jetzt in Android als NetPulse-Ton auswählen')));
   $$('[data-play]', form).forEach((b) => b.addEventListener('click', () => {
     save();
     const s2 = soundSettings();

@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.13#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.14#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -512,14 +512,18 @@ function playSound(name, volume = soundSettings().volume) {
   if (!def || !def.notes.length) return 0;
   unlockAudio();
   if (!audioCtx) return 0;
-  const t0 = audioCtx.currentTime + 0.02;
-  const master = audioCtx.createGain();
+  return scheduleSound(audioCtx, def, volume, audioCtx.currentTime + 0.02);
+}
+
+/** Klänge eines Tons in einen (Echtzeit- oder Offline-)Audio-Kontext legen; liefert die Dauer in ms */
+function scheduleSound(ctx, def, volume, t0) {
+  const master = ctx.createGain();
   master.gain.value = Math.max(0, Math.min(1, volume));
-  master.connect(audioCtx.destination);
+  master.connect(ctx.destination);
   let end = 0;
   def.notes.forEach(([start, dur, type, freq, vol]) => {
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
     osc.type = type;
     const [f0, f1] = Array.isArray(freq) ? freq : [freq, freq];
     osc.frequency.setValueAtTime(f0, t0 + start);
@@ -535,6 +539,32 @@ function playSound(name, volume = soundSettings().volume) {
     end = Math.max(end, start + dur);
   });
   return Math.round(end * 1000);
+}
+
+/**
+ * Ton als WAV-Datei erzeugen – zum Einstellen als Benachrichtigungston in Android (dann klingen auch
+ * Push-Nachrichten bei geschlossener App so). `repeat`: Ton mehrmals hintereinander (für längere Alarme).
+ */
+async function soundWav(name, repeat = 1) {
+  const def = ALARM_SOUNDS[name];
+  const one = def.notes.reduce((m, [start, dur]) => Math.max(m, start + dur), 0) + 0.3;
+  const rate = 44100;
+  const ctx = new OfflineAudioContext(1, Math.ceil(rate * one * repeat), rate);
+  for (let i = 0; i < repeat; i += 1) scheduleSound(ctx, def, 0.9, i * one);
+  const samples = (await ctx.startRendering()).getChannelData(0);
+  // Auf volle Lautstärke bringen (Spitze 90 %), damit der Alarm am Handy deutlich zu hören ist
+  const peak = samples.reduce((m, x) => Math.max(m, Math.abs(x)), 0) || 1;
+  for (let i = 0; i < samples.length; i += 1) samples[i] = (samples[i] / peak) * 0.9;
+  // 16-Bit-PCM, mono
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const text = (o, str) => [...str].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  text(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); text(8, 'WAVE');
+  text(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  text(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  samples.forEach((x, i) => v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, x)) * 0x7fff, true));
+  return new Blob([buf], { type: 'audio/wav' });
 }
 
 /** Ton zum Alarm; kritische wiederholen sich (alle 10 s, höchstens 5 min), bis man den Hinweis schließt */
