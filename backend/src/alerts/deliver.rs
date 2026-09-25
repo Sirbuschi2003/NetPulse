@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{NaiveTime, Timelike};
 use serde_json::{json, Map, Value};
 
@@ -69,10 +69,7 @@ pub async fn send_now(state: &AppState, kind: &str, config: Value, n: &Notificat
             let url = n.device_id.map_or_else(|| "/#/alerts".to_string(), |id| format!("/#/device/{id}"));
             let tag = n.vars.get("tag").cloned().unwrap_or_else(|| "netpulse".into());
             let message = crate::push::PushMessage { title: &n.title, body: &n.message, severity: n.severity.name(), url: &url, tag: &tag };
-            let (ok, failed) = crate::push::send(state, None, &message).await?;
-            if ok == 0 && failed > 0 {
-                return Err(anyhow!("an kein Gerät zugestellt ({failed} fehlgeschlagen)"));
-            }
+            crate::push::send(state, None, &message).await?.into_result()?;
             Ok(())
         }
         "email" => notify::send(kind, &with_smtp(state, config).await, n).await,
@@ -120,10 +117,26 @@ pub async fn to_channel(state: &AppState, id: i64, name: &str, kind: &str, confi
         }
         return;
     }
-    match send_now(state, kind, config, n).await {
+    let result = send_now(state, kind, config, n).await;
+    record(state, id, &result).await;
+    match result {
         Ok(()) => tracing::info!("Benachrichtigung „{}“ über {name} gesendet", n.title),
         Err(e) => tracing::warn!("Benachrichtigung über Kanal {id} ({name}) fehlgeschlagen: {e:#}"),
     }
+}
+
+/// Ergebnis eines Versands beim Kanal merken (für die Anzeige unter „Benachrichtigungen“)
+pub async fn record(state: &AppState, channel_id: i64, result: &Result<()>) {
+    let error = result.as_ref().err().map(|e| format!("{e:#}").chars().take(500).collect::<String>());
+    let _ = sqlx::query(
+        "UPDATE notification_channels SET last_attempt_at = now(),
+                last_ok_at = CASE WHEN $2::text IS NULL THEN now() ELSE last_ok_at END, last_error = $2
+          WHERE id = $1",
+    )
+    .bind(channel_id)
+    .bind(error)
+    .execute(&state.db)
+    .await;
 }
 
 /// Mehrere Meldungen zu einer zusammenfassen
@@ -191,7 +204,9 @@ async fn flush(state: &AppState) -> Result<()> {
         }
         items.sort_by_key(|n| n.vars.get("zeit").cloned());
         let n = combine(&items);
-        match send_now(state, &kind, config, &n).await {
+        let result = send_now(state, &kind, config, &n).await;
+        record(state, id, &result).await;
+        match result {
             Ok(()) => tracing::info!("Sammelmeldung mit {} Einträgen über {name} gesendet", items.len()),
             Err(e) => tracing::warn!("Sammelmeldung über {name} fehlgeschlagen: {e:#}"),
         }

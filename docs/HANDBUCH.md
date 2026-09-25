@@ -885,11 +885,21 @@ Für NetPulse selbst: **System-Log**.
 - `PROXY_LISTEN` muss auf die **LAN-IP** zeigen (z. B. `http://10.10.10.15:18081`), nicht auf 127.0.0.1, wenn NPM in
   einem eigenen Container läuft.
 
-**App lässt sich nicht installieren / Push kommt nicht**
+**Alarme kommen nicht aufs Handy (Push)** – der Reihe nach prüfen:
+1. *Benachrichtigungen*: Spalte **Zustellung** beim Kanal „NetPulse-App“ – dort stehen der letzte Erfolg, der letzte
+   Fehler mit Grund, „von keiner Alarmregel verwendet“ und „auf keinem Gerät ist Push aktiviert“.
+2. *Alarme → Regeln*: Steht bei der Regel **„kein Kanal – nur in NetPulse“**? Dann die Regel bearbeiten und den Kanal
+   „NetPulse-App“ anhaken.
+3. *Mein Konto* **in der App auf dem Handy**: Push aktiviert? Die Liste „Geräte mit Push-Nachrichten“ zeigt je Gerät
+   „zuletzt zugestellt“ bzw. den Fehler. **Test-Nachricht** senden.
+4. Fehler „Anmeldung abgelaufen“ oder „Absenderschlüssel passt nicht“: Push auf dem Handy aus- und wieder einschalten.
+5. Kommt die Test-Nachricht an, aber keine Alarme: Ruhezeit oder „Sammeln“ beim Kanal eingestellt?
+6. Handy-Einstellungen: Benachrichtigungen für die App/Chrome erlaubt, Energiesparmodus schränkt die App nicht ein.
+
+**App lässt sich nicht installieren**
 - Gültiges Zertifikat nötig (Zugriff über NPM, Kapitel 25) – nicht über `https://IP:8443`.
 - Firefox kann keine Web-Apps installieren → Chrome/Edge/Safari.
 - iPhone: Push nur aus der installierten App, ab iOS 16.4.
-- *Mein Konto → Test-Nachricht* senden; Kanal „NetPulse-App“ in der Regel ausgewählt?
 
 **E-Mails kommen nicht an**
 - *Benachrichtigungen → E-Mail-Server → Test-Mail* – die Fehlermeldung nennt die Ursache (Anmeldung, Port,

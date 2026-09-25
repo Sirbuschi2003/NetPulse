@@ -297,19 +297,24 @@ pub async fn push_unsubscribe(State(st): State<AppState>, user: CurrentUser, Jso
 }
 
 pub async fn push_devices(State(st): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
-    type Row = (i64, String, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>);
+    #[derive(serde::Serialize, sqlx::FromRow)]
+    struct Row {
+        id: i64,
+        endpoint: String,
+        device: Option<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        last_ok_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_error: Option<String>,
+        last_error_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, endpoint, device, created_at, last_ok_at FROM push_subscriptions WHERE user_id = $1 ORDER BY created_at",
+        "SELECT id, endpoint, device, created_at, last_ok_at, last_error, last_error_at
+           FROM push_subscriptions WHERE user_id = $1 ORDER BY created_at",
     )
     .bind(user.id)
     .fetch_all(&st.db)
     .await?;
-    Ok(Json(json!(rows
-        .into_iter()
-        .map(|(id, endpoint, device, created_at, last_ok_at)| {
-            json!({ "id": id, "endpoint": endpoint, "device": device, "created_at": created_at, "last_ok_at": last_ok_at })
-        })
-        .collect::<Vec<_>>())))
+    Ok(Json(json!(rows)))
 }
 
 pub async fn push_test(State(st): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
@@ -320,8 +325,8 @@ pub async fn push_test(State(st): State<AppState>, user: CurrentUser) -> ApiResu
         url: "/#/alerts",
         tag: "test",
     };
-    let (ok, failed) = crate::push::send(&st, Some(user.id), &message).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
-    Ok(Json(json!({ "sent": ok, "failed": failed })))
+    let r = crate::push::send(&st, Some(user.id), &message).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    Ok(Json(json!({ "sent": r.ok, "failed": r.failed, "errors": r.errors })))
 }
 
 // ---------------------------------------------------------------------------

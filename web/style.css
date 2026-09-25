@@ -735,3 +735,9 @@ td.uc-meter .meter { margin-bottom: 3px; }
 .imp-tools { display: flex; gap: 6px; }
 .imp-list { max-height: 55vh; overflow: auto; }
 .imp-list td { vertical-align: top; }
+
+/* Zustellstatus */
+.ch-error { color: var(--down); display: block; }
+.ch-error .i { vertical-align: -2px; }
+.ch-warn { color: var(--warn); margin-top: 2px; }
+.ch-warn .i { vertical-align: -2px; }

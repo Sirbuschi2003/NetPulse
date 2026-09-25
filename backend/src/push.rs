@@ -145,9 +145,57 @@ fn client() -> reqwest::Client {
     reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent("NetPulse").build().expect("HTTP-Client")
 }
 
+/// Ergebnis eines Push-Versands
+#[derive(Default, Debug)]
+pub struct PushResult {
+    pub ok: usize,
+    pub failed: usize,
+    /// Gründe der Fehlschläge (verständlich, je Gerät)
+    pub errors: Vec<String>,
+    /// Anzahl der Geräte, an die gesendet werden sollte
+    pub devices: usize,
+}
+
+impl PushResult {
+    /// Zusammenfassung als Fehler, wenn nichts ankam
+    pub fn into_result(self) -> Result<usize> {
+        if self.devices == 0 {
+            anyhow::bail!("Auf keinem Gerät ist Push aktiviert – in der App (Handy) unter „Mein Konto“ auf „Push auf diesem Gerät aktivieren“ tippen");
+        }
+        if self.ok == 0 {
+            anyhow::bail!("an kein Gerät zugestellt: {}", self.errors.join("; "));
+        }
+        Ok(self.ok)
+    }
+}
+
+/// Antwort des Push-Dienstes in einen verständlichen Grund übersetzen
+fn explain(status: reqwest::StatusCode, body: &str, endpoint: &str) -> String {
+    let service = if endpoint.contains("apple.com") {
+        "Apple"
+    } else if endpoint.contains("googleapis.com") {
+        "Google"
+    } else if endpoint.contains("mozilla") {
+        "Mozilla"
+    } else if endpoint.contains("windows.com") || endpoint.contains("microsoft") {
+        "Microsoft"
+    } else {
+        "Push-Dienst"
+    };
+    let body: String = body.chars().filter(|c| !c.is_control()).take(160).collect();
+    let hint = match status.as_u16() {
+        400 if body.contains("BadJwtToken") || body.contains("VAPID") => " – Absenderschlüssel abgelehnt (PUBLIC_URL muss mit https:// beginnen)",
+        403 => " – Absenderschlüssel passt nicht zu dieser Anmeldung: Push auf dem Handy aus- und wieder einschalten",
+        413 => " – Nachricht zu groß",
+        429 => " – zu viele Nachrichten, später erneut",
+        _ => "",
+    };
+    format!("{service} antwortete {status}{hint}{}", if body.is_empty() { String::new() } else { format!(" ({body})") })
+}
+
 /// An alle angemeldeten Geräte senden (oder nur an die eines Benutzers).
-/// Liefert (erfolgreich, fehlgeschlagen). Abgelaufene Anmeldungen werden gelöscht.
-pub async fn send(state: &AppState, user_id: Option<i64>, message: &PushMessage<'_>) -> Result<(usize, usize)> {
+/// Abgelaufene Anmeldungen werden gelöscht, Fehler je Gerät gespeichert.
+pub async fn send(state: &AppState, user_id: Option<i64>, message: &PushMessage<'_>) -> Result<PushResult> {
     let subs: Vec<Subscription> =
         sqlx::query_as("SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE $1::bigint IS NULL OR user_id = $1")
             .bind(user_id)
@@ -155,7 +203,7 @@ pub async fn send(state: &AppState, user_id: Option<i64>, message: &PushMessage<
             .await?;
     let payload = serde_json::to_vec(message)?;
     let http = client();
-    let (mut ok, mut failed) = (0, 0);
+    let mut out = PushResult { devices: subs.len(), ..Default::default() };
     for sub in subs {
         let result = async {
             let body = encrypt(&sub.p256dh, &sub.auth, &payload)?;
@@ -170,31 +218,39 @@ pub async fn send(state: &AppState, user_id: Option<i64>, message: &PushMessage<
                 .body(body)
                 .send()
                 .await?;
-            Ok::<_, anyhow::Error>(response.status())
+            let status = response.status();
+            let body = if status.is_success() { String::new() } else { response.text().await.unwrap_or_default() };
+            Ok::<_, anyhow::Error>((status, body))
         }
         .await;
-        match result {
-            Ok(status) if status.is_success() => {
-                ok += 1;
-                let _ = sqlx::query("UPDATE push_subscriptions SET last_ok_at = now() WHERE id = $1").bind(sub.id).execute(&state.db).await;
+        let error = match result {
+            Ok((status, _)) if status.is_success() => {
+                out.ok += 1;
+                let _ = sqlx::query("UPDATE push_subscriptions SET last_ok_at = now(), last_error = NULL WHERE id = $1")
+                    .bind(sub.id)
+                    .execute(&state.db)
+                    .await;
+                continue;
             }
             // 404/410: Gerät hat sich abgemeldet oder App wurde entfernt
-            Ok(status) if status.as_u16() == 404 || status.as_u16() == 410 => {
-                failed += 1;
+            Ok((status, _)) if status.as_u16() == 404 || status.as_u16() == 410 => {
                 tracing::info!("Push-Anmeldung {} ist abgelaufen und wird entfernt", sub.id);
                 let _ = sqlx::query("DELETE FROM push_subscriptions WHERE id = $1").bind(sub.id).execute(&state.db).await;
+                "Anmeldung abgelaufen (App entfernt oder Browserdaten gelöscht) – Push auf dem Handy neu aktivieren".to_string()
             }
-            Ok(status) => {
-                failed += 1;
-                tracing::warn!("Push an Gerät {} abgelehnt: {status}", sub.id);
-            }
-            Err(e) => {
-                failed += 1;
-                tracing::warn!("Push an Gerät {} fehlgeschlagen: {e:#}", sub.id);
-            }
-        }
+            Ok((status, body)) => explain(status, &body, &sub.endpoint),
+            Err(e) => format!("Push-Dienst nicht erreichbar: {e:#}"),
+        };
+        out.failed += 1;
+        tracing::warn!("Push an Gerät {}: {error}", sub.id);
+        let _ = sqlx::query("UPDATE push_subscriptions SET last_error = $2, last_error_at = now() WHERE id = $1")
+            .bind(sub.id)
+            .bind(&error)
+            .execute(&state.db)
+            .await;
+        out.errors.push(error);
     }
-    Ok((ok, failed))
+    Ok(out)
 }
 
 #[cfg(test)]

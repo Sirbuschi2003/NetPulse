@@ -71,7 +71,7 @@ async function viewAlerts(_arg, params) {
         <td><span class="cell-dev">${icon((RULE_KINDS[r.kind] || {}).icon || 'bell', 'i-sm')}${esc((RULE_KINDS[r.kind] || {}).label || r.kind)}</span></td>
         <td class="small">${esc(r.device_label || 'Alle Geräte')}</td>
         <td class="small">${esc(condition(r))}</td>
-        <td class="small">${r.channel_ids.length ? r.channel_ids.map((c) => `<span class="chip">${esc(chName(c))}</span>`).join('') : '<span class="error">keiner</span>'}</td>
+        <td class="small">${r.channel_ids.length ? r.channel_ids.map((c) => `<span class="chip">${esc(chName(c))}</span>`).join('') : `<span class="ch-warn" title="Diese Regel meldet nur innerhalb von NetPulse – keine E-Mail, kein Push">${icon('alert-triangle', 'i-sm')} kein Kanal – nur in NetPulse</span>`}</td>
         <td><input type="checkbox" data-toggle="${r.id}"${r.enabled ? ' checked' : ''} aria-label="Aktiv"></td>
         <td class="actions"><button type="button" class="ghost sm" data-edit="${r.id}">${icon('edit', 'i-sm')}</button>
           <button type="button" class="ghost sm" data-del="${r.id}">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}</tbody></table></div>`
@@ -643,16 +643,29 @@ async function renderSmtp() {
   });
 }
 
+/** Zustellstatus eines Kanals: letzter Erfolg/Fehler, Nutzung durch Regeln, Push-Geräte */
+function channelStatus(c) {
+  const parts = [];
+  if (c.last_error) parts.push(`<div class="ch-error">${icon('alert-triangle', 'i-sm')} ${esc(c.last_error)}<div class="muted">${esc(fmtAgo(c.last_attempt_at))}</div></div>`);
+  else if (c.last_ok_at) parts.push(`<span class="badge st-up">zugestellt</span> <span class="muted">${esc(fmtAgo(c.last_ok_at))}</span>`);
+  else parts.push('<span class="muted">noch nichts gesendet</span>');
+  if (!c.rules) parts.push(`<div class="ch-warn">${icon('info-circle', 'i-sm')} von keiner Alarmregel verwendet – unter <a href="#/alerts?tab=rules">Regeln</a> auswählen</div>`);
+  if (c.push_devices === 0) parts.push(`<div class="ch-warn">${icon('info-circle', 'i-sm')} auf keinem Gerät ist Push aktiviert – in der App unter „Mein Konto“ einschalten</div>`);
+  else if (c.push_devices != null) parts.push(`<div class="muted">${esc(c.push_devices)} ${c.push_devices === 1 ? 'Gerät' : 'Geräte'} mit Push</div>`);
+  return parts.join('');
+}
+
 async function viewChannels() {
   const render = async () => {
     const channels = await api('/channels');
     view().innerHTML = `
       <div class="card"><header><h2>${icon('send')}E-Mail-Server</h2></header><div id="smtp-box"><div class="empty">Lade …</div></div></div>
       <div class="card"><header><h2>${icon('send')}Benachrichtigungskanäle</h2><button type="button" id="ch-add">${icon('plus')}Kanal hinzufügen</button></header>
-      ${channels.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Art</th><th>Aktiv</th><th></th></tr></thead>
+      ${channels.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Art</th><th>Aktiv</th><th>Zustellung</th><th></th></tr></thead>
       <tbody>${channels.map((c) => `<tr><td>${esc(c.name)}</td>
         <td><span class="cell-dev">${icon((CHANNEL_KINDS[c.kind] || {}).icon || 'send', 'i-sm')}${esc((CHANNEL_KINDS[c.kind] || {}).label || c.kind)}</span></td>
         <td>${c.enabled ? '<span class="badge st-up">aktiv</span>' : '<span class="badge plain">aus</span>'}</td>
+        <td class="small">${channelStatus(c)}</td>
         <td class="actions"><button type="button" class="ghost sm" data-test="${c.id}">${icon('player-play', 'i-sm')}Test</button>
           <button type="button" class="ghost sm" data-edit="${c.id}">${icon('edit', 'i-sm')}</button>
           <button type="button" class="ghost sm" data-del="${c.id}">${icon('trash', 'i-sm')}</button></td></tr>`).join('')}</tbody></table></div>`
@@ -663,7 +676,10 @@ async function viewChannels() {
     $$('[data-edit]').forEach((b) => b.addEventListener('click', () => channelDialog(channels.find((c) => c.id === Number(b.dataset.edit)))));
     $$('[data-test]').forEach((b) => b.addEventListener('click', () => {
       b.disabled = true;
-      attempt(() => api(`/channels/${b.dataset.test}/test`, { method: 'POST' }), 'Testnachricht gesendet').finally(() => { b.disabled = false; });
+      attempt(async () => {
+        const r = await api(`/channels/${b.dataset.test}/test`, { method: 'POST' });
+        toast(r.sent != null ? `Testnachricht an ${r.sent} ${r.sent === 1 ? 'Gerät' : 'Geräte'} gesendet${r.failed ? ` – ${r.failed} fehlgeschlagen: ${r.errors.join('; ')}` : ''}` : 'Testnachricht gesendet', !!r.failed);
+      }).finally(async () => { b.disabled = false; await render(); });
     }));
     $$('[data-del]').forEach((b) => b.addEventListener('click', () => {
       if (!confirm('Kanal löschen?')) return;
@@ -1050,7 +1066,8 @@ async function renderPush() {
     <p class="muted small">Damit Alarme als Push kommen: unter <b>Benachrichtigungen</b> einen Kanal „NetPulse-App“ anlegen und in den Alarmregeln auswählen.</p>
     ${devices.length ? `<h3 class="sub">Geräte mit Push-Nachrichten</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
       <span>${esc(d.device || 'Gerät')}${sub && d.endpoint === sub.endpoint ? ' <span class="badge accent">dieses</span>' : ''}</span></span>
-      <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ''}
+      <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ' · noch nichts zugestellt'}
+      ${d.last_error && (!d.last_ok_at || new Date(d.last_error_at) > new Date(d.last_ok_at)) ? `<span class="ch-error">${icon('alert-triangle', 'i-sm')} ${esc(d.last_error)}</span>` : ''}
       <button class="ghost sm" type="button" data-unsub="${d.id}" title="Abmelden">${icon('x', 'i-sm')}</button></span></li>`).join('')}</ul>` : ''}`;
   $('#install-now')?.addEventListener('click', () => installApp().catch(() => {}));
   $('#push-on')?.addEventListener('click', () => attempt(async () => {
@@ -1066,7 +1083,8 @@ async function renderPush() {
   }, 'Push-Nachrichten aktiviert'));
   $('#push-test')?.addEventListener('click', () => attempt(async () => {
     const r = await api('/push/test', { method: 'POST' });
-    if (!r.sent) throw new Error('Keine Nachricht zugestellt – Push auf diesem Gerät neu aktivieren');
+    if (!r.sent) throw new Error(`Keine Nachricht zugestellt${r.errors && r.errors.length ? `: ${r.errors.join('; ')}` : ''} – Push auf diesem Gerät aus- und wieder einschalten`);
+    await renderPush();
   }, 'Test-Nachricht gesendet – sie sollte gleich erscheinen'));
   $('#push-off')?.addEventListener('click', () => attempt(async () => {
     const s = await currentSubscription();

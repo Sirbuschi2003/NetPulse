@@ -40,14 +40,27 @@ fn masked(config: &Value) -> Value {
 }
 
 async fn channel_json(st: &AppState, id: i64) -> ApiResult<Value> {
-    let (name, kind, sealed, enabled): (String, String, String, bool) =
-        sqlx::query_as("SELECT name, kind, config, enabled FROM notification_channels WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&st.db)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    type Row = (String, String, String, bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>);
+    let (name, kind, sealed, enabled, last_attempt_at, last_ok_at, last_error): Row = sqlx::query_as(
+        "SELECT name, kind, config, enabled, last_attempt_at, last_ok_at, last_error FROM notification_channels WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
     let config: Value = st.vault.open_value(&sealed)?;
-    Ok(json!({ "id": id, "name": name, "kind": kind, "enabled": enabled, "config": masked(&config) }))
+    // Wie viele Regeln nutzen den Kanal? (0 = er wird nie verwendet)
+    let (rules,): (i64,) = sqlx::query_as("SELECT count(*) FROM alert_rules WHERE enabled AND $1 = ANY(channel_ids)").bind(id).fetch_one(&st.db).await?;
+    let push_devices: Option<i64> = if kind == "app" {
+        Some(sqlx::query_scalar("SELECT count(*) FROM push_subscriptions").fetch_one(&st.db).await?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "id": id, "name": name, "kind": kind, "enabled": enabled, "config": masked(&config),
+        "last_attempt_at": last_attempt_at, "last_ok_at": last_ok_at, "last_error": last_error,
+        "rules": rules, "push_devices": push_devices,
+    }))
 }
 
 pub async fn list_channels(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<Value>>> {
@@ -182,17 +195,17 @@ pub async fn test_channel(State(st): State<AppState>, _admin: AdminUser, Path(id
             url: "/#/alerts",
             tag: "test",
         };
-        let (ok, failed) = crate::push::send(&st, None, &message).await.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
-        if ok == 0 {
-            return Err(ApiError::BadRequest(format!(
-                "Kein Gerät erreicht ({failed} fehlgeschlagen) – zuerst auf dem Handy unter „Mein Konto“ Push aktivieren"
-            )));
-        }
-        return Ok(Json(json!({ "ok": true, "sent": ok })));
+        let result = crate::push::send(&st, None, &message).await.and_then(|r| {
+            let (sent, failed, errors) = (r.ok, r.failed, r.errors.clone());
+            r.into_result().map(|_| (sent, failed, errors))
+        });
+        crate::alerts::deliver::record(&st, id, &result.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}"))).await;
+        let (sent, failed, errors) = result.map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+        return Ok(Json(json!({ "ok": true, "sent": sent, "failed": failed, "errors": errors })));
     }
-    crate::alerts::deliver::send_now(&st, &kind, config, &notification)
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("Senden fehlgeschlagen: {e:#}")))?;
+    let result = crate::alerts::deliver::send_now(&st, &kind, config, &notification).await;
+    crate::alerts::deliver::record(&st, id, &result).await;
+    result.map_err(|e| ApiError::BadRequest(format!("Senden fehlgeschlagen: {e:#}")))?;
     Ok(Json(json!({ "ok": true })))
 }
 
