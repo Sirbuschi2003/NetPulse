@@ -85,11 +85,16 @@ fn client(pin: std::sync::Arc<Pin>) -> Result<Client> {
         .build()?)
 }
 
+/// Eingetragener Port zuerst, danach die üblichen – ein falsch eingetragener Port (z. B. 8443 statt
+/// 11443 beim UniFi OS Server) soll die Verbindung nicht verhindern
 fn ports(cred: &Credential) -> Vec<u16> {
-    match cred.port.and_then(|p| u16::try_from(p).ok()) {
-        Some(p) => vec![p],
-        None => DEFAULT_PORTS.to_vec(),
+    let mut out: Vec<u16> = cred.port.and_then(|p| u16::try_from(p).ok()).into_iter().collect();
+    for p in DEFAULT_PORTS {
+        if !out.contains(p) {
+            out.push(*p);
+        }
     }
+    out
 }
 
 /// Liest Sites, Geräte (mit aktueller Auslastung) und Clients des Controllers.
@@ -104,7 +109,10 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> R
     let http = client(pin.clone())?;
     let username = cred.username.clone().filter(|u| !u.trim().is_empty());
     let mut last_error = anyhow!("Controller nicht erreichbar");
-    for port in ports(cred) {
+    let ports = ports(cred);
+    let mut tried = Vec::new();
+    for &port in &ports {
+        tried.push(port.to_string());
         let base = format!("https://{ip}:{port}");
         let result = match &username {
             None => integration(&http, &base, &secret).await,
@@ -124,7 +132,17 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> R
             }
             Err(e) => {
                 let unreachable = e.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout());
-                last_error = if unreachable { anyhow!("Port {port} nicht erreichbar") } else { e.context(format!("Port {port}")) };
+                last_error = if unreachable {
+                    anyhow!(
+                        "Keine UniFi-Oberfläche erreichbar (geprüft: Port {}). Läuft der Controller als Docker-Container \
+                         mit eigener IP (macvlan) auf demselben Host wie NetPulse, braucht der Host eine Brücke dorthin – \
+                         siehe docs/ABFRAGEN.md, „Docker-Container mit eigener IP“. Sonst im Browser nachsehen, unter \
+                         welchem Port die UniFi-Oberfläche läuft, und ihn bei den Zugangsdaten eintragen",
+                        tried.join(", ")
+                    )
+                } else {
+                    e.context(format!("Port {port}"))
+                };
                 if !unreachable {
                     // Port antwortet, aber mit Fehler: weitere Ports bringen nichts
                     break;
@@ -389,5 +407,16 @@ mod tests {
         assert_eq!(device_type("UDM-Pro"), Some("router"));
         assert_eq!(device_type("UCG-Ultra"), Some("router"));
         assert_eq!(device_type("Foo"), None);
+    }
+
+    fn cred(port: Option<i32>) -> Credential {
+        Credential { id: 1, name: "UniFi".into(), kind: "unifi".into(), username: None, port, secret: Default::default(), linked: true }
+    }
+
+    #[test]
+    fn eingetragener_port_zuerst_dann_standard() {
+        assert_eq!(ports(&cred(Some(8443))), vec![8443, 11443, 443]);
+        assert_eq!(ports(&cred(Some(9443))), vec![9443, 11443, 443, 8443]);
+        assert_eq!(ports(&cred(None)), vec![11443, 443, 8443]);
     }
 }

@@ -190,6 +190,56 @@ Akkuzustand und erkennt, wenn die USV auf Akkubetrieb läuft.
 
 ---
 
+## Docker-Container mit eigener IP (macvlan/ipvlan) auf demselben Host
+
+Läuft ein Gerät als Docker-Container mit **eigener LAN-IP** (Netzwerk-Typ `macvlan` oder `ipvlan`, z. B. ein
+UniFi OS Server mit 10.10.10.6) auf **demselben** NAS wie NetPulse, dann kann NetPulse ihn weder anpingen noch
+abfragen – obwohl er vom PC aus erreichbar ist. Das ist eine bekannte Eigenschaft von macvlan: Der Host und
+seine Container im Host-Netz (wie NetPulse) können Container mit eigener IP auf derselben Netzwerkkarte
+nicht erreichen.
+
+**Abhilfe: eine kleine „Brücke“ auf dem Host** (einmal per SSH als root, Werte anpassen):
+
+```bash
+# 1. Netzwerkkarte des NAS herausfinden (die mit der NAS-IP, z. B. eth0, bond0 oder br0)
+ip -br addr | grep 10.10.10.15
+
+# 2. Brücke anlegen: freie IP im selben Netz wählen (hier 10.10.10.254, nicht im DHCP-Bereich!)
+ip link add np-shim link eth0 type macvlan mode bridge
+ip addr add 10.10.10.254/32 dev np-shim
+ip link set np-shim up
+# 3. Den Container (oder das ganze macvlan-Netz) über die Brücke erreichen
+ip route add 10.10.10.6/32 dev np-shim
+```
+
+Danach sollte `ping 10.10.10.6` auf dem NAS klappen – und NetPulse erreicht den Container.
+Die Einstellung geht beim Neustart verloren. Dauerhaft z. B. als systemd-Dienst
+`/etc/systemd/system/np-shim.service`:
+
+```ini
+[Unit]
+Description=Brücke zu macvlan-Containern (NetPulse)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip link add np-shim link eth0 type macvlan mode bridge; ip addr add 10.10.10.254/32 dev np-shim; ip link set np-shim up; ip route add 10.10.10.6/32 dev np-shim'
+ExecStop=/bin/sh -c 'ip link del np-shim'
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now np-shim
+```
+
+**Alternative:** den Container statt mit eigener IP im normalen Bridge-Netz mit Port-Freigaben betreiben
+(dann ist er unter der NAS-IP erreichbar, z. B. `https://10.10.10.15:11443`). Bei UniFi müssen die Geräte
+dann allerdings neu auf die NAS-IP „informiert“ werden – die Brücke ist meist einfacher.
+
 ## Fehlersuche
 
 | Meldung in NetPulse | Ursache / Lösung |
