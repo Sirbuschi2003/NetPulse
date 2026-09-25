@@ -191,7 +191,7 @@ pub async fn test_channel(State(st): State<AppState>, _admin: AdminUser, Path(id
         let message = crate::push::PushMessage {
             title: &notification.title,
             body: &notification.message,
-            severity: "info",
+            severity: "warning",
             url: "/#/alerts",
             tag: "test",
         };

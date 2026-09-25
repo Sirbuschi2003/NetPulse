@@ -321,7 +321,7 @@ pub async fn push_test(State(st): State<AppState>, user: CurrentUser) -> ApiResu
     let message = crate::push::PushMessage {
         title: "NetPulse: Test",
         body: "Push-Nachrichten kommen an. So sehen Alarme auf diesem Gerät aus.",
-        severity: "info",
+        severity: "warning",
         url: "/#/alerts",
         tag: "test",
     };

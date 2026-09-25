@@ -210,7 +210,8 @@ pub async fn send(state: &AppState, user_id: Option<i64>, message: &PushMessage<
             let response = http
                 .post(&sub.endpoint)
                 .header("TTL", "86400")
-                .header("Urgency", if message.severity == "critical" { "high" } else { "normal" })
+                // „high“ = sofort zustellen, auch wenn das Handy im Energiesparmodus (Doze) ist
+                .header("Urgency", if matches!(message.severity, "critical" | "warning") { "high" } else { "normal" })
                 .header("Topic", message.tag.chars().filter(char::is_ascii_alphanumeric).take(32).collect::<String>())
                 .header("Content-Encoding", "aes128gcm")
                 .header("Content-Type", "application/octet-stream")

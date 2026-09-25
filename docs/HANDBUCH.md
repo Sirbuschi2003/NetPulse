@@ -528,6 +528,14 @@ Reverse-Proxy ([Kapitel 25](#25-zugriff-von-außen)). Mit dem lokalen Zertifikat
 2. In der App anmelden, *Mein Konto → Push auf diesem Gerät aktivieren*, Test-Nachricht senden.
 3. Unter *Benachrichtigungen* einen Kanal **„NetPulse-App“** anlegen und in den Alarmregeln auswählen.
 
+**Android: Pop-up mit Ton.** NetPulse sendet Warnungen und kritische Alarme mit höchster Dringlichkeit und Vibration.
+Ob Android sie zusätzlich **oben als Pop-up mit Ton** einblendet, legt Android je App fest – einmal einstellen:
+*Einstellungen → Apps → NetPulse* (bei manchen Handys *Chrome*) *→ Benachrichtigungen* → die Kategorie mit „netpulse“
+bzw. deiner Adresse öffnen → **„Warnmeldung“ / „Standard“ mit Ton** wählen und **„Als Pop-up anzeigen“** (Samsung:
+„Pop-up“, Xiaomi: „Schwebende Benachrichtigungen“) einschalten. Zusätzlich prüfen: *Nicht stören* aus bzw. NetPulse
+als Ausnahme, Akku-Optimierung für NetPulse/Chrome aus. Die **Test-Nachricht** unter *Mein Konto* verhält sich wie ein
+echter Alarm – damit lässt sich die Einstellung prüfen.
+
 Unter *Mein Konto* stehen alle Geräte mit aktiviertem Push; einzelne lassen sich entfernen.
 Push-Nachrichten sind Ende-zu-Ende verschlüsselt (Web Push, RFC 8291) – die Push-Dienste von Google/Apple/Mozilla
 sehen nur verschlüsselten Inhalt.

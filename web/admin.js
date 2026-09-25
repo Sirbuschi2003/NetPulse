@@ -1052,8 +1052,13 @@ async function renderPush() {
   } else if (Notification.permission === 'denied') {
     status = `<div class="notice">${icon('alert-triangle')}<span>Benachrichtigungen sind für NetPulse blockiert – in den Browser-/App-Einstellungen erlauben.</span></div>`;
   } else {
+    const android = /Android/.test(navigator.userAgent);
     status = sub
       ? `<p><span class="badge st-up">aktiv</span> Dieses Gerät erhält Push-Nachrichten.</p>
+         ${android ? `<div class="notice info">${icon('device-mobile')}<span><b>Pop-up mit Ton:</b> Android entscheidet das je App.
+           Einmal einstellen: <i>Einstellungen → Apps → NetPulse</i> (bzw. <i>Chrome</i>) <i>→ Benachrichtigungen</i> → die Kategorie mit
+           „netpulse“/deiner Adresse öffnen → <b>„Warnmeldung“ / „Standard mit Ton“</b> wählen und <b>„Als Pop-up anzeigen“</b> einschalten.
+           Die Test-Nachricht verhält sich wie ein echter Alarm.</span></div>` : ''}
          <div class="actions"><button type="button" id="push-test">${icon('send')}Test-Nachricht</button>
          <button type="button" class="ghost" id="push-off">Auf diesem Gerät ausschalten</button></div>`
       : `<p class="muted">Alarme erscheinen als Nachricht auf diesem Gerät – auch wenn NetPulse geschlossen ist.</p>

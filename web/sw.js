@@ -18,12 +18,19 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch { data = { title: 'NetPulse', body: event.data ? event.data.text() : '' }; }
   const icons = { critical: '🔴 ', warning: '🟠 ', resolved: '🟢 ', info: '' };
+  // Alarme sollen auffallen: nie „still“, mit Vibration (Android); kritische bleiben stehen, bis man sie wegtippt.
+  // Ob Android zusätzlich ein Pop-up mit Ton zeigt, legt die Benachrichtigungs-Kategorie der App in den
+  // Android-Einstellungen fest (siehe „Mein Konto“ bzw. Handbuch).
+  const loud = data.severity === 'critical' || data.severity === 'warning';
   event.waitUntil(self.registration.showNotification(`${icons[data.severity] || ''}${data.title || 'NetPulse'}`, {
     body: data.body || '',
     icon: '/icon-192.png',
     badge: '/badge-96.png',
     tag: data.tag || undefined,
     renotify: !!data.tag,
+    silent: false,
+    vibrate: loud ? [400, 150, 400, 150, 400] : [200],
+    timestamp: Date.now(),
     requireInteraction: data.severity === 'critical',
     data: { url: data.url || '/#/alerts' },
   }));
