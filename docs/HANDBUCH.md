@@ -276,11 +276,16 @@ Das Dashboard ist **je Benutzer** frei zusammenstellbar: **Anpassen** → über 
 NetPulse untersucht das Gerät sofort wie beim Scan (Ports, Namen, Hersteller, Shelly) und überwacht es.
 Funktioniert auch für Geräte **außerhalb der Scan-Netze** (andere Standorte per VPN, Server im Internet).
 
-### 7.3 Geräte aus Routern übernehmen
+### 7.3 Geräte aus Routern übernehmen und aufräumen
 
-Kennen UniFi, FRITZ!Box, OPNsense, MikroTik oder ein Router Geräte, die NetPulse noch nicht hat (typisch: andere VLANs,
-die nicht gescannt werden), erscheint über der Liste ein Hinweis mit **„Als Geräte übernehmen“**. Ein Klick legt alle
-auf einmal an (mit Name, IP, MAC, Hersteller) und überwacht sie ab sofort.
+Kennen UniFi, FRITZ!Box, OPNsense, MikroTik oder ein Access Point Geräte, die NetPulse noch nicht hat (typisch: andere
+VLANs, die nicht gescannt werden), erscheint über der Liste ein Hinweis mit **„Ansehen & auswählen“**. Die Liste zeigt
+Name, IP/MAC und Quelle; **mögliche Doppelte** (gleicher Name wie ein vorhandenes Gerät – z. B. ein Handy mit wechselnder
+„privater WLAN-Adresse“) sind markiert und nicht vorausgewählt. **„Ausgewählte übernehmen“** legt sie an.
+Reine ARP-Einträge (nur IP ↔ MAC, oft veraltet oder Docker-intern) werden bewusst nie angeboten.
+
+Sind übernommene Geräte offline oder doppelt, erscheint **„Aufräumen“**: Die Liste zeigt alle übernommenen Geräte,
+offline und doppelte sind vorausgewählt, **„Ausgewählte löschen“** entfernt sie.
 
 ### 7.4 Gerätetyp und Namen
 

@@ -729,3 +729,9 @@ td.uc-meter .meter { margin-bottom: 3px; }
 .nowrap { white-space: nowrap; }
 #unifi-hint .notice { display: flex; align-items: center; gap: 12px; }
 #unifi-hint .notice > span { flex: 1; }
+
+/* Übernehmen / Aufräumen */
+#unifi-hint .notice { margin-bottom: 10px; }
+.imp-tools { display: flex; gap: 6px; }
+.imp-list { max-height: 55vh; overflow: auto; }
+.imp-list td { vertical-align: top; }

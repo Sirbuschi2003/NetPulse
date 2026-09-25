@@ -67,7 +67,8 @@ const sourceName = (s) => SOURCE_NAMES[s] || s;
 async function loadUnifiClients() {
   try {
     const r = await api('/clients');
-    return { byDevice: new Map(r.clients.filter((c) => c.device_id).map((c) => [c.device_id, c])), all: r.clients, controllers: r.controllers };
+    const real = (c) => c.type === 'wireless' || c.type === 'wired' || c.uplink_name || c.down_bps != null;
+    return { byDevice: new Map(r.clients.filter((c) => c.device_id && real(c)).map((c) => [c.device_id, c])), all: r.clients, controllers: r.controllers };
   } catch {
     return { byDevice: new Map(), all: [], controllers: [] };
   }
@@ -131,22 +132,89 @@ async function viewDevices(_arg, params) {
     $('#conn-filter').value = filters.conn;
     $('#conn-filter').addEventListener('change', (ev) => { filters.conn = ev.target.value; render(); });
   };
-  // Clients, die der Controller kennt, NetPulse aber noch nicht
+  // Verbundene Geräte, die NetPulse noch nicht kennt (nur aus verlässlichen Quellen) und Aufräumen übernommener
+  let candidates = [];
+  let importedList = [];
+  const loadImportInfo = async () => {
+    if (!isAdmin()) return;
+    const [p, i] = await Promise.all([api('/clients/import/preview').catch(() => ({ candidates: [] })), api('/devices/imported').catch(() => ({ devices: [] }))]);
+    candidates = p.candidates;
+    importedList = i.devices;
+  };
   const renderHint = () => {
-    const known = new Set(devices.filter((d) => d.mac).map((d) => d.mac.toLowerCase()));
-    const missing = uc.all.filter((c) => c.mac && c.ip && !known.has(c.mac.toLowerCase()));
-    $('#unifi-hint').innerHTML = missing.length && isAdmin() ? `<div class="notice info">${icon('access-point')}<span>
-        Router, Switches und Controller kennen <b>${esc(missing.length)}</b> ${missing.length === 1 ? 'Gerät, das' : 'Geräte, die'} hier noch fehlen
+    const cleanup = importedList.filter((d) => !d.online || d.duplicate_of);
+    $('#unifi-hint').innerHTML = [
+      candidates.length ? `<div class="notice info">${icon('access-point')}<span>
+        Router und Controller kennen <b>${esc(candidates.length)}</b> ${candidates.length === 1 ? 'Gerät, das' : 'Geräte, die'} hier noch fehlen
         (z. B. aus anderen Netzen/VLANs, die nicht gescannt werden).</span>
-        <button type="button" class="sm" id="unifi-import">${icon('plus', 'i-sm')}Als Geräte übernehmen</button></div>` : '';
-    $('#unifi-import')?.addEventListener('click', (ev) => {
-      ev.currentTarget.disabled = true;
+        <button type="button" class="sm" id="unifi-import">${icon('list', 'i-sm')}Ansehen &amp; auswählen</button></div>` : '',
+      cleanup.length ? `<div class="notice warn">${icon('alert-triangle')}<span>
+        <b>${esc(cleanup.length)}</b> übernommene ${cleanup.length === 1 ? 'Gerät ist' : 'Geräte sind'} offline oder doppelt.</span>
+        <button type="button" class="sm" id="imported-cleanup">${icon('trash', 'i-sm')}Aufräumen</button></div>` : '',
+    ].join('');
+    $('#unifi-import')?.addEventListener('click', importDialog);
+    $('#imported-cleanup')?.addEventListener('click', cleanupDialog);
+  };
+  const reloadAll = async () => {
+    [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]);
+    await loadImportInfo();
+    renderHint();
+    render();
+  };
+  const importDialog = () => {
+    const dlg = openModal('Geräte übernehmen', `<form class="form" id="imp-form">
+        <p class="muted small">Nur Geräte mit echter Verbindungsangabe. <b>Mögliche Doppelte</b> (gleicher Name wie ein vorhandenes Gerät,
+          z. B. Handy mit wechselnder „privater WLAN-Adresse“) sind nicht vorausgewählt.</p>
+        <div class="imp-tools"><button type="button" class="ghost sm" data-all="1">Alle</button><button type="button" class="ghost sm" data-all="0">Keine</button></div>
+        <div class="table-wrap imp-list"><table><thead><tr><th></th><th>Name</th><th>IP / MAC</th><th>Quelle</th><th>Hinweis</th></tr></thead><tbody>
+        ${candidates.map((c, i) => `<tr><td><input type="checkbox" name="pick" value="${i}"${c.possible_duplicate ? '' : ' checked'}></td>
+          <td>${esc(c.name || '–')}<div class="muted small">${esc(c.vendor || '')}</div></td>
+          <td class="mono small">${esc(c.ip)}<div class="muted">${esc(c.mac)}</div></td>
+          <td class="small">${esc(c.source_label || '')}${c.uplink_name ? `<div class="muted">${esc(c.uplink_name)}</div>` : ''}</td>
+          <td class="small">${c.possible_duplicate ? `<a href="#/device/${c.possible_duplicate.id}">schon vorhanden als ${esc(c.possible_duplicate.ip)}?</a>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>
+        <div class="actions"><button type="submit">${icon('plus')}Ausgewählte übernehmen</button></div></form>`);
+    dlg.classList.add('wide');
+    const form = $('#imp-form', dlg);
+    $$('[data-all]', form).forEach((b) => b.addEventListener('click', () => { $$('input[name="pick"]', form).forEach((c) => { c.checked = b.dataset.all === '1'; }); }));
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const macs = $$('input[name="pick"]:checked', form).map((c) => candidates[Number(c.value)].mac);
+      if (!macs.length) { dlg.close(); return; }
       attempt(async () => {
-        const r = await api('/clients/import', { method: 'POST' });
-        toast(`${r.added} ${r.added === 1 ? 'Gerät' : 'Geräte'} übernommen – sie werden ab jetzt überwacht`);
-        [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]);
-        renderHint();
-        render();
+        const r = await api('/clients/import', { method: 'POST', body: { macs } });
+        dlg.close();
+        toast(`${r.added} ${r.added === 1 ? 'Gerät' : 'Geräte'} übernommen`);
+        await reloadAll();
+      });
+    });
+  };
+  const cleanupDialog = () => {
+    const dlg = openModal('Übernommene Geräte aufräumen', `<form class="form" id="cl-form">
+        <p class="muted small">Alle aus Routern/Controllern übernommenen Geräte. Vorausgewählt sind Geräte, die <b>offline</b> sind oder
+          ein <b>Doppel</b> eines vorhandenen Geräts (gleicher Name oder gleiche MAC). Beim Löschen gehen nur deren eigene Messwerte verloren.</p>
+        <div class="imp-tools"><button type="button" class="ghost sm" data-all="1">Alle</button><button type="button" class="ghost sm" data-all="0">Keine</button></div>
+        <div class="table-wrap imp-list"><table><thead><tr><th></th><th>Gerät</th><th>IP / MAC</th><th>Status</th><th>Hinweis</th></tr></thead><tbody>
+        ${importedList.map((d) => `<tr><td><input type="checkbox" name="pick" value="${d.id}"${!d.online || d.duplicate_of ? ' checked' : ''}></td>
+          <td><a href="#/device/${d.id}">${esc(d.label)}</a><div class="muted small">übernommen ${esc(fmtAgo(d.first_seen))}</div></td>
+          <td class="mono small">${esc(d.ip)}<div class="muted">${esc(d.mac || '')}</div></td>
+          <td>${d.online ? '<span class="badge st-up">online</span>' : '<span class="badge st-down">offline</span>'}</td>
+          <td class="small">${d.duplicate_of ? `<a href="#/device/${d.duplicate_of}">Doppel eines vorhandenen Geräts</a>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>
+        <div class="actions"><button type="submit" class="danger">${icon('trash')}Ausgewählte löschen</button></div></form>`);
+    dlg.classList.add('wide');
+    const form = $('#cl-form', dlg);
+    $$('[data-all]', form).forEach((b) => b.addEventListener('click', () => { $$('input[name="pick"]', form).forEach((c) => { c.checked = b.dataset.all === '1'; }); }));
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const ids = $$('input[name="pick"]:checked', form).map((c) => Number(c.value));
+      if (!ids.length) { dlg.close(); return; }
+      if (!confirm(`${ids.length} ${ids.length === 1 ? 'Gerät' : 'Geräte'} löschen?`)) return;
+      attempt(async () => {
+        const r = await api('/devices/bulk-delete', { method: 'POST', body: { ids } });
+        dlg.close();
+        toast(`${r.deleted} ${r.deleted === 1 ? 'Gerät' : 'Geräte'} gelöscht`);
+        await reloadAll();
       });
     });
   };
@@ -220,9 +288,9 @@ async function viewDevices(_arg, params) {
     if (tr) location.hash = `#/device/${tr.dataset.id}`;
   });
   renderConnFilter();
-  renderHint();
   render();
-  autoRefresh(async () => { [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]); renderHint(); render(); });
+  loadImportInfo().then(renderHint);
+  autoRefresh(async () => { [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]); render(); });
   // Nach jeder Minuten-Abfrage des UniFi-Controllers Signal und Datenraten nachführen
   onLive(async (msg) => {
     if (msg.type !== 'unifi' || isEditing()) return;
@@ -1349,7 +1417,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.9.8#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.9.9#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

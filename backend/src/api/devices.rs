@@ -819,16 +819,63 @@ pub async fn unifi_clients(State(st): State<AppState>, _user: CurrentUser) -> Ap
     Ok(Json(json!({ "clients": clients, "controllers": controllers })))
 }
 
-/// Verbundene Geräte, die NetPulse noch nicht kennt, als Geräte anlegen (aus allen Quellen)
-pub async fn unifi_import(State(st): State<AppState>, AdminUser(user): AdminUser) -> ApiResult<Json<Value>> {
-    let (clients, _) = all_clients(&st, None).await?;
-    let (mut ips, mut macs, mut names, mut vendors) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+/// Quellen mit echter Verbindungsangabe – nur daraus werden Geräte zum Übernehmen angeboten.
+/// Reine ARP-Tabellen („router“) und Switch-Tabellen enthalten auch veraltete Einträge, Docker-interne
+/// Adressen und Geräte hinter anderen Routern – daraus würden Dubletten und Dauer-Offline-Geräte.
+const IMPORT_SOURCES: &[&str] = &["unifi", "fritzbox", "mikrotik", "wifi", "opnsense"];
+
+/// Kandidaten zum Übernehmen: nicht bekannt, IPv4 vorhanden, aus einer verlässlichen Quelle.
+/// `possible_duplicate`: ein vorhandenes Gerät mit gleichem Namen (z. B. Handy mit wechselnder MAC-Adresse).
+async fn import_candidates(st: &AppState) -> ApiResult<Vec<Value>> {
+    let (clients, _) = all_clients(st, None).await?;
+    let names: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, lower(COALESCE(name, reported_name, hostname)), host(ip) FROM devices
+          WHERE COALESCE(name, reported_name, hostname) IS NOT NULL",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let mut out = Vec::new();
     for c in clients.iter().filter(|c| c["device_id"].is_null()) {
-        let ip = c["ip"].as_str().filter(|i| i.parse::<std::net::Ipv4Addr>().is_ok());
-        let (Some(ip), Some(mac)) = (ip, c["mac"].as_str()) else { continue };
+        if !IMPORT_SOURCES.contains(&c["source"].as_str().unwrap_or_default()) {
+            continue;
+        }
+        let Some(ip) = c["ip"].as_str().filter(|i| i.parse::<std::net::Ipv4Addr>().is_ok()) else { continue };
+        let Some(mac) = c["mac"].as_str() else { continue };
+        let name = c["name"].as_str().or(c["hostname"].as_str()).map(str::to_string);
+        let dup = name.as_deref().and_then(|n| {
+            let n = n.to_lowercase();
+            names.iter().find(|(_, other, _)| *other == n).map(|(id, _, other_ip)| json!({ "id": id, "ip": other_ip }))
+        });
+        out.push(json!({
+            "ip": ip, "mac": mac, "name": name, "vendor": c["vendor"], "source_label": c["source_label"],
+            "type": c["type"], "uplink_name": c["uplink_name"], "possible_duplicate": dup,
+        }));
+    }
+    Ok(out)
+}
+
+pub async fn import_preview(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({ "candidates": import_candidates(&st).await? })))
+}
+
+#[derive(Deserialize)]
+pub struct ImportRequest {
+    /// nur diese MAC-Adressen übernehmen
+    macs: Vec<String>,
+}
+
+/// Ausgewählte verbundene Geräte als Geräte anlegen
+pub async fn unifi_import(State(st): State<AppState>, AdminUser(user): AdminUser, Json(req): Json<ImportRequest>) -> ApiResult<Json<Value>> {
+    let wanted: std::collections::HashSet<String> = req.macs.iter().map(|m| m.to_lowercase()).collect();
+    let (mut ips, mut macs, mut names, mut vendors) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for c in import_candidates(&st).await? {
+        let (Some(ip), Some(mac)) = (c["ip"].as_str(), c["mac"].as_str()) else { continue };
+        if !wanted.contains(&mac.to_lowercase()) {
+            continue;
+        }
         ips.push(ip.to_string());
         macs.push(mac.to_string());
-        names.push(c["name"].as_str().or(c["hostname"].as_str()).map(str::to_string));
+        names.push(c["name"].as_str().map(str::to_string));
         vendors.push(c["vendor"].as_str().map(str::to_string));
     }
     let ids: Vec<(i64,)> = sqlx::query_as(
@@ -854,4 +901,52 @@ pub async fn unifi_import(State(st): State<AppState>, AdminUser(user): AdminUser
     }
     audit::by(&st.db, &user, "clients_import", json!({ "count": ids.len() })).await;
     Ok(Json(json!({ "ok": true, "added": ids.len() })))
+}
+
+#[derive(Serialize, FromRow)]
+struct ImportedRow {
+    id: i64,
+    label: String,
+    ip: String,
+    mac: Option<String>,
+    status: String,
+    last_seen: Option<DateTime<Utc>>,
+    first_seen: DateTime<Utc>,
+    online: bool,
+    duplicate_of: Option<i64>,
+}
+
+/// Übernommene Geräte (zum Aufräumen): mit Hinweis, ob offline bzw. doppelt
+pub async fn imported(State(st): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    let rows: Vec<ImportedRow> = sqlx::query_as(
+        "SELECT d.id, COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS label, host(d.ip) AS ip, d.mac, d.status,
+                d.last_seen, d.first_seen, COALESCE(d.status = 'up' AND d.last_seen > now() - interval '15 minutes', false) AS online,
+                (SELECT o.id FROM devices o
+                  WHERE o.id <> d.id
+                    AND NOT EXISTS (SELECT 1 FROM events x WHERE x.device_id = o.id AND x.kind = 'added' AND x.message LIKE 'Aus %übernommen%')
+                    AND (lower(o.mac) = lower(d.mac)
+                         OR lower(COALESCE(o.name, o.reported_name, o.hostname)) = lower(COALESCE(d.name, d.reported_name, d.hostname)))
+                  ORDER BY o.id LIMIT 1) AS duplicate_of
+           FROM devices d
+          WHERE EXISTS (SELECT 1 FROM events e WHERE e.device_id = d.id AND e.kind = 'added' AND e.message LIKE 'Aus %übernommen%')
+          ORDER BY d.first_seen DESC",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(json!({ "devices": rows })))
+}
+
+#[derive(Deserialize)]
+pub struct BulkDelete {
+    ids: Vec<i64>,
+}
+
+/// Mehrere Geräte auf einmal löschen (z. B. übernommene Dubletten)
+pub async fn bulk_delete(State(st): State<AppState>, AdminUser(user): AdminUser, Json(req): Json<BulkDelete>) -> ApiResult<Json<Value>> {
+    if req.ids.len() > 5000 {
+        return Err(ApiError::BadRequest("Zu viele Geräte auf einmal".into()));
+    }
+    let deleted: Vec<(String,)> = sqlx::query_as("DELETE FROM devices WHERE id = ANY($1) RETURNING host(ip)").bind(&req.ids).fetch_all(&st.db).await?;
+    audit::by(&st.db, &user, "device_delete_bulk", json!({ "count": deleted.len(), "ips": deleted.iter().map(|d| &d.0).collect::<Vec<_>>() })).await;
+    Ok(Json(json!({ "ok": true, "deleted": deleted.len() })))
 }
