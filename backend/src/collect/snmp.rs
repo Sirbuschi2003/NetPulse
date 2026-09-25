@@ -531,7 +531,83 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential) -> Result<Value> {
         }
     }
 
+    // Verbundene Geräte: Switch-Port je MAC (Weiterleitungstabelle) und IP ↔ MAC (ARP)
+    let clients = net_clients(&mut s, data.get("interfaces")).await;
+    if !clients.is_empty() {
+        data.insert("net_clients".into(), Value::Array(clients));
+    }
+
     Ok(Value::Object(data))
+}
+
+const DOT1D_BASE_PORT_IFINDEX: &[u64] = &[1, 3, 6, 1, 2, 1, 17, 1, 4, 1, 2];
+const DOT1D_TP_FDB_PORT: &[u64] = &[1, 3, 6, 1, 2, 1, 17, 4, 3, 1, 2];
+const DOT1D_TP_FDB_STATUS: &[u64] = &[1, 3, 6, 1, 2, 1, 17, 4, 3, 1, 3];
+const DOT1Q_TP_FDB_PORT: &[u64] = &[1, 3, 6, 1, 2, 1, 17, 7, 1, 2, 2, 1, 2];
+const DOT1Q_TP_FDB_STATUS: &[u64] = &[1, 3, 6, 1, 2, 1, 17, 7, 1, 2, 2, 1, 3];
+const IP_NET_TO_MEDIA_PHYS: &[u64] = &[1, 3, 6, 1, 2, 1, 4, 22, 1, 2];
+const MAX_FDB: usize = 4096;
+
+/// Herstellerunabhängig: Weiterleitungstabelle (BRIDGE-/Q-BRIDGE-MIB) und ARP-Tabelle (IP-MIB)
+async fn net_clients(s: &mut AsyncSession, interfaces: Option<&Value>) -> Vec<Value> {
+    use super::netclients;
+    let port_if = column(s, DOT1D_BASE_PORT_IFINDEX, 1024).await;
+    let if_name = |port: u64| -> String {
+        let if_index = port_if.get(&vec![port]).and_then(Val::num);
+        if_index
+            .and_then(|i| {
+                interfaces?.as_array()?.iter().find(|x| x["index"].as_f64() == Some(i)).map(|x| {
+                    let name = x["name"].as_str().unwrap_or_default();
+                    match x["alias"].as_str().filter(|a| !a.is_empty()) {
+                        Some(alias) => format!("{name} ({alias})"),
+                        None => name.to_string(),
+                    }
+                })
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("Port {port}"))
+    };
+    let mac_of = |octets: &[u64]| -> Option<String> {
+        (octets.len() == 6).then(|| octets.iter().map(|b| format!("{:02x}", b & 0xff)).collect::<Vec<_>>().join(":"))
+    };
+    // Status 3 = gelernt (4 = eigene Adresse des Switches → auslassen)
+    let mut fdb: Vec<(String, String, Option<u64>)> = Vec::new();
+    let q_ports = column(s, DOT1Q_TP_FDB_PORT, MAX_FDB).await;
+    if !q_ports.is_empty() {
+        let status = column(s, DOT1Q_TP_FDB_STATUS, MAX_FDB).await;
+        for (idx, port) in &q_ports {
+            let (Some(port), Some(mac)) = (port.num().map(|p| p as u64), idx.get(1..).and_then(mac_of)) else { continue };
+            if port == 0 || status.get(idx).and_then(Val::num).is_some_and(|st| st != 3.0) {
+                continue;
+            }
+            fdb.push((mac, if_name(port), idx.first().copied()));
+        }
+    } else {
+        let ports = column(s, DOT1D_TP_FDB_PORT, MAX_FDB).await;
+        let status = column(s, DOT1D_TP_FDB_STATUS, MAX_FDB).await;
+        for (idx, port) in &ports {
+            let (Some(port), Some(mac)) = (port.num().map(|p| p as u64), mac_of(idx)) else { continue };
+            if port == 0 || status.get(idx).and_then(Val::num).is_some_and(|st| st != 3.0) {
+                continue;
+            }
+            fdb.push((mac, if_name(port), None));
+        }
+    }
+    let mut out = netclients::from_fdb(&fdb);
+
+    // ARP: Index = ifIndex.a.b.c.d → MAC
+    let arp = column(s, IP_NET_TO_MEDIA_PHYS, MAX_FDB).await;
+    for (idx, value) in &arp {
+        let (Some(mac), Some(ip)) = (value.mac(), idx.get(1..5)) else { continue };
+        if ip.len() != 4 {
+            continue;
+        }
+        let ip = ip.iter().map(u64::to_string).collect::<Vec<_>>().join(".");
+        let mut c = netclients::client("router", &mac);
+        c.insert("ip".into(), json!(ip));
+        out.push(Value::Object(c));
+    }
+    out
 }
 
 const ENTITY_SENSOR: &[u64] = &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1];

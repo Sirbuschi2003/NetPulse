@@ -6,10 +6,15 @@
 
 pub mod check;
 pub mod fast;
+pub mod fritzbox;
 pub mod live;
+pub mod mikrotik;
+pub mod netclients;
+pub mod opnsense;
 pub mod shelly;
 pub mod snmp;
 pub mod ssh;
+pub mod tls;
 pub mod unifi;
 
 use std::{net::Ipv4Addr, time::Duration};
@@ -394,6 +399,32 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
         }
     }
 
+    // Router/Firewalls mit eigener Schnittstelle (FRITZ!Box, OPNsense, MikroTik) – ebenfalls nur fest zugeordnet
+    for cred in credentials.iter().filter(|c| API_KINDS.contains(&c.kind.as_str())) {
+        if !cred.linked {
+            continue;
+        }
+        let label = api_label(&cred.kind);
+        match collect_api(&cred.kind, addr, cred, tls_pin.as_deref()).await {
+            Ok((data, pin)) => {
+                if tls_pin.is_none() {
+                    if let Some(pin) = pin {
+                        sqlx::query("UPDATE devices SET tls_pin = $2 WHERE id = $1").bind(device_id).bind(pin).execute(&state.db).await?;
+                    }
+                }
+                trace.add(Some(true), format!("{label} mit „{}“: {} verbundene Geräte gelesen", cred.name, data["clients_total"]));
+                inventory.insert(cred.kind.clone(), data);
+            }
+            Err(e) => {
+                trace.add(Some(false), format!("{label} mit „{}“: {e:#}", cred.name));
+                errors.push(format!("{label}: {e:#}"));
+            }
+        }
+    }
+    if let Some(n) = rebuild_netclients(&mut inventory, device_id) {
+        trace.add(Some(true), format!("Verbundene Geräte: {n} (für Geräteliste, Clients und Netzwerkkarte)"));
+    }
+
     // HTTP-Zugangsdaten gelten nur für erkannte Shellys – sagen, warum sie hier nicht versucht wurden
     if integration.as_deref() != Some("shelly") {
         for cred in credentials.iter().filter(|c| c.kind == "http") {
@@ -489,6 +520,11 @@ pub async fn poll_device(state: &AppState, device_id: i64) -> Result<()> {
     if let Some(unifi) = inventory.get("unifi") {
         if let Err(e) = apply_unifi(state, unifi).await {
             tracing::warn!("UniFi-Daten konnten nicht übernommen werden: {e:#}");
+        }
+    }
+    if let Some(clients) = inventory["netclients"]["clients"].as_array() {
+        if let Err(e) = apply_clients(state, device_id, clients).await {
+            tracing::warn!("Verbundene Geräte konnten nicht übernommen werden: {e:#}");
         }
     }
     scanner::reclassify(&state.db, device_id).await?;
@@ -700,7 +736,199 @@ pub async fn unifi_loop(state: AppState) {
                 Err(e) => tracing::debug!("UniFi-Minutenabfrage {ip}: {e:#}"),
             }
         }
+        api_minute(&state).await;
     }
+}
+
+/// FRITZ!Box, OPNsense, MikroTik: verbundene Geräte jede Minute auffrischen
+async fn api_minute(state: &AppState) {
+    let rows: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT DISTINCT d.id, host(d.ip), d.tls_pin, c.kind FROM devices d
+           JOIN device_credentials dc ON dc.device_id = d.id JOIN credentials c ON c.id = dc.credential_id
+          WHERE d.status = 'up' AND c.kind = ANY($1) AND d.inventory ? c.kind
+            AND d.inventory_at < now() - interval '50 seconds'",
+    )
+    .bind(API_KINDS)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for (id, ip, pin, kind) in rows {
+        let Ok(addr) = ip.parse::<Ipv4Addr>() else { continue };
+        let _perf = crate::perf::Timer::new("Router-Abfrage (je Minute)");
+        let Ok(creds) = load_credentials(state, id).await else { continue };
+        let Some(cred) = creds.iter().find(|c| c.kind == kind && c.linked) else { continue };
+        let Ok((mut data, _)) = collect_api(&kind, addr, cred, pin.as_deref()).await else { continue };
+        let fresh = data.as_object_mut().and_then(|d| d.remove("clients")).unwrap_or(json!([]));
+        // Bisherige Clients dieser Quelle durch die neuen ersetzen, die anderer Quellen behalten
+        let current: Option<Value> = sqlx::query_scalar("SELECT inventory->'netclients' FROM devices WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .ok()
+            .flatten();
+        let mut clients: Vec<Value> = current
+            .as_ref()
+            .and_then(|c| c["clients"].as_array())
+            .map(|list| list.iter().filter(|c| c["source"] != kind.as_str()).cloned().collect())
+            .unwrap_or_default();
+        for mut c in fresh.as_array().cloned().unwrap_or_default() {
+            c["source_id"] = json!(id);
+            clients.push(c);
+        }
+        let mut sources: Vec<Value> = current.as_ref().and_then(|c| c["sources"].as_array().cloned()).unwrap_or_default();
+        if !sources.contains(&json!(kind)) {
+            sources.push(json!(kind));
+        }
+        let netclients = json!({ "sources": sources, "clients": clients, "time": chrono::Utc::now() });
+        let saved = sqlx::query(
+            "UPDATE devices SET inventory = jsonb_set(jsonb_set(inventory, ARRAY[$2::text], $3), '{netclients}', $4) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(&kind)
+        .bind(&data)
+        .bind(&netclients)
+        .execute(&state.db)
+        .await;
+        if saved.is_err() {
+            continue;
+        }
+        if let Err(e) = apply_clients(state, id, netclients["clients"].as_array().map(Vec::as_slice).unwrap_or_default()).await {
+            tracing::warn!("Verbundene Geräte von {ip} nicht übernommen: {e:#}");
+        }
+        state.hub.publish(&json!({ "type": "unifi", "controller": id, "time": chrono::Utc::now() }));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verbundene Geräte aus Routern, Switches und Access Points (herstellerübergreifend)
+// ---------------------------------------------------------------------------
+
+/// Zugangsarten mit eigener Schnittstelle, die verbundene Geräte liefern
+pub const API_KINDS: &[&str] = &["fritzbox", "opnsense", "mikrotik"];
+
+pub fn api_label(kind: &str) -> &'static str {
+    match kind {
+        "fritzbox" => "FRITZ!Box",
+        "opnsense" => "OPNsense",
+        "mikrotik" => "MikroTik",
+        _ => "Schnittstelle",
+    }
+}
+
+/// Eine der Hersteller-Schnittstellen abfragen → (Daten, gesehenes Zertifikat)
+pub async fn collect_api(kind: &str, ip: Ipv4Addr, cred: &Credential, pin: Option<&str>) -> Result<(Value, Option<String>)> {
+    match kind {
+        "fritzbox" => Ok((fritzbox::collect(ip, cred).await?, None)),
+        "opnsense" => opnsense::collect(ip, cred, pin).await,
+        "mikrotik" => mikrotik::collect(ip, cred, pin).await,
+        other => anyhow::bail!("{other} ist keine Router-Schnittstelle"),
+    }
+}
+
+/// Client-Listen aller Quellen dieses Geräts einsammeln → `inventory.netclients`
+/// (die großen Listen werden aus den Einzelteilen entfernt, damit sie nicht doppelt gespeichert werden)
+fn rebuild_netclients(inventory: &mut Map<String, Value>, device_id: i64) -> Option<usize> {
+    let mut all: Vec<Value> = Vec::new();
+    let mut sources: Vec<&str> = Vec::new();
+    for (part, key) in [("ssh", "net_clients"), ("snmp", "net_clients"), ("fritzbox", "clients"), ("opnsense", "clients"), ("mikrotik", "clients")] {
+        let Some(list) = inventory.get_mut(part).and_then(|p| p.as_object_mut()).and_then(|p| p.remove(key)) else { continue };
+        for mut c in list.as_array().cloned().unwrap_or_default() {
+            c["source_id"] = json!(device_id);
+            all.push(c);
+        }
+        sources.push(part);
+    }
+    if all.is_empty() {
+        inventory.remove("netclients");
+        return None;
+    }
+    let n = all.len();
+    inventory.insert("netclients".into(), json!({ "sources": sources, "clients": all, "time": chrono::Utc::now() }));
+    Some(n)
+}
+
+/// Verbundene Geräte übernehmen: Datenraten/Signal in den Verlauf, „hängt an“, Namen, fehlende MAC-Adressen
+async fn apply_clients(state: &AppState, device_id: i64, clients: &[Value]) -> Result<()> {
+    let mut macs = Vec::new();
+    let (mut rx, mut tx, mut sig) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut child, mut names, mut name_macs) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut ips, mut ip_macs) = (Vec::new(), Vec::new());
+    for c in clients {
+        let Some(mac) = c["mac"].as_str().map(str::to_lowercase) else { continue };
+        let (down, up, s) = (c["down_bps"].as_f64(), c["up_bps"].as_f64(), c["signal_dbm"].as_f64());
+        if down.is_some() || up.is_some() || s.is_some() {
+            macs.push(mac.clone());
+            rx.push(down);
+            tx.push(up);
+            sig.push(s.map(|v| v as f32));
+        }
+        // Direkt an diesem Gerät angeschlossen (WLAN-Station oder Switch-/LAN-Port)?
+        let direct = matches!(c["source"].as_str(), Some("wifi" | "switch" | "fritzbox" | "mikrotik"))
+            && (c["type"] == "wireless" || c.get("port").is_some_and(|p| !p.is_null()));
+        if direct {
+            child.push(mac.clone());
+        }
+        if let Some(name) = c["name"].as_str().filter(|n| !n.trim().is_empty()) {
+            name_macs.push(mac.clone());
+            names.push(name.to_string());
+        }
+        if let Some(ip) = c["ip"].as_str().filter(|i| i.parse::<Ipv4Addr>().is_ok()) {
+            ip_macs.push(mac.clone());
+            ips.push(ip.to_string());
+        }
+    }
+    if !macs.is_empty() {
+        sqlx::query(
+            "INSERT INTO device_stats (time, device_id, rx_bps, tx_bps, wifi_signal)
+             SELECT now(), d.id, u.rx, u.tx, u.sig
+               FROM UNNEST($1::text[], $2::float8[], $3::float8[], $4::real[]) AS u(mac, rx, tx, sig)
+               JOIN devices d ON lower(d.mac) = u.mac
+              WHERE NOT EXISTS (SELECT 1 FROM devices c WHERE c.inventory ? 'unifi'
+                                  AND c.inventory->'unifi'->'clients' @> jsonb_build_array(jsonb_build_object('mac', u.mac)))",
+        )
+        .bind(&macs)
+        .bind(&rx)
+        .bind(&tx)
+        .bind(&sig)
+        .execute(&state.db)
+        .await?;
+    }
+    if !child.is_empty() {
+        // Nur setzen, wenn noch nichts bekannt ist – UniFi oder eine Angabe von Hand haben Vorrang
+        sqlx::query(
+            "UPDATE devices SET parent_id = $2
+              WHERE lower(mac) = ANY($1) AND parent_id IS NULL AND NOT parent_manual AND id <> $2",
+        )
+        .bind(&child)
+        .bind(device_id)
+        .execute(&state.db)
+        .await?;
+    }
+    if !names.is_empty() {
+        sqlx::query(
+            "UPDATE devices d SET reported_name = u.name
+               FROM UNNEST($1::text[], $2::text[]) AS u(mac, name)
+              WHERE lower(d.mac) = u.mac AND d.reported_name IS NULL AND d.name IS NULL",
+        )
+        .bind(&name_macs)
+        .bind(&names)
+        .execute(&state.db)
+        .await?;
+    }
+    if !ips.is_empty() {
+        // Von Hand angelegte Geräte ohne MAC-Adresse bekommen sie über die IP
+        sqlx::query(
+            "UPDATE devices d SET mac = u.mac
+               FROM UNNEST($1::text[], $2::text[]) AS u(mac, ip)
+              WHERE d.mac IS NULL AND d.ip = u.ip::inet
+                AND NOT EXISTS (SELECT 1 FROM devices x WHERE lower(x.mac) = u.mac)",
+        )
+        .bind(&ip_macs)
+        .bind(&ips)
+        .execute(&state.db)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Erfolgreiche automatische Zugangsdaten fest zuordnen

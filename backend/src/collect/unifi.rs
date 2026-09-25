@@ -12,92 +12,20 @@
 //! Der Controller hat meist ein selbst signiertes Zertifikat. Es wird beim ersten Kontakt gemerkt
 //! (Fingerabdruck, wie beim SSH-Host-Schlüssel); ändert es sich, wird nichts gesendet.
 
-use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
+use std::{collections::HashMap, net::Ipv4Addr};
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures::{stream, StreamExt};
 use reqwest::{header, Client, StatusCode};
 use serde_json::{json, Value};
 
-use super::Credential;
+use super::{
+    tls::{self, Pin},
+    Credential,
+};
 
 const DEFAULT_PORTS: &[u16] = &[11443, 443, 8443];
 const MAX_CLIENTS: usize = 2000;
-
-/// Nimmt nur das gemerkte Zertifikat an (oder beim ersten Kontakt jedes) und merkt sich den Fingerabdruck
-#[derive(Debug)]
-struct Pin {
-    expected: Option<String>,
-    seen: std::sync::Mutex<Option<String>>,
-    provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
-}
-
-impl rustls::client::danger::ServerCertVerifier for Pin {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        use sha2::Digest;
-        let fingerprint = hex::encode(sha2::Sha256::digest(end_entity.as_ref()));
-        *self.seen.lock().unwrap() = Some(fingerprint.clone());
-        match &self.expected {
-            Some(pin) if *pin != fingerprint => Err(rustls::Error::General("NetPulse-Pin: Zertifikat geändert".into())),
-            _ => Ok(rustls::client::danger::ServerCertVerified::assertion()),
-        }
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-/// Hat der Controller ein anderes Zertifikat als das gemerkte?
-fn pin_mismatch(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| {
-        let mut source: Option<&dyn std::error::Error> = Some(c);
-        while let Some(err) = source {
-            if err.to_string().contains("NetPulse-Pin") || format!("{err:?}").contains("NetPulse-Pin") {
-                return true;
-            }
-            source = err.source();
-        }
-        false
-    })
-}
-
-fn client(pin: std::sync::Arc<Pin>) -> Result<Client> {
-    let tls = rustls::ClientConfig::builder_with_provider(pin.provider.clone())
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(pin)
-        .with_no_client_auth();
-    Ok(Client::builder()
-        .use_preconfigured_tls(tls)
-        .cookie_store(true)
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .user_agent("NetPulse")
-        .build()?)
-}
 
 /// Eingetragener Port zuerst, danach die üblichen – ein falsch eingetragener Port (z. B. 8443 statt
 /// 11443 beim UniFi OS Server) soll die Verbindung nicht verhindern
@@ -115,12 +43,8 @@ fn ports(cred: &Credential) -> Vec<u16> {
 /// `pinned`: gemerkter Zertifikats-Fingerabdruck; zurück kommt der gesehene (zum Merken beim ersten Mal).
 pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> Result<(Value, Option<String>)> {
     let secret = cred.secret.password.clone().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("API-Schlüssel bzw. Passwort fehlt"))?;
-    let pin = std::sync::Arc::new(Pin {
-        expected: pinned.map(str::to_string),
-        seen: std::sync::Mutex::default(),
-        provider: std::sync::Arc::new(rustls::crypto::ring::default_provider()),
-    });
-    let http = client(pin.clone())?;
+    let pin = Pin::new(pinned);
+    let http = tls::client(pin.clone())?;
     let username = cred.username.clone().filter(|u| !u.trim().is_empty());
     let mut last_error = anyhow!("Controller nicht erreichbar");
     let ports = ports(cred);
@@ -135,11 +59,10 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> R
         match result {
             Ok(mut data) => {
                 data["port"] = json!(port);
-                let seen = pin.seen.lock().unwrap().clone();
-                return Ok((data, seen));
+                return Ok((data, pin.seen()));
             }
             // Der Pin-Fehler steckt tief in der Fehlerkette (reqwest → hyper → rustls) – ganze Kette prüfen
-            Err(e) if pin_mismatch(&e) => {
+            Err(e) if tls::pin_mismatch(&e) => {
                 bail!(
                     "Das Zertifikat des Controllers hat sich geändert – Zugangsdaten wurden NICHT gesendet (möglicher Angriff). \
                      Wurde der Controller neu installiert, beim Gerät unter „Einstellungen“ den gespeicherten Schlüssel zurücksetzen."

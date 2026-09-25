@@ -19,6 +19,7 @@ dns-lookup = "2"
 flate2 = "1"
 futures = "0.3"
 hex = "0.4"
+md-5 = "0.10"
 # Web Push (RFC 8291): Schlüsselableitung und Signatur für die NetPulse-App
 hkdf = "0.12"
 # Zwei-Faktor-Anmeldung (TOTP, RFC 6238)

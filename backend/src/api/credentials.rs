@@ -18,7 +18,7 @@ use crate::{
     AppState,
 };
 
-const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key", "http", "unifi"];
+const KINDS: &[&str] = &["snmp_v2c", "snmp_v3", "ssh_password", "ssh_key", "http", "unifi", "fritzbox", "opnsense", "mikrotik"];
 
 #[derive(Serialize, FromRow)]
 pub struct CredentialInfo {
@@ -64,9 +64,9 @@ fn validate(kind: &str, auto: bool) -> ApiResult<()> {
                 .into(),
         ));
     }
-    if auto && kind == "unifi" {
+    if auto && (kind == "unifi" || crate::collect::API_KINDS.contains(&kind)) {
         return Err(ApiError::BadRequest(
-            "UniFi-Zugangsdaten werden nur dem Controller fest zugeordnet und nie automatisch ausprobiert.".into(),
+            "Diese Zugangsdaten werden nur dem jeweiligen Gerät (Controller/Router) fest zugeordnet und nie automatisch ausprobiert.".into(),
         ));
     }
     if auto && kind == "ssh_password" {

@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/interfaces/history", get(devices::interface_history))
         .route("/devices/{id}/snmp", get(devices::snmp_explorer))
         .route("/events", get(devices::events))
+        .route("/clients", get(devices::unifi_clients))
+        .route("/clients/import", post(devices::unifi_import))
         .route("/unifi/clients", get(devices::unifi_clients))
         .route("/unifi/clients/import", post(devices::unifi_import))
         .route("/energy", get(energy::report))

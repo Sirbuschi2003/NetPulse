@@ -151,6 +151,72 @@ ersten Kontakt gemerkt; ändert es sich, sendet NetPulse nichts mehr und meldet 
 Neuinstallation des Controllers beim Gerät unter „Einstellungen“ den gespeicherten Schlüssel zurücksetzen.
 Die Zugangsdaten werden nie automatisch ausprobiert, sondern nur an das fest zugeordnete Gerät gesendet.
 
+## Verbundene Geräte von Routern, Switches und Access Points
+
+Wie bei UniFi kann NetPulse von vielen weiteren Geräten lesen, **welche Geräte verbunden sind** – mit Namen,
+IP, MAC, Anschluss (Switch-Port bzw. WLAN), WLAN-Signal und Datenrate, soweit das Gerät es hergibt.
+Alle Quellen werden je MAC-Adresse zusammengeführt (die aussagekräftigste gewinnt) und erscheinen:
+
+- in der **Geräteliste** (Spalte/Zeile „Verbindung“, Filter nach WLAN/Kabel/Access Point),
+- beim Router/Switch/Controller im Reiter **„Verbundene Geräte“**,
+- beim einzelnen Gerät in der Übersicht („WLAN-Verbindung laut …“) und im Verlauf (Datenrate, Signal),
+- in den Dashboard-Kacheln **„Top-Verbraucher im Netz“** und **„Schwaches WLAN“**.
+
+Geräte, die ein Router kennt, NetPulse aber noch nicht (z. B. aus anderen VLANs), lassen sich in der Geräteliste
+mit **„Als Geräte übernehmen“** auf einmal anlegen. Nie wird etwas an den Geräten verändert.
+
+| Quelle | Zugangsart | liefert |
+|---|---|---|
+| UniFi | UniFi-Controller | alles, inkl. Signal und Datenrate je Client (siehe oben) |
+| AVM FRITZ!Box | FRITZ!Box (TR-064) | alle Geräte mit Namen, LAN-Port bzw. WLAN, WLAN-Signal (in %), Geschwindigkeit |
+| OPNsense | OPNsense (API-Schlüssel) | alle Geräte **aller VLANs** mit Namen (DHCP), Hersteller, VLAN und **Datenrate** |
+| MikroTik | MikroTik RouterOS (REST) | WLAN-Clients mit Signal und Datenrate, Bridge-Port, ARP, DHCP-Namen |
+| Linux/OpenWrt-Router und -Access-Points | SSH | WLAN-Stationen mit Signal, Datenrate, SSID, Band; DHCP-Namen; ARP |
+| OPNsense/pfSense per SSH | SSH | DHCP-Namen (ISC/Kea/Dnsmasq) und ARP-Tabelle |
+| verwaltete Switches (jeder Hersteller) | SNMP | an welchem **Port** ein Gerät hängt (BRIDGE-/Q-BRIDGE-MIB); ARP-Tabelle von Routern |
+
+Datenraten entstehen aus Byte-Zählern und erscheinen daher ab der **zweiten** Abfrage. FRITZ!Box, OPNsense und
+MikroTik werden – wie UniFi – **jede Minute** aktualisiert, SSH/SNMP im normalen Abfragetakt (Standard 5 Minuten).
+
+### AVM FRITZ!Box
+1. In der FRITZ!Box: **Heimnetz → Netzwerk → Netzwerkeinstellungen → „Zugriff für Anwendungen zulassen“** einschalten.
+2. **System → FRITZ!Box-Benutzer → Benutzer hinzufügen** (z. B. „netpulse“, eigenes Passwort, keine weiteren Rechte nötig).
+3. In NetPulse unter **Zugangsdaten** → Art **„AVM FRITZ!Box (TR-064)“**, Benutzer + Passwort, Port leer (49000).
+4. Zugangsdaten der FRITZ!Box zuordnen („Geräte zuordnen“ → FRITZ!Box auswählen → „Testen & zuordnen“).
+
+Die Anmeldung läuft per HTTP-Digest – das Passwort wird nie im Klartext übertragen. Die WLAN-Signalstärke meldet die
+FRITZ!Box in Prozent; NetPulse rechnet sie ungefähr in dBm um (angezeigt mit Hinweis „geschätzt“).
+Datenraten je Gerät gibt die FRITZ!Box nicht heraus.
+
+### OPNsense (API)
+1. **System → Zugang → Benutzer → +**: Benutzer „netpulse“ (Anmeldung per Oberfläche nicht nötig).
+2. **Berechtigungen** (nur lesend): *Diagnostics: ARP Table*, *Reporting: Traffic*, sowie je nach DHCP-Server
+   *Services: DHCPv4: Leases* bzw. *Services: Kea DHCP* / *Services: Dnsmasq DNS/DHCP*.
+3. Beim Benutzer unter **API-Schlüssel → +** einen Schlüssel erzeugen (Datei mit `key` und `secret` wird heruntergeladen).
+4. In NetPulse: Art **„OPNsense (API-Schlüssel)“**, Feld „API-Schlüssel“ = `key`, „API-Secret“ = `secret`, Port leer (443)
+   bzw. der Port der OPNsense-Weboberfläche. Der OPNsense zuordnen.
+
+Das (meist selbst signierte) Zertifikat wird beim ersten Kontakt gemerkt; ändert es sich, sendet NetPulse den Schlüssel
+nicht mehr. Die Datenrate je Gerät kommt aus „Top Talkers“ aller internen Schnittstellen (WAN wird ausgelassen).
+
+### MikroTik RouterOS 7
+1. **System → Users → Groups**: vorhandene Gruppe **„read“** nutzen, Benutzer „netpulse“ anlegen.
+2. **IP → Services**: **www-ssl** (Port 443, Zertifikat nötig) oder **www** (Port 80 – nur im LAN verwenden) einschalten,
+   am besten mit „Available From“ auf die IP des NetPulse-Hosts beschränkt.
+3. In NetPulse: Art **„MikroTik RouterOS (REST-API)“**, Benutzer + Passwort, Port 443 (bzw. 80). Dem Router zuordnen.
+
+Unterstützt werden die WLAN-Pakete „wireless“, „wifi“ (ab 7.13) und CAPsMAN.
+
+### Linux- und OpenWrt-Router/Access-Points (SSH)
+Funktioniert automatisch mit den normalen SSH-Zugangsdaten (Schlüssel empfohlen), sobald das Gerät ein
+**WLAN im AP-Modus** (`iw`) oder einen **DHCP-Server** (dnsmasq, Kea, ISC) hat. Gelesen werden `iw dev … station dump`,
+die Lease-Dateien und `ip neigh`/`arp -an`. Unter OpenWrt: `opkg install iw` (falls nicht vorhanden).
+
+### Verwaltete Switches (SNMP)
+Mit normalen SNMP-Zugangsdaten liest NetPulse die Weiterleitungstabelle (BRIDGE-MIB/Q-BRIDGE-MIB) und ordnet jedes
+Gerät dem **Port** zu, an dem es direkt hängt. Ports mit mehr als drei MAC-Adressen gelten als Verbindung zu einem
+weiteren Switch/Access Point und werden dafür nicht verwendet. Router liefern per SNMP zusätzlich ihre ARP-Tabelle.
+
 ## Protokolle: Syslog und SNMP-Traps
 
 NetPulse nimmt Protokollmeldungen per **Syslog (UDP 5514)** und **SNMP-Traps (UDP 1162, v1/v2c)** an.

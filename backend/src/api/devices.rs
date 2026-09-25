@@ -259,17 +259,9 @@ pub async fn detail(
                 )
             };
             let dev: Option<(Value,)> = sqlx::query_as(&find("devices")).bind(mac).fetch_optional(&st.db).await?;
-            let cli: Option<(Value,)> = sqlx::query_as(&find("clients")).bind(mac).fetch_optional(&st.db).await?;
-            let mut cli = cli.map(|v| v.0);
-            // Access Point/Switch, an dem der Client hängt, als Link auf das NetPulse-Gerät
-            if let Some(c) = cli.as_mut() {
-                if let Some(up) = c["uplink_mac"].as_str() {
-                    let parent: Option<(i64,)> =
-                        sqlx::query_as("SELECT id FROM devices WHERE lower(mac) = lower($1) LIMIT 1").bind(up).fetch_optional(&st.db).await?;
-                    c["uplink_device_id"] = json!(parent.map(|p| p.0));
-                }
-            }
-            (dev.map(|v| v.0), cli)
+            // Was Router, Switches, Access Points und Controller über dieses Gerät wissen – zusammengeführt
+            let (clients, _) = all_clients(&st, Some(mac)).await?;
+            (dev.map(|v| v.0), clients.into_iter().next())
         }
         None => (None, None),
     };
@@ -289,7 +281,7 @@ pub async fn detail(
         "events": events,
         "bucket_minutes": bucket_minutes,
         "unifi_device": unifi_device,
-        "unifi_client": unifi_client,
+        "net_client": unifi_client,
     })))
 }
 
@@ -741,70 +733,125 @@ pub async fn create(
     Ok(Json(json!({ "ok": true, "id": id, "ip": ip.to_string() })))
 }
 
-/// Alle Clients aus den UniFi-Controllern, mit Verweis auf das passende NetPulse-Gerät
-pub async fn unifi_clients(State(st): State<AppState>, _user: CurrentUser) -> ApiResult<Json<Value>> {
-    let controllers: Vec<(i64, String, Value, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT id, COALESCE(name, reported_name, hostname, host(ip)), inventory->'unifi', inventory_at
-           FROM devices WHERE inventory ? 'unifi'",
+/// Verbundene Geräte aus allen Quellen (UniFi, Router, Switches, Access Points), je MAC zusammengeführt.
+/// `only_mac`: nur dieses eine Gerät. Liefert (Clients, Quellen-Geräte).
+async fn all_clients(st: &AppState, only_mac: Option<&str>) -> ApiResult<(Vec<Value>, Vec<Value>)> {
+    use crate::collect::netclients;
+    let rows: Vec<(i64, String, Option<String>, Value)> = sqlx::query_as(
+        "SELECT id, COALESCE(name, reported_name, hostname, host(ip)), lower(mac),
+                jsonb_build_object('unifi', inventory->'unifi', 'net', inventory->'netclients')
+           FROM devices WHERE inventory ? 'unifi' OR inventory ? 'netclients'",
     )
     .fetch_all(&st.db)
     .await?;
+    let wanted = only_mac.and_then(netclients::norm_mac);
+    let mut entries: Vec<Value> = Vec::new();
+    let mut sources: Vec<Value> = Vec::new();
+    for (id, label, own_mac, inv) in &rows {
+        let mut add = |mut c: Value, source: &str| {
+            if wanted.as_deref().is_some_and(|w| c["mac"].as_str().and_then(netclients::norm_mac).as_deref() != Some(w)) {
+                return;
+            }
+            if c["source"].is_null() {
+                c["source"] = json!(source);
+            }
+            c["source_id"] = json!(id);
+            // Direkt an diesem Gerät angeschlossen → es ist der „Verbunden über“-Eintrag
+            let direct = matches!(c["source"].as_str(), Some("wifi" | "switch" | "fritzbox" | "mikrotik"))
+                && (c["type"] == "wireless" || c.get("port").is_some_and(|p| !p.is_null()));
+            if direct && c["uplink_name"].is_null() {
+                c["uplink_name"] = json!(label);
+                c["uplink_mac"] = json!(own_mac);
+                c["uplink_device_id"] = json!(id);
+            }
+            entries.push(c);
+        };
+        if let Some(list) = inv["unifi"]["clients"].as_array() {
+            for c in list {
+                add(c.clone(), "unifi");
+            }
+        }
+        if let Some(list) = inv["net"]["clients"].as_array() {
+            for c in list {
+                add(c.clone(), "router");
+            }
+        }
+        let kinds: Vec<String> =
+            inv["net"]["sources"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect();
+        sources.push(json!({
+            "controller_id": id,
+            "controller": label,
+            "unifi": !inv["unifi"].is_null(),
+            "client_details": inv["unifi"]["client_details"],
+            "api": inv["unifi"]["api"],
+            "sources": kinds,
+        }));
+    }
+    let mut merged = netclients::merge(entries);
     let known: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT id, lower(mac), COALESCE(name, reported_name, hostname, host(ip)) FROM devices WHERE mac IS NOT NULL",
     )
     .fetch_all(&st.db)
     .await?;
-    let by_mac: std::collections::HashMap<&str, (i64, &str)> = known.iter().map(|(id, mac, label)| (mac.as_str(), (*id, label.as_str()))).collect();
-    let mut clients = Vec::new();
-    let mut details = Vec::new();
-    for (cid, clabel, data, _) in &controllers {
-        details.push(json!({ "controller_id": cid, "controller": clabel, "client_details": data["client_details"], "api": data["api"] }));
-        for c in data["clients"].as_array().into_iter().flatten() {
-            let lookup = |key: &str| c[key].as_str().and_then(|m| by_mac.get(m.to_lowercase().as_str())).copied();
-            let (own, uplink) = (lookup("mac"), lookup("uplink_mac"));
-            let mut c = c.clone();
-            if let Some((id, label)) = own {
-                c["device_id"] = json!(id);
-                c["device_label"] = json!(label);
-            }
-            if let Some((id, _)) = uplink {
+    let by_mac: std::collections::HashMap<&str, (i64, &str)> =
+        known.iter().map(|(id, mac, label)| (mac.as_str(), (*id, label.as_str()))).collect();
+    for c in merged.iter_mut() {
+        let own = c["mac"].as_str().and_then(|m| by_mac.get(m)).copied();
+        if let Some((id, label)) = own {
+            c["device_id"] = json!(id);
+            c["device_label"] = json!(label);
+        }
+        if c["uplink_device_id"].is_null() {
+            let up = c["uplink_mac"].as_str().and_then(|m| by_mac.get(m.to_lowercase().as_str())).copied();
+            if let Some((id, _)) = up {
                 c["uplink_device_id"] = json!(id);
             }
-            c["controller_id"] = json!(cid);
-            clients.push(c);
         }
+        // Kompatibel zur bisherigen Oberfläche
+        c["controller_id"] = c["source_id"].clone();
     }
-    Ok(Json(json!({
-        "clients": clients,
-        "controllers": details,
-        "updated_at": controllers.iter().filter_map(|c| c.3).max(),
-    })))
+    Ok((merged, sources))
 }
 
-/// Clients aus dem UniFi-Controller, die NetPulse noch nicht kennt, als Geräte anlegen
+/// Alle verbundenen Geräte (für Geräteliste, Clients-Reiter und Dashboard)
+pub async fn unifi_clients(State(st): State<AppState>, _user: CurrentUser) -> ApiResult<Json<Value>> {
+    let (clients, controllers) = all_clients(&st, None).await?;
+    Ok(Json(json!({ "clients": clients, "controllers": controllers })))
+}
+
+/// Verbundene Geräte, die NetPulse noch nicht kennt, als Geräte anlegen (aus allen Quellen)
 pub async fn unifi_import(State(st): State<AppState>, AdminUser(user): AdminUser) -> ApiResult<Json<Value>> {
+    let (clients, _) = all_clients(&st, None).await?;
+    let (mut ips, mut macs, mut names, mut vendors) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for c in clients.iter().filter(|c| c["device_id"].is_null()) {
+        let ip = c["ip"].as_str().filter(|i| i.parse::<std::net::Ipv4Addr>().is_ok());
+        let (Some(ip), Some(mac)) = (ip, c["mac"].as_str()) else { continue };
+        ips.push(ip.to_string());
+        macs.push(mac.to_string());
+        names.push(c["name"].as_str().or(c["hostname"].as_str()).map(str::to_string));
+        vendors.push(c["vendor"].as_str().map(str::to_string));
+    }
     let ids: Vec<(i64,)> = sqlx::query_as(
-        r"WITH c AS (
-             SELECT DISTINCT ON (lower(e->>'mac')) lower(e->>'mac') AS mac, e->>'ip' AS ip,
-                    NULLIF(e->>'name', '') AS name, NULLIF(e->>'vendor', '') AS vendor
-               FROM devices d, jsonb_array_elements(d.inventory->'unifi'->'clients') e
-              WHERE d.inventory ? 'unifi' AND e->>'mac' IS NOT NULL AND e->>'ip' ~ '^\d{1,3}(\.\d{1,3}){3}$'),
-           ins AS (
+        "WITH ins AS (
              INSERT INTO devices (ip, mac, reported_name, vendor, status)
-             SELECT c.ip::inet, c.mac, c.name, c.vendor, 'unknown' FROM c
-              WHERE NOT EXISTS (SELECT 1 FROM devices x WHERE lower(x.mac) = c.mac)
+             SELECT u.ip::inet, u.mac, u.name, u.vendor, 'unknown'
+               FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS u(ip, mac, name, vendor)
              ON CONFLICT (ip) DO NOTHING
              RETURNING id, host(ip) AS ip, reported_name),
            ev AS (
              INSERT INTO events (device_id, kind, message)
-             SELECT id, 'added', 'Aus dem UniFi-Controller übernommen: ' || COALESCE(reported_name, ip) || ' (' || ip || ')' FROM ins)
+             SELECT id, 'added', 'Aus Router/Controller übernommen: ' || COALESCE(reported_name, ip) || ' (' || ip || ')' FROM ins)
          SELECT id FROM ins",
     )
+    .bind(&ips)
+    .bind(&macs)
+    .bind(&names)
+    .bind(&vendors)
     .fetch_all(&st.db)
     .await?;
     for (id,) in &ids {
         crate::scanner::reclassify(&st.db, *id).await?;
     }
-    audit::by(&st.db, &user, "unifi_import", json!({ "count": ids.len() })).await;
+    audit::by(&st.db, &user, "clients_import", json!({ "count": ids.len() })).await;
     Ok(Json(json!({ "ok": true, "added": ids.len() })))
 }

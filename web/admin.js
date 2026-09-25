@@ -338,7 +338,12 @@ const CRED_KINDS = {
   ssh_password: { label: 'SSH mit Passwort', icon: 'lock', port: 22 },
   http: { label: 'HTTP / Web-Anmeldung (z. B. Shelly)', icon: 'bolt', port: 80 },
   unifi: { label: 'UniFi-Controller (API-Schlüssel)', icon: 'access-point', port: '11443 / 443 / 8443' },
+  fritzbox: { label: 'AVM FRITZ!Box (TR-064)', icon: 'router', port: 49000 },
+  opnsense: { label: 'OPNsense (API-Schlüssel)', icon: 'wall', port: 443 },
+  mikrotik: { label: 'MikroTik RouterOS (REST-API)', icon: 'router', port: '443 / 80' },
 };
+/** Nur fest einem Gerät zugeordnet, nie automatisch ausprobiert */
+const DEVICE_ONLY_KINDS = ['unifi', 'fritzbox', 'opnsense', 'mikrotik'];
 
 async function viewCredentials() {
   const render = async () => {
@@ -377,7 +382,7 @@ async function viewCredentials() {
       <label>Art<select name="kind"${editing ? ' disabled' : ''}>${Object.entries(CRED_KINDS).map(([k, v]) => `<option value="${k}"${cred && cred.kind === k ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
       <label>Name<input name="name" required maxlength="100" value="${esc(cred ? cred.name : '')}" placeholder="z. B. Heimnetz SNMP"></label>
       <div class="form-row">
-        <label data-for="snmp_v3 ssh_key ssh_password http unifi"><span id="user-label">Benutzername</span><input name="username" value="${esc(cred ? cred.username || '' : '')}" autocomplete="off"></label>
+        <label data-for="snmp_v3 ssh_key ssh_password http unifi fritzbox opnsense mikrotik"><span id="user-label">Benutzername</span><input name="username" value="${esc(cred ? cred.username || '' : '')}" autocomplete="off"></label>
         <label>Port<input name="port" type="number" min="1" max="65535" value="${esc(cred ? cred.port || '' : '')}" placeholder="Standard"></label>
       </div>
       <label data-for="snmp_v2c">Community<input name="community" type="password" autocomplete="new-password" placeholder="${keep || 'z. B. public'}"></label>
@@ -391,7 +396,7 @@ async function viewCredentials() {
           <option value="des">DES (veraltet)</option><option value="none">keine</option></select></label>
         <label>Verschlüsselungs-Passwort<input name="priv_password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
       </div>
-      <label data-for="ssh_password http unifi"><span id="pw-label">Passwort</span><input name="password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
+      <label data-for="ssh_password http unifi fritzbox opnsense mikrotik"><span id="pw-label">Passwort</span><input name="password" type="password" autocomplete="new-password" placeholder="${keep}"></label>
       <label data-for="ssh_key">Privater Schlüssel (OpenSSH-Format)<textarea name="private_key" class="mono" placeholder="${keep || '-----BEGIN OPENSSH PRIVATE KEY-----'}"></textarea></label>
       <label data-for="ssh_key">Passphrase (optional)<input name="passphrase" type="password" autocomplete="new-password" placeholder="${keep}"></label>
       <label class="inline" data-for="snmp_v2c snmp_v3 ssh_key http"><input type="checkbox" name="auto"${cred && cred.auto ? ' checked' : ''}> Automatisch bei allen passenden Geräten verwenden</label>
@@ -408,9 +413,17 @@ async function viewCredentials() {
             + 'vorher als Shelly ausgewiesen haben; bei Gen2+ wird es per Digest-Verfahren nie im Klartext übertragen.'
             : kind === 'unifi' ? 'Empfohlen: API-Schlüssel – funktioniert auch mit Zwei-Faktor-Anmeldung. Anlegen in UniFi Network unter '
               + 'Einstellungen → Control Plane → Integrations → „Create API Key“. Benutzername dann leer lassen. Alternativ ein lokales Konto '
-              + 'ohne 2FA (Benutzer + Passwort). Port leer = 11443 (UniFi OS Server), 443 und 8443 werden probiert. Wird nur dem Controller zugeordnet.' : '';
-      $('#user-label', dlg).textContent = kind === 'unifi' ? 'Benutzername (nur lokales Konto, sonst leer)' : 'Benutzername';
-      $('#pw-label', dlg).textContent = kind === 'unifi' ? 'API-Schlüssel (oder Passwort des lokalen Kontos)' : 'Passwort';
+              + 'ohne 2FA (Benutzer + Passwort). Port leer = 11443 (UniFi OS Server), 443 und 8443 werden probiert. Wird nur dem Controller zugeordnet.'
+              : kind === 'fritzbox' ? 'In der FRITZ!Box: Heimnetz → Netzwerk → Netzwerkeinstellungen → „Zugriff für Anwendungen zulassen“ einschalten. '
+                + 'Am besten einen eigenen FRITZ!Box-Benutzer anlegen (System → FRITZ!Box-Benutzer). Liefert alle Geräte mit Namen, LAN/WLAN, '
+                + 'WLAN-Signal und Geschwindigkeit. Das Passwort wird per Digest-Verfahren nie im Klartext übertragen. Wird nur der FRITZ!Box zugeordnet.'
+                : kind === 'opnsense' ? 'In OPNsense: System → Zugang → Benutzer → neuen Benutzer anlegen, Rechte nur lesend („Diagnostics: ARP Table“, '
+                  + '„Reporting: Traffic“, „Services: DHCP … Leases“), dort unter „API-Schlüssel“ einen Schlüssel erzeugen. Schlüssel ins Feld '
+                  + '„API-Schlüssel“, Secret ins Feld „API-Secret“. Liefert alle Geräte aller VLANs mit Namen und aktueller Datenrate.'
+                  : kind === 'mikrotik' ? 'RouterOS 7: Benutzer mit Gruppe „read“ anlegen und unter IP → Services „www-ssl“ (Port 443) oder „www“ '
+                    + '(Port 80, nur im LAN) einschalten. Liefert WLAN-Clients mit Signal und Datenrate, Bridge-Ports, ARP und DHCP-Namen.' : '';
+      $('#user-label', dlg).textContent = kind === 'unifi' ? 'Benutzername (nur lokales Konto, sonst leer)' : kind === 'opnsense' ? 'API-Schlüssel' : 'Benutzername';
+      $('#pw-label', dlg).textContent = kind === 'unifi' ? 'API-Schlüssel (oder Passwort des lokalen Kontos)' : kind === 'opnsense' ? 'API-Secret' : 'Passwort';
       if (kind === 'http' && !form.elements.username.value) form.elements.username.value = 'admin';
     };
     form.kind.addEventListener('change', update);
@@ -423,7 +436,7 @@ async function viewCredentials() {
       ['community', 'password', 'private_key', 'passphrase', 'auth_password', 'priv_password'].forEach((n) => { if (form.elements[n].value) secret[n] = form.elements[n].value; });
       if (kind === 'snmp_v3') { secret.auth_protocol = v('auth_protocol'); secret.priv_protocol = v('priv_protocol'); }
       const body = { name: v('name'), kind, username: v('username'), port: v('port') ? Number(v('port')) : null,
-        auto: kind !== 'unifi' && form.auto.checked, secret };
+        auto: !DEVICE_ONLY_KINDS.includes(kind) && form.auto.checked, secret };
       attempt(async () => {
         if (editing) {
           await api(`/credentials/${cred.id}`, { method: 'PATCH', body });
@@ -443,6 +456,9 @@ async function viewCredentials() {
   const suits = (cred, d) => {
     if (cred.kind === 'http') return d.integration === 'shelly';
     if (cred.kind === 'unifi') return (d.open_ports || []).some((p) => [11443, 8443].includes(p));
+    if (cred.kind === 'fritzbox') return (d.open_ports || []).includes(49000) || /avm|fritz/i.test(`${d.vendor} ${d.hostname} ${d.model}`);
+    if (cred.kind === 'opnsense') return /opnsense/i.test(`${d.os} ${d.hostname} ${d.model}`) || d.device_type === 'firewall';
+    if (cred.kind === 'mikrotik') return /mikrotik|routerboard/i.test(`${d.vendor} ${d.model} ${d.os}`) || (d.open_ports || []).includes(8728);
     if (cred.kind.startsWith('ssh')) return (d.open_ports || []).includes(cred.port || 22);
     return d.monitored && d.status === 'up';
   };

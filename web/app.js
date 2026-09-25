@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.4#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.6#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -568,8 +568,8 @@ const WIDGETS = {
   services: { title: 'Dienste im Netz', icon: 'plug-connected', render: wServices },
   new: { title: 'Neu entdeckt (7 Tage)', icon: 'radar', render: wNew },
   slowest: { title: 'Langsamste Antwortzeiten', icon: 'clock', render: wSlowest },
-  top_clients: { title: 'Top-Verbraucher im Netz (UniFi)', icon: 'arrows-exchange', render: wTopClients },
-  weak_wifi: { title: 'Schwaches WLAN (UniFi)', icon: 'wifi', render: wWeakWifi },
+  top_clients: { title: 'Top-Verbraucher im Netz', icon: 'arrows-exchange', render: wTopClients },
+  weak_wifi: { title: 'Schwaches WLAN', icon: 'wifi', render: wWeakWifi },
   device: { title: 'Gerät', icon: 'activity', render: wDevice, perDevice: true },
 };
 
@@ -987,13 +987,14 @@ function clientName(c) {
 }
 
 async function wTopClients() {
-  const r = await api('/unifi/clients');
-  if (!r.controllers.length) return empty('Kein UniFi-Controller eingebunden', 'access-point');
+  const r = await api('/clients');
+  if (!r.controllers.length) return empty('Noch keine Quelle für verbundene Geräte – z. B. UniFi, FRITZ!Box, OPNsense, MikroTik oder einen Switch per SNMP einbinden', 'access-point');
   const rate = (c) => (c.down_bps || 0) + (c.up_bps || 0);
   const top = r.clients.filter((c) => rate(c) > 0).sort((a, b) => rate(b) - rate(a)).slice(0, 8);
   if (!top.length) {
     const ok = r.controllers.some((x) => x.client_details && x.client_details.ok);
-    return empty(ok ? 'Gerade überträgt kein Client nennenswert Daten' : 'Datenraten je Client liefert der Controller nicht – siehe Controller → Reiter „Clients“', 'arrows-exchange');
+    const any = r.clients.some((c) => c.down_bps != null || c.up_bps != null);
+    return empty(ok || any ? 'Gerade überträgt kein Gerät nennenswert Daten' : 'Keine Quelle liefert Datenraten je Gerät (möglich mit UniFi, OPNsense, MikroTik oder Linux/OpenWrt-Access-Points)', 'arrows-exchange');
   }
   const max = Math.max(...top.map(rate));
   return `<ul class="list">${top.map((c) => `<li><div class="grow ellipsis">${clientName(c)}
@@ -1003,12 +1004,12 @@ async function wTopClients() {
 }
 
 async function wWeakWifi() {
-  const r = await api('/unifi/clients');
-  if (!r.controllers.length) return empty('Kein UniFi-Controller eingebunden', 'access-point');
+  const r = await api('/clients');
+  if (!r.controllers.length) return empty('Noch keine Quelle für verbundene Geräte eingebunden', 'access-point');
   const weak = r.clients.filter((c) => c.signal_dbm != null && c.signal_dbm < -70).sort((a, b) => a.signal_dbm - b.signal_dbm).slice(0, 8);
   if (!weak.length) {
     const any = r.clients.some((c) => c.signal_dbm != null);
-    return empty(any ? 'Alle WLAN-Clients haben guten Empfang' : 'Signalstärken liefert der Controller nicht – siehe Controller → Reiter „Clients“', 'wifi');
+    return empty(any ? 'Alle WLAN-Geräte haben guten Empfang' : 'Keine Quelle liefert WLAN-Signalstärken (möglich mit UniFi, FRITZ!Box, MikroTik oder Linux/OpenWrt-Access-Points)', 'wifi');
   }
   return `<ul class="list">${weak.map((c) => `<li><div class="grow ellipsis">${clientName(c)}
       <div class="muted small">${esc(c.uplink_name || '')}${c.band ? ` · ${esc(c.band)}` : ''}</div></div>${signalBadge(c.signal_dbm)}</li>`).join('')}</ul>`;

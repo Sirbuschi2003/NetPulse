@@ -110,6 +110,15 @@ async fn check(cred: &Credential, t: &Target) -> Result<String> {
                 data["clients_total"]
             ))
         }
+        "fritzbox" | "opnsense" | "mikrotik" => {
+            let (data, _) = super::collect_api(&cred.kind, ip, cred, t.tls_pin.as_deref()).await?;
+            let what = [data["model"].as_str(), data["board"].as_str(), data["version"].as_str()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(format!("{} ok{} – {} verbundene Geräte", super::api_label(&cred.kind), if what.is_empty() { String::new() } else { format!(" ({what})") }, data["clients_total"]))
+        }
         other => bail!("unbekannte Zugangsart {other}"),
     }
 }
@@ -161,6 +170,7 @@ pub async fn start_scan(state: &AppState, credential_id: i64, device_ids: Option
                 "ssh_key" => format!("status = 'up' AND {} = ANY(open_ports)", cred.port.unwrap_or(22)),
                 "http" => "status = 'up' AND integration = 'shelly'".to_string(),
                 "unifi" => bail!("UniFi-Zugangsdaten bitte gezielt dem Controller zuordnen (Gerät auswählen)"),
+                "fritzbox" | "opnsense" | "mikrotik" => bail!("Diese Zugangsdaten bitte gezielt dem Router zuordnen (Gerät auswählen)"),
                 _ => bail!("SSH-Passwörter werden nur an ausgewählte Geräte gesendet – bitte Geräte auswählen"),
             };
             sqlx::query_as(&format!("{TARGET_SELECT} WHERE {filter} ORDER BY ip")).fetch_all(&state.db).await?

@@ -289,6 +289,33 @@ if [ "$(uname -s)" = "FreeBSD" ]; then
   ifconfig 2>/dev/null | awk '/^[a-z]/ {i=$1; sub(":", "", i)} /inet / {print "ip="i"|"$2}'
   echo "default_if=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
 fi
+# Verbundene Geräte – nur auf Routern/Access Points (WLAN-Stationen oder DHCP-Server vorhanden):
+# WLAN-Stationen (iw), DHCP-Leases (dnsmasq/OpenWrt, Kea, ISC) und die ARP-Tabelle für IP ↔ MAC
+router=
+if command -v iw >/dev/null 2>&1; then
+  for w in $(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}'); do
+    info=$(iw dev "$w" info 2>/dev/null)
+    echo "$info" | grep -q "type AP" || continue
+    router=1
+    echo "wifi_if=$w|$(echo "$info" | sed -n 's/^[[:space:]]*ssid //p' | head -1)|$(echo "$info" | awk '$1 == "channel" {gsub(/\(/, "", $3); print $2"|"$3; exit}')"
+    iw dev "$w" station dump 2>/dev/null | sed "s/^/sta=$w|/"
+  done
+fi
+for f in /tmp/dhcp.leases /var/lib/misc/dnsmasq.leases /var/db/dnsmasq.leases /tmp/dnsmasq.leases; do
+  [ -r "$f" ] && { router=1; awk 'NF >= 4 {print "lease="$2"|"$3"|"$4}' "$f"; }
+done
+if [ -r /var/db/kea/kea-leases4.csv ]; then router=1; awk -F, 'NR > 1 && $2 != "" {print "lease="$2"|"$1"|"$9}' /var/db/kea/kea-leases4.csv; fi
+if [ -r /var/dhcpd/var/db/dhcpd.leases ]; then
+  router=1
+  awk '/^lease / {ip=$2; m=""; h=""} /hardware ethernet/ {m=$3; sub(";", "", m)} /client-hostname/ {h=$2; gsub(/[";]/, "", h)} /^}/ {if (m != "") print "lease="m"|"ip"|"h}' /var/dhcpd/var/db/dhcpd.leases
+fi
+if [ -n "$router" ]; then
+  if command -v ip >/dev/null 2>&1; then
+    ip neigh show 2>/dev/null | awk '{m=""; d=""; for (i = 1; i < NF; i++) {if ($i == "lladdr") m=$(i+1); if ($i == "dev") d=$(i+1)} if (m != "") print "neigh="$1"|"m"|"d}'
+  else
+    arp -an 2>/dev/null | awk '$4 ~ /:/ {ip=$2; gsub(/[()]/, "", ip); print "neigh="ip"|"$4"|"$6}'
+  fi
+fi
 exit 0
 "#;
 
@@ -327,8 +354,14 @@ fn round1(x: f64) -> f64 {
 fn parse_posix(output: &str, uname: &str) -> Value {
     let mut map = Map::new();
     let mut multi: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    // Zeilen für die Client-Liste (Einrückung von „iw station dump“ bleibt erhalten)
+    let mut client_lines: Vec<(&str, &str)> = Vec::new();
     for line in output.lines() {
         let Some((key, value)) = line.split_once('=') else { continue };
+        if matches!(key, "wifi_if" | "sta" | "neigh" | "lease") {
+            client_lines.push((key, value));
+            continue;
+        }
         match key {
             "temp" | "disk" | "if" | "ip" => multi.entry(key).or_default().push(value),
             _ if !value.trim().is_empty() => {
@@ -438,6 +471,10 @@ fn parse_posix(output: &str, uname: &str) -> Value {
     data.insert("failed_units".into(), json!(num("failed_units")));
     data.insert("containers".into(), json!(num("containers")));
     data.insert("reboot_required".into(), json!(get("reboot_required").is_some()));
+    if !client_lines.is_empty() {
+        let key = get("hostname").unwrap_or_else(|| "ssh".into());
+        data.insert("net_clients".into(), Value::Array(super::netclients::from_ssh(&client_lines, &key)));
+    }
     Value::Object(data)
 }
 
