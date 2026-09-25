@@ -22,6 +22,18 @@ self.addEventListener('push', (event) => {
   // Ob Android zusätzlich ein Pop-up mit Ton zeigt, legt die Benachrichtigungs-Kategorie der App in den
   // Android-Einstellungen fest (siehe „Mein Konto“ bzw. Handbuch).
   const loud = data.severity === 'critical' || data.severity === 'warning';
+  // Rückmeldung an NetPulse: angezeigt oder Fehler (für „Mein Konto“ – so sieht man, ob das Handy mitspielt)
+  const ack = async (ok, error) => {
+    try {
+      const sub = await self.registration.pushManager.getSubscription();
+      if (!sub) return;
+      await fetch('/api/push/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-NetPulse-Csrf': '1' },
+        body: JSON.stringify({ endpoint: sub.endpoint, ok, error: error || null }),
+      });
+    } catch { /* Rückmeldung ist nur eine Hilfe */ }
+  };
   event.waitUntil(self.registration.showNotification(`${icons[data.severity] || ''}${data.title || 'NetPulse'}`, {
     body: data.body || '',
     icon: '/icon-192.png',
@@ -33,7 +45,7 @@ self.addEventListener('push', (event) => {
     timestamp: Date.now(),
     requireInteraction: data.severity === 'critical',
     data: { url: data.url || '/#/alerts' },
-  }));
+  }).then(() => ack(true), (e) => ack(false, `${e && e.name ? `${e.name}: ` : ''}${e && e.message ? e.message : e}`)));
 });
 
 self.addEventListener('notificationclick', (event) => {

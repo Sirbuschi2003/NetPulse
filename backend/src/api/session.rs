@@ -306,9 +306,11 @@ pub async fn push_devices(State(st): State<AppState>, user: CurrentUser) -> ApiR
         last_ok_at: Option<chrono::DateTime<chrono::Utc>>,
         last_error: Option<String>,
         last_error_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_shown_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_show_error: Option<String>,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, endpoint, device, created_at, last_ok_at, last_error, last_error_at
+        "SELECT id, endpoint, device, created_at, last_ok_at, last_error, last_error_at, last_shown_at, last_show_error
            FROM push_subscriptions WHERE user_id = $1 ORDER BY created_at",
     )
     .bind(user.id)
@@ -374,4 +376,33 @@ pub async fn end_other_sessions(State(st): State<AppState>, user: CurrentUser, h
     let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2").bind(user.id).bind(hash).execute(&st.db).await?;
     audit::by(&st.db, &user, "session_end_others", json!({ "count": done.rows_affected() })).await;
     Ok(Json(json!({ "ended": done.rows_affected() })))
+}
+
+#[derive(Deserialize)]
+pub struct PushAck {
+    endpoint: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Rückmeldung des Service Workers auf dem Handy: Push empfangen und angezeigt (oder Fehler).
+/// Ohne Anmeldung, weil die Sitzung auf dem Handy abgelaufen sein kann; die (geheime) Push-Adresse
+/// weist das Gerät aus, und es lassen sich nur deren Zeitstempel ändern.
+pub async fn push_ack(State(st): State<AppState>, Json(req): Json<PushAck>) -> ApiResult<Json<Value>> {
+    if req.endpoint.len() > 2048 {
+        return Err(ApiError::BadRequest("ungültig".into()));
+    }
+    let error: Option<String> = req.error.map(|e| e.chars().filter(|c| !c.is_control()).take(300).collect());
+    sqlx::query(
+        "UPDATE push_subscriptions
+            SET last_shown_at = CASE WHEN $2 THEN now() ELSE last_shown_at END,
+                last_show_error = CASE WHEN $2 THEN NULL ELSE $3 END
+          WHERE endpoint = $1",
+    )
+    .bind(&req.endpoint)
+    .bind(req.ok)
+    .bind(error)
+    .execute(&st.db)
+    .await?;
+    Ok(Json(json!({ "ok": true })))
 }

@@ -1072,6 +1072,10 @@ async function renderPush() {
     ${devices.length ? `<h3 class="sub">Geräte mit Push-Nachrichten</h3><ul class="list">${devices.map((d) => `<li><span class="lead">${icon('device-mobile', 'i-sm')}
       <span>${esc(d.device || 'Gerät')}${sub && d.endpoint === sub.endpoint ? ' <span class="badge accent">dieses</span>' : ''}</span></span>
       <span class="meta">seit ${esc(fmtTime(d.created_at))}${d.last_ok_at ? ` · zuletzt zugestellt ${esc(fmtAgo(d.last_ok_at))}` : ' · noch nichts zugestellt'}
+      ${d.last_shown_at ? ` · <b>auf dem Gerät angezeigt ${esc(fmtAgo(d.last_shown_at))}</b>` : ''}
+      ${d.last_show_error ? `<span class="ch-error">${icon('alert-triangle', 'i-sm')} Anzeige auf dem Gerät fehlgeschlagen: ${esc(d.last_show_error)}</span>` : ''}
+      ${d.last_ok_at && (!d.last_shown_at || new Date(d.last_shown_at) < new Date(d.last_ok_at) - 60000) && !d.last_show_error
+    ? `<span class="ch-warn">${icon('info-circle', 'i-sm')} zugestellt, aber keine Rückmeldung vom Gerät – Android lässt die App im Hintergrund nicht laufen (Akku-Optimierung ausschalten) oder die App ist veraltet (einmal ganz schließen und neu öffnen)</span>` : ''}
       ${d.last_error && (!d.last_ok_at || new Date(d.last_error_at) > new Date(d.last_ok_at)) ? `<span class="ch-error">${icon('alert-triangle', 'i-sm')} ${esc(d.last_error)}</span>` : ''}
       <button class="ghost sm" type="button" data-unsub="${d.id}" title="Abmelden">${icon('x', 'i-sm')}</button></span></li>`).join('')}</ul>` : ''}`;
   $('#install-now')?.addEventListener('click', () => installApp().catch(() => {}));
