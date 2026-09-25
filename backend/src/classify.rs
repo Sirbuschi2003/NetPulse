@@ -44,6 +44,17 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 fn from_inventory(h: &Hints) -> Option<&'static str> {
     let inv = h.inventory?;
 
+    // UniFi-Controller: ist er selbst ein UniFi-Gerät (Dream Machine, Cloud Gateway …), dessen Typ – sonst Server
+    if let Some(unifi) = inv.get("unifi") {
+        let own = unifi["devices"].as_array().into_iter().flatten().find(|d| d["ip"].as_str() == Some(h.ip));
+        if let Some(kind) = own.and_then(|d| d["model"].as_str()).and_then(crate::collect::unifi::device_type) {
+            return Some(kind);
+        }
+        if inv.get("ssh").is_none() && inv.get("snmp").is_none() {
+            return Some("server");
+        }
+    }
+
     if let Some(ssh) = inv.get("ssh") {
         let os = ssh["os"].as_str().unwrap_or_default().to_lowercase();
         if os.contains("opnsense") || os.contains("pfsense") {

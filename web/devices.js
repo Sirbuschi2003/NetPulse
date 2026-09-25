@@ -172,6 +172,29 @@ function liveWatt(d) {
   return `<span class="live-watt" data-watt="${d.id}">${l && l.ok && l.power_w != null ? esc(fmtWatt(l.power_w)) : ''}</span>`;
 }
 
+/** Was der UniFi-Controller über diesen Client weiß (Verbindung, WLAN, Datenraten) */
+function unifiClientBlock(uc) {
+  const wired = uc.type === 'wired';
+  const via = uc.uplink_device_id ? `<a href="#/device/${uc.uplink_device_id}">${esc(uc.uplink_name || uc.uplink_mac)}</a>` : esc(uc.uplink_name || uc.uplink_mac || '–');
+  const rows = [];
+  const add = (label, html) => { if (html != null && html !== '') rows.push(`<dt>${esc(label)}</dt><dd>${html}</dd>`); };
+  add('Verbunden über', `${via}${wired && uc.switch_port != null ? ` · Port ${esc(uc.switch_port)}` : ''}`);
+  if (!wired) {
+    add('WLAN', esc([uc.ssid, uc.band, uc.channel != null ? `Kanal ${uc.channel}` : null, uc.wifi_standard].filter(Boolean).join(' · ')));
+    add('Signal', uc.signal_dbm != null ? signalBadge(uc.signal_dbm, true) : null);
+    add('Verbindungsqualität', uc.satisfaction != null ? `${esc(Math.round(uc.satisfaction))} % <span class="muted small">(Bewertung von UniFi)</span>` : null);
+    add('Verbindungsgeschwindigkeit', uc.link_down_kbps != null ? `↓ ${esc(fmtBps(uc.link_down_kbps * 1000))} · ↑ ${esc(fmtBps((uc.link_up_kbps || 0) * 1000))}` : null);
+  }
+  add('Datenrate gerade', uc.down_bps != null || uc.up_bps != null ? `↓ ${esc(fmtBps(uc.down_bps))} · ↑ ${esc(fmtBps(uc.up_bps))}` : null);
+  add('Übertragen (seit Verbindung)', uc.down_bytes != null ? `↓ ${esc(fmtBytes(uc.down_bytes))} · ↑ ${esc(fmtBytes(uc.up_bytes || 0))}` : null);
+  add('Netz / VLAN', esc([uc.network, uc.vlan ? `VLAN ${uc.vlan}` : null, uc.guest ? 'Gastnetz' : null].filter(Boolean).join(' · ')));
+  add('Verbunden seit', uc.connected_at ? esc(fmtTime(uc.connected_at)) : null);
+  add('Name im Controller', esc(uc.name || ''));
+  return `<header><h2>${icon(wired ? 'plug-connected' : 'wifi')}${wired ? 'Kabel-Verbindung' : 'WLAN-Verbindung'} laut UniFi</h2>
+      ${uc.controller_id ? `<a class="small" href="#/device/${uc.controller_id}">Controller</a>` : ''}</header>
+    <dl class="details">${rows.join('')}</dl>`;
+}
+
 // ---------------------------------------------------------------------------
 // Geräte-Detailseite
 // ---------------------------------------------------------------------------
@@ -179,6 +202,7 @@ function liveWatt(d) {
 async function viewDevice(id) {
   let hours = 24;
   let tab = 'overview';
+  const clientFilter = { q: '', kind: '', ap: '', sort: 'down', dir: -1 };
   let data = await api(`/devices/${encodeURIComponent(id)}?hours=${hours}`);
   const credentials = isAdmin() ? await api('/credentials').catch(() => []) : [];
   const allDevices = isAdmin() ? await api('/devices').catch(() => []) : [];
@@ -189,7 +213,11 @@ async function viewDevice(id) {
     // Live: Shelly über den Echtzeit-Stream, sonst Datenraten per SNMP/SSH (Netzwerk-Schnittstellen)
     if (isShelly()) list.push(['live', 'Live']);
     else if (data.device.has_credentials && (inv.snmp || inv.ssh)) list.push(['live', 'Live']);
-    if (inv.ssh || inv.snmp || inv.shelly || inv.unifi || data.unifi_device || data.unifi_client) list.push(['system', 'System']);
+    if (inv.unifi) {
+      list.push(['unifi', 'UniFi']);
+      list.push(['clients', `Clients (${inv.unifi.clients_total ?? (inv.unifi.clients || []).length})`]);
+    }
+    if (inv.ssh || inv.snmp || inv.shelly || data.unifi_device || data.unifi_client) list.push(['system', 'System']);
     if ((inv.ssh && inv.ssh.interfaces && inv.ssh.interfaces.length) || (inv.snmp && inv.snmp.interfaces)) list.push(['interfaces', 'Schnittstellen']);
     if ((inv.ssh && inv.ssh.disks && inv.ssh.disks.length) || (inv.snmp && inv.snmp.storage && inv.snmp.storage.length)) list.push(['storage', 'Speicher']);
     list.push(['history', 'Verlauf']);
@@ -228,7 +256,7 @@ async function viewDevice(id) {
       setTimeout(reload, 8000);
     }, 'Abfrage gestartet – Ergebnisse erscheinen in wenigen Sekunden'));
     const body = $('#tab-body');
-    const renderers = { overview: tabOverview, live: isShelly() ? tabShellyLive : tabLive, diagnose: tabDiagnose, syslog: () => '<div id="dev-syslog"><div class="empty">Lade …</div></div>', system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings };
+    const renderers = { overview: tabOverview, live: isShelly() ? tabShellyLive : tabLive, diagnose: tabDiagnose, syslog: () => '<div id="dev-syslog"><div class="empty">Lade …</div></div>', system: tabSystem, interfaces: tabInterfaces, storage: tabStorage, history: tabHistory, events: tabEvents, explorer: tabExplorer, settings: tabSettings, unifi: tabUnifi, clients: () => '<div id="uc-area"><div class="empty">Lade …</div></div>' };
     body.innerHTML = (renderers[tab] || tabOverview)();
     applyWidths(body);
     if (tab === 'settings') bindSettings();
@@ -243,6 +271,8 @@ async function viewDevice(id) {
       }).catch((e) => { $('#dev-syslog').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
     }
     if (tab === 'interfaces') bindInterfaces();
+    if (tab === 'unifi') bindUnifi();
+    if (tab === 'clients') bindClients();
     if (tab === 'explorer') bindExplorer();
     $('#range')?.addEventListener('change', (ev) => { hours = Number(ev.target.value); reload(); });
     $('#goto-diagnose')?.addEventListener('click', (ev) => { ev.preventDefault(); tab = 'diagnose'; render(); });
@@ -422,6 +452,7 @@ async function viewDevice(id) {
       <section class="span-2">
         ${gauges.length ? `<div class="gauges">${gauges.map(([ic, label, v, unit]) => `<div class="gauge"><div class="l">${icon(ic, 'i-sm')}${label}</div>
           <div class="v">${unit === 'W' ? esc(fmtWatt(v)) : `${Math.round(v)} ${unit}`}</div>${unit === '%' ? meter(v) : unit === '°C' ? meter(v, { warn: 70, crit: 85 }) : ''}</div>`).join('')}</div><br>` : ''}
+        ${data.unifi_client && !data.unifi_device ? `<div class="uc-overview">${unifiClientBlock(data.unifi_client)}</div><br>` : ''}
         <h3>Antwortzeit ${avail != null ? `<span class="muted">· ${avail} % verfügbar (${hours} h)</span>` : ''}</h3>
         ${lineChart(data.points, { series: [{ key: 'rtt_ms', label: 'Antwortzeit' }], format: fmtMs, width: 760, outages: true })}
         ${inventoryStatus()}
@@ -536,31 +567,11 @@ async function viewDevice(id) {
 
   // ----- UniFi -----
   function unifiCards() {
-    const u = (data.inventory || {}).unifi;
     const ud = data.unifi_device;
     const uc = data.unifi_client;
     let html = '';
     const state = (s) => (s === 'online' || s === 'connected'
       ? '<span class="badge st-up">online</span>' : `<span class="badge st-down">${esc(s || 'unbekannt')}</span>`);
-    if (u) {
-      const devs = [...(u.devices || [])].sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
-      html += `<section class="card"><header><h2>${icon('access-point')}UniFi-Controller</h2>
-          <span class="badge plain">${esc(u.api === 'integration' ? 'API-Schlüssel' : 'lokales Konto')} · Port ${esc(u.port)}</span></header>
-        <div class="kpis">
-          ${kpi('UniFi-Geräte', `${u.devices_online}/${u.devices_total}`, 'router', u.devices_online < u.devices_total ? 'tone-warn' : 'tone-up', '#/devices?q=ubiquiti')}
-          ${kpi('Clients', u.clients_total, 'devices', 'tone-accent', '#/devices')}
-          ${kpi('Sites', (u.sites || []).length, 'topology-star-3', 'tone-info', '#')}
-          ${kpi('Version', u.version || '–', 'box', 'tone-muted', '#')}
-        </div>
-        <div class="table-wrap"><table><thead><tr><th>Gerät</th><th>Status</th><th>Modell</th><th>IP</th><th>Clients</th><th>CPU</th><th>RAM</th><th>Uplink ↓/↑</th><th>Laufzeit</th><th>Firmware</th></tr></thead>
-        <tbody>${devs.map((d) => `<tr><td>${esc(d.name || d.mac)}</td><td>${state(d.state)}</td><td>${esc(d.model || '')}</td>
-          <td class="mono">${esc(d.ip || '')}</td><td>${esc(d.clients ?? '')}</td><td>${esc(fmtPct(d.cpu_pct))}</td><td>${esc(fmtPct(d.mem_pct))}</td>
-          <td class="small">${d.rx_bps != null || d.tx_bps != null ? `${esc(fmtBps(d.rx_bps))} / ${esc(fmtBps(d.tx_bps))}` : ''}</td>
-          <td class="small">${d.uptime_s != null ? esc(fmtDuration(d.uptime_s)) : ''}</td><td class="small">${esc(d.firmware || '')}</td></tr>`).join('')
-          || `<tr><td colspan="10">${empty('Keine UniFi-Geräte gemeldet', 'router')}</td></tr>`}</tbody></table></div>
-        <p class="muted small">Namen, Modelle und Auslastung werden automatisch auf die passenden Geräte in NetPulse übertragen
-          (Zuordnung über die MAC-Adresse); Client-Namen ergänzen Geräte ohne eigenen Namen.</p></section>`;
-    }
     if (ud) {
       html += `<section class="card"><header><h2>${icon('access-point')}Laut UniFi-Controller</h2>${state(ud.state)}</header>
         <div class="gauges">${ud.cpu_pct != null ? `<div><span class="muted small">CPU</span>${meter(ud.cpu_pct)}</div>` : ''}
@@ -573,13 +584,147 @@ async function viewDevice(id) {
           <dt>Laufzeit</dt><dd>${ud.uptime_s != null ? esc(fmtDuration(ud.uptime_s)) : '–'}</dd></dl>
         <p class="muted small"><a href="#/device/${ud.controller_id}">Zum Controller</a></p></section>`;
     }
-    if (uc && !ud) {
-      html += `<section class="card"><header><h2>${icon(uc.type === 'wired' ? 'plug-connected' : 'wifi')}Im UniFi-Netz</h2></header>
-        <dl class="details"><dt>Name im Controller</dt><dd>${esc(uc.name || '–')}</dd>
-          <dt>Verbindung</dt><dd>${esc(uc.type === 'wired' ? 'Kabel' : uc.type === 'wireless' ? 'WLAN' : uc.type || '–')}</dd>
-          ${uc.connected_at ? `<dt>Verbunden seit</dt><dd>${esc(fmtTime(uc.connected_at))}</dd>` : ''}</dl></section>`;
-    }
+    if (uc && !ud) html += `<section class="card">${unifiClientBlock(uc)}</section>`;
     return html;
+  }
+
+  // ----- UniFi-Controller -----
+  function tabUnifi() {
+    const u = (data.inventory || {}).unifi;
+    const known = new Map(allDevicesByMac().map((x) => [x.mac, x]));
+    const devs = [...(u.devices || [])].sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
+    const stateBadge = (st) => (st === 'online' || st === 'connected'
+      ? '<span class="badge st-up">online</span>' : `<span class="badge st-down">${esc(st || 'unbekannt')}</span>`);
+    const devLink = (d) => {
+      const k = d.mac && known.get(d.mac);
+      return k ? `<a href="#/device/${k.id}">${esc(d.name || d.mac)}</a>` : esc(d.name || d.mac);
+    };
+    return `<section class="card"><header><h2>${icon('access-point')}UniFi-Controller</h2>
+        <span class="badge plain">${esc(u.api === 'integration' ? 'API-Schlüssel' : 'lokales Konto')} · Port ${esc(u.port)} · aktualisiert jede Minute</span></header>
+      <div class="kpis">
+        <a class="kpi" href="#" data-goto-tab="unifi"><span class="kpi-icon ${u.devices_online < u.devices_total ? 'tone-warn' : 'tone-up'}">${icon('router')}</span>
+          <span><div class="kpi-value">${esc(u.devices_online)}/${esc(u.devices_total)}</div><div class="kpi-label">UniFi-Geräte online</div></span></a>
+        <a class="kpi" href="#" data-goto-tab="clients"><span class="kpi-icon tone-accent">${icon('devices')}</span>
+          <span><div class="kpi-value">${esc(u.clients_total)}</div><div class="kpi-label">Clients anzeigen</div></span></a>
+        <div class="kpi"><span class="kpi-icon tone-info">${icon('topology-star-3')}</span>
+          <span><div class="kpi-value">${esc((u.sites || []).length)}</div><div class="kpi-label">${(u.sites || []).length === 1 ? 'Site' : 'Sites'}</div></span></div>
+        <div class="kpi"><span class="kpi-icon tone-muted">${icon('box')}</span>
+          <span><div class="kpi-value">${esc(u.version || '–')}</div><div class="kpi-label">Network-Version</div></span></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Gerät</th><th>Status</th><th>Modell</th><th>IP</th><th class="num">Clients</th><th>CPU</th><th>RAM</th><th class="num">Uplink ↓ / ↑</th><th>Laufzeit</th><th>Firmware</th></tr></thead>
+      <tbody>${devs.map((d) => `<tr><td>${devLink(d)}</td><td>${stateBadge(d.state)}</td><td>${esc(d.model || '')}</td>
+        <td class="mono">${esc(d.ip || '')}</td>
+        <td class="num">${d.clients ? `<a href="#" data-ap="${esc(d.mac)}" title="Clients an diesem Gerät zeigen">${esc(d.clients)}</a>` : esc(d.clients ?? '')}</td>
+        <td class="uc-meter">${d.cpu_pct != null ? meter(d.cpu_pct) : ''}<span class="small">${esc(fmtPct(d.cpu_pct))}</span></td>
+        <td class="uc-meter">${d.mem_pct != null ? meter(d.mem_pct) : ''}<span class="small">${esc(fmtPct(d.mem_pct))}</span></td>
+        <td class="num small">${d.rx_bps != null || d.tx_bps != null ? `${esc(fmtBps(d.rx_bps))} / ${esc(fmtBps(d.tx_bps))}` : ''}</td>
+        <td class="small">${d.uptime_s != null ? esc(fmtDuration(d.uptime_s)) : ''}</td><td class="small">${esc(d.firmware || '')}</td></tr>`).join('')
+        || `<tr><td colspan="10">${empty('Keine UniFi-Geräte gemeldet', 'router')}</td></tr>`}</tbody></table></div>
+      <p class="muted small">Namen, Modelle und Auslastung werden automatisch auf die passenden Geräte in NetPulse übertragen (Zuordnung über die MAC-Adresse).</p></section>`;
+  }
+
+  function allDevicesByMac() {
+    return (allDevices || []).filter((x) => x.mac).map((x) => ({ id: x.id, mac: x.mac.toLowerCase() }));
+  }
+
+  function bindUnifi() {
+    $$('[data-goto-tab]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); tab = a.dataset.gotoTab; render(); }));
+    $$('[data-ap]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); clientFilter.ap = a.dataset.ap; tab = 'clients'; render(); }));
+  }
+
+  // ----- Clients des Controllers -----
+  function bindClients() {
+    const area = $('#uc-area');
+    let r = null;
+    const sorters = {
+      name: (c) => String(c.device_label || c.name || c.hostname || c.mac || '').toLowerCase(),
+      ip: (c) => (c.ip || '').split('.').map((n) => n.padStart(3, '0')).join('.'),
+      via: (c) => String(c.uplink_name || '').toLowerCase(),
+      signal: (c) => (c.signal_dbm == null ? -999 : c.signal_dbm),
+      down: (c) => c.down_bps || 0,
+      up: (c) => c.up_bps || 0,
+      total: (c) => (c.down_bytes || 0) + (c.up_bytes || 0),
+      since: (c) => (c.connected_at ? -new Date(c.connected_at).getTime() : 0),
+    };
+    const paint = () => {
+      const list = r.clients.filter((c) => c.controller_id === data.device.id);
+      const aps = [...new Map(list.filter((c) => c.uplink_mac).map((c) => [c.uplink_mac, c.uplink_name || c.uplink_mac])).entries()]
+        .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'de'));
+      const q = clientFilter.q.toLowerCase();
+      const shown = list.filter((c) => (!clientFilter.kind || c.type === clientFilter.kind)
+          && (!clientFilter.ap || c.uplink_mac === clientFilter.ap)
+          && (!q || [c.name, c.hostname, c.device_label, c.ip, c.mac, c.vendor, c.ssid, c.uplink_name, c.network].join(' ').toLowerCase().includes(q)))
+        .sort((a, b) => {
+          const va = sorters[clientFilter.sort](a);
+          const vb = sorters[clientFilter.sort](b);
+          return (va < vb ? -1 : va > vb ? 1 : 0) * clientFilter.dir;
+        });
+      const ctrl = r.controllers.find((x) => x.controller_id === data.device.id) || {};
+      const details = ctrl.client_details || {};
+      const sum = (k) => list.reduce((a, c) => a + (c[k] || 0), 0);
+      const wifi = list.filter((c) => c.type === 'wireless');
+      const th = (key, label, cls = '') => `<th class="sortable ${cls}${clientFilter.sort === key ? ' sorted' : ''}" data-sort="${key}">${label}${clientFilter.sort === key ? (clientFilter.dir < 0 ? ' ↓' : ' ↑') : ''}</th>`;
+      area.innerHTML = `
+        ${details.ok === false ? `<div class="notice info">${icon('info-circle')}<span><b>Datenraten und WLAN-Signal je Client fehlen.</b>
+          Dein Controller gibt sie nicht mit dem API-Schlüssel heraus${details.reason ? ` (${esc(details.reason)})` : ''}. Abhilfe: in UniFi unter
+          <i>Einstellungen → Admins &amp; Benutzer</i> ein Konto mit Rolle <b>„Nur ansehen“</b> und <b>„Auf lokalen Zugriff beschränken“</b> anlegen (ohne 2FA)
+          und bei den NetPulse-Zugangsdaten <b>Benutzername und Passwort</b> statt des API-Schlüssels eintragen.</span></div>` : ''}
+        <div class="kpis">
+          <div class="kpi"><span class="kpi-icon tone-accent">${icon('devices')}</span><span><div class="kpi-value">${esc(list.length)}</div><div class="kpi-label">Clients</div></span></div>
+          <div class="kpi"><span class="kpi-icon tone-info">${icon('wifi')}</span><span><div class="kpi-value">${esc(wifi.length)}</div><div class="kpi-label">im WLAN</div></span></div>
+          <div class="kpi"><span class="kpi-icon tone-muted">${icon('plug-connected')}</span><span><div class="kpi-value">${esc(list.length - wifi.length)}</div><div class="kpi-label">per Kabel</div></span></div>
+          ${details.ok !== false ? `<div class="kpi"><span class="kpi-icon tone-up">${icon('arrows-exchange')}</span><span><div class="kpi-value small-val">↓ ${esc(fmtBps(sum('down_bps')))}<br>↑ ${esc(fmtBps(sum('up_bps')))}</div><div class="kpi-label">alle Clients gerade</div></span></div>` : ''}
+        </div>
+        <div class="page-head uc-tools"><div class="actions">
+          <input id="uc-q" type="search" placeholder="Suchen: Name, IP, MAC, Hersteller, SSID …" value="${esc(clientFilter.q)}" aria-label="Clients suchen">
+          <select id="uc-kind" aria-label="Verbindung"><option value="">WLAN + Kabel</option><option value="wireless"${clientFilter.kind === 'wireless' ? ' selected' : ''}>nur WLAN</option><option value="wired"${clientFilter.kind === 'wired' ? ' selected' : ''}>nur Kabel</option></select>
+          <select id="uc-ap" aria-label="Access Point / Switch"><option value="">Alle Access Points / Switches</option>
+            ${aps.map(([mac, name]) => `<option value="${esc(mac)}"${clientFilter.ap === mac ? ' selected' : ''}>${esc(name)}</option>`).join('')}</select></div>
+          <span class="muted small">${esc(shown.length)} von ${esc(list.length)} · aktualisiert jede Minute</span></div>
+        <div class="table-wrap"><table class="uc-table"><thead><tr>
+          ${th('name', 'Client')}${th('ip', 'IP / MAC')}${th('via', 'Verbunden über')}${th('signal', 'Signal')}${th('down', '↓ Download', 'num')}${th('up', '↑ Upload', 'num')}${th('total', 'Übertragen', 'num')}${th('since', 'Verbunden')}</tr></thead>
+          <tbody>${shown.slice(0, 500).map((c) => `<tr>
+            <td><div class="cell-dev">${icon(c.type === 'wired' ? 'plug-connected' : 'wifi', 'i-sm')}<div class="ellipsis">${clientName(c)}
+              <div class="muted small">${esc([c.vendor, c.hostname && c.hostname !== c.name ? c.hostname : null, c.network, c.guest ? 'Gast' : null].filter(Boolean).join(' · '))}</div></div></div></td>
+            <td class="mono small">${esc(c.ip || '–')}<div class="muted">${esc(c.mac || '')}</div></td>
+            <td class="small">${c.uplink_device_id ? `<a href="#/device/${c.uplink_device_id}">${esc(c.uplink_name || c.uplink_mac || '')}</a>` : esc(c.uplink_name || c.uplink_mac || '–')}
+              <div class="muted">${esc(c.type === 'wired' ? (c.switch_port != null ? `Port ${c.switch_port}` : 'Kabel')
+                : [c.ssid, c.band, c.channel != null ? `Kanal ${c.channel}` : null, c.wifi_standard].filter(Boolean).join(' · '))}</div></td>
+            <td>${c.type === 'wired' ? '<span class="muted small">Kabel</span>' : signalBadge(c.signal_dbm)}</td>
+            <td class="num">${esc(c.down_bps != null ? fmtBps(c.down_bps) : '–')}</td>
+            <td class="num">${esc(c.up_bps != null ? fmtBps(c.up_bps) : '–')}</td>
+            <td class="num small">${c.down_bytes != null || c.up_bytes != null ? `↓ ${esc(fmtBytes(c.down_bytes || 0))}<br>↑ ${esc(fmtBytes(c.up_bytes || 0))}` : '–'}</td>
+            <td class="small" title="${esc(fmtTime(c.connected_at))}">${esc(c.connected_at ? fmtAgo(c.connected_at).replace('vor ', 'seit ') : '–')}</td></tr>`).join('')
+            || `<tr><td colspan="8">${empty('Keine Clients passen zum Filter.', 'devices')}</td></tr>`}</tbody></table></div>
+        ${shown.length > 500 ? '<p class="muted small">Es werden die ersten 500 angezeigt – Filter oder Suche verwenden.</p>' : ''}`;
+      const qInput = $('#uc-q');
+      qInput.addEventListener('input', () => {
+        clientFilter.q = qInput.value.trim();
+        const pos = qInput.selectionStart;
+        paint();
+        const n = $('#uc-q');
+        n.focus();
+        n.setSelectionRange(pos, pos);
+      });
+      $('#uc-kind').addEventListener('change', (ev) => { clientFilter.kind = ev.target.value; paint(); });
+      $('#uc-ap').addEventListener('change', (ev) => { clientFilter.ap = ev.target.value; paint(); });
+      $$('[data-sort]', area).forEach((h) => h.addEventListener('click', () => {
+        if (clientFilter.sort === h.dataset.sort) clientFilter.dir *= -1;
+        else { clientFilter.sort = h.dataset.sort; clientFilter.dir = ['name', 'ip', 'via'].includes(h.dataset.sort) ? 1 : -1; }
+        paint();
+      }));
+    };
+    const load = async () => {
+      try {
+        r = await api('/unifi/clients');
+        if (tab === 'clients' && $('#uc-area')) paint();
+      } catch (e) {
+        area.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+      }
+    };
+    load();
+    // Nach jeder Minuten-Abfrage des Controllers neu laden (nicht, während in der Suche getippt wird)
+    onLive((msg) => { if (msg.type === 'unifi' && msg.controller === data.device.id && document.activeElement?.id !== 'uc-q') load(); });
   }
 
   // ----- System -----
@@ -785,8 +930,10 @@ async function viewDevice(id) {
           ${lineChart(s, { series: [{ key: 'power_w', label: 'Leistung' }], format: fmtWatt, width: 1100, height: 190 })}</section>` : ''}
         ${has('clients') ? `<section class="card span-3"><header><h2>${icon('antenna-bars-5')}WLAN-Clients</h2></header>
           ${lineChart(s, { series: [{ key: 'clients', label: 'Clients' }], width: 1100, height: 170 })}</section>` : ''}
-        ${has('rx_bps') ? `<section class="card span-2"><header><h2>${icon('arrows-exchange')}${data.device.wan_interface ? `Internet (${esc(data.device.wan_interface)})` : 'Datenverkehr'}</h2></header>
-          ${lineChart(s, { series: [{ key: 'rx_bps', label: 'Empfangen' }, { key: 'tx_bps', label: 'Gesendet' }], format: fmtBps, width: 720 })}</section>` : ''}
+        ${has('rx_bps') ? `<section class="card span-2"><header><h2>${icon('arrows-exchange')}${data.device.wan_interface ? `Internet (${esc(data.device.wan_interface)})` : data.unifi_client ? 'Datenverkehr laut UniFi' : 'Datenverkehr'}</h2></header>
+          ${lineChart(s, { series: [{ key: 'rx_bps', label: data.unifi_client ? 'Download' : 'Empfangen' }, { key: 'tx_bps', label: data.unifi_client ? 'Upload' : 'Gesendet' }], format: fmtBps, width: 720 })}</section>` : ''}
+        ${has('wifi_signal') ? `<section class="card span-3"><header><h2>${icon('wifi')}WLAN-Signal</h2><span class="muted small">besser als −67 dBm = gut, unter −75 dBm = schwach</span></header>
+          ${lineChart(s.map((p) => ({ ...p, sig100: p.wifi_signal == null ? null : p.wifi_signal + 100 })), { series: [{ key: 'sig100', label: 'Signal' }], format: (v) => `${Math.round(v - 100)} dBm`, maxValue: 80, width: 1100, height: 170 })}</section>` : ''}
         ${has('temp_c') ? `<section class="card span-1"><header><h2>${icon('temperature')}Temperatur</h2></header>
           ${lineChart(s, { series: [{ key: 'temp_c', label: 'Temperatur' }], format: (v) => `${Math.round(v)} °C`, width: 360 })}</section>` : ''}
       </div>
@@ -831,9 +978,10 @@ async function viewDevice(id) {
           </div><div class="actions"><button type="submit">${icon('key')}Zuordnen &amp; abfragen</button></div></form>`
           : `<p class="muted">Noch keine Zugangsdaten angelegt. <a href="#/credentials">Jetzt anlegen</a></p>`}
         ${inventoryStatus()}
-        ${data.ssh_host_key ? `<h3>SSH-Host-Schlüssel</h3><p class="mono small">${esc(data.ssh_host_key)}</p>
-          <button type="button" class="ghost sm" id="reset-key">${icon('refresh', 'i-sm')}Schlüssel vergessen</button>
-          <p class="hint">Nur nach einer Neuinstallation des Geräts nötig.</p>` : ''}
+        ${data.ssh_host_key ? `<h3>SSH-Host-Schlüssel</h3><p class="mono small">${esc(data.ssh_host_key)}</p>` : ''}
+        ${data.tls_pin ? `<h3>Gemerktes Zertifikat</h3><p class="mono small wrap-any">SHA-256 ${esc(data.tls_pin)}</p>` : ''}
+        ${data.ssh_host_key || data.tls_pin ? `<button type="button" class="ghost sm" id="reset-key">${icon('refresh', 'i-sm')}Gemerkte Schlüssel vergessen</button>
+          <p class="hint">Nur nach einer Neuinstallation des Geräts nötig – oder wenn die Diagnose „Zertifikat geändert“ meldet und du sicher bist, dass das Gerät neu aufgesetzt wurde.</p>` : ''}
       </section>
       <section class="span-1"><h3>Gerät entfernen</h3>
         <p class="muted small">Löscht das Gerät mit allen Messwerten und Ereignissen. Wird es beim nächsten Scan wieder gefunden, taucht es neu auf.</p>
@@ -865,7 +1013,7 @@ async function viewDevice(id) {
       }, 'Zugeordnet – das Gerät wird jetzt abgefragt');
     });
     $('#reset-key')?.addEventListener('click', () => {
-      if (!confirm('Gespeicherten SSH-Host-Schlüssel vergessen? Beim nächsten Kontakt wird der dann gesendete Schlüssel übernommen.')) return;
+      if (!confirm('Gemerkten SSH-Schlüssel bzw. das Zertifikat vergessen? Beim nächsten Kontakt wird der dann gesendete Schlüssel übernommen.')) return;
       attempt(async () => { await api(`/devices/${id}/ssh-key`, { method: 'DELETE' }); await reload(); render(); }, 'Schlüssel zurückgesetzt');
     });
     $('#dev-delete').addEventListener('click', () => {
@@ -1114,7 +1262,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.9.1#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.9.3#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

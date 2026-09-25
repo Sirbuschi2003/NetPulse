@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
     tokio::spawn(scanner::monitor::run(state.clone(), pinger));
     tokio::spawn(collect::run(state.clone(), poll_rx));
     tokio::spawn(collect::fast::run(state.clone()));
+    tokio::spawn(collect::unifi_loop(state.clone()));
     tokio::spawn(alerts::run(state.clone()));
     tokio::spawn(alerts::deliver::run(state.clone()));
     tokio::spawn(checks::run(state.clone()));

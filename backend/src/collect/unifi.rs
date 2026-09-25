@@ -12,7 +12,7 @@
 //! Der Controller hat meist ein selbst signiertes Zertifikat. Es wird beim ersten Kontakt gemerkt
 //! (Fingerabdruck, wie beim SSH-Host-Schlüssel); ändert es sich, wird nichts gesendet.
 
-use std::{net::Ipv4Addr, time::Duration};
+use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures::{stream, StreamExt};
@@ -70,6 +70,20 @@ impl rustls::client::danger::ServerCertVerifier for Pin {
     }
 }
 
+/// Hat der Controller ein anderes Zertifikat als das gemerkte?
+fn pin_mismatch(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let mut source: Option<&dyn std::error::Error> = Some(c);
+        while let Some(err) = source {
+            if err.to_string().contains("NetPulse-Pin") || format!("{err:?}").contains("NetPulse-Pin") {
+                return true;
+            }
+            source = err.source();
+        }
+        false
+    })
+}
+
 fn client(pin: std::sync::Arc<Pin>) -> Result<Client> {
     let tls = rustls::ClientConfig::builder_with_provider(pin.provider.clone())
         .with_safe_default_protocol_versions()?
@@ -124,7 +138,8 @@ pub async fn collect(ip: Ipv4Addr, cred: &Credential, pinned: Option<&str>) -> R
                 let seen = pin.seen.lock().unwrap().clone();
                 return Ok((data, seen));
             }
-            Err(e) if format!("{e:?}").contains("NetPulse-Pin") => {
+            // Der Pin-Fehler steckt tief in der Fehlerkette (reqwest → hyper → rustls) – ganze Kette prüfen
+            Err(e) if pin_mismatch(&e) => {
                 bail!(
                     "Das Zertifikat des Controllers hat sich geändert – Zugangsdaten wurden NICHT gesendet (möglicher Angriff). \
                      Wurde der Controller neu installiert, beim Gerät unter „Einstellungen“ den gespeicherten Schlüssel zurücksetzen."
@@ -199,9 +214,24 @@ async fn integration(http: &Client, base: &str, key: &str) -> Result<Value> {
     let mut devices = Vec::new();
     let mut clients = Vec::new();
     let mut clients_total = 0;
+    // Datenraten, Signal usw. je Client gibt es nur in der klassischen API – der API-Schlüssel wird dort
+    // von neueren Versionen ebenfalls angenommen. Klappt es nicht, bleiben die Basisdaten.
+    let mut details_error: Option<String> = None;
+    let mut details_ok = false;
     for site in &sites {
         let site_id = site["id"].as_str().unwrap_or_default().to_string();
         let site_name = site["name"].as_str().unwrap_or("Standard").to_string();
+        let site_ref = site["internalReference"].as_str().unwrap_or("default").to_string();
+        let rich: HashMap<String, Value> = match classic_clients_with_key(http, base, key, &site_ref).await {
+            Ok(list) => {
+                details_ok = true;
+                list.into_iter().filter_map(|c| Some((c["mac"].as_str()?.to_lowercase(), c))).collect()
+            }
+            Err(e) => {
+                details_error.get_or_insert_with(|| format!("{e:#}"));
+                HashMap::new()
+            }
+        };
         let (site_devices, _) = get_all(http, &format!("{api}/sites/{site_id}/devices"), key, 1000).await?;
         let (site_clients, total) = get_all(http, &format!("{api}/sites/{site_id}/clients"), key, MAX_CLIENTS).await.unwrap_or_default();
         clients_total += total;
@@ -246,19 +276,38 @@ async fn integration(http: &Client, base: &str, key: &str) -> Result<Value> {
                 "radios": d["interfaces"]["radios"],
             }));
         }
-        let mac_of: std::collections::HashMap<&str, String> = site_devices
+        let mac_of: HashMap<&str, String> = site_devices
             .iter()
             .filter_map(|d| Some((d["id"].as_str()?, d["macAddress"].as_str()?.to_lowercase())))
             .collect();
+        let name_of: HashMap<String, String> = site_devices
+            .iter()
+            .filter_map(|d| Some((d["macAddress"].as_str()?.to_lowercase(), d["name"].as_str()?.to_string())))
+            .collect();
         for c in site_clients {
-            clients.push(json!({
-                "uplink_mac": c["uplinkDeviceId"].as_str().and_then(|id| mac_of.get(id)),
-                "name": c["name"],
-                "mac": c["macAddress"].as_str().map(str::to_lowercase),
-                "ip": c["ipAddress"],
-                "type": c["type"].as_str().map(str::to_lowercase),
-                "connected_at": c["connectedAt"],
-            }));
+            let mac = c["macAddress"].as_str().map(str::to_lowercase);
+            let uplink = c["uplinkDeviceId"].as_str().and_then(|id| mac_of.get(id)).cloned();
+            // Basis aus der Integration-API, ergänzt um die Details der klassischen API
+            let mut entry = match mac.as_deref().and_then(|m| rich.get(m)) {
+                Some(r) => r.clone(),
+                None => json!({}),
+            };
+            let obj = entry.as_object_mut().expect("json-Objekt");
+            let mut set = |k: &str, v: Value| {
+                if !v.is_null() && obj.get(k).is_none_or(Value::is_null) {
+                    obj.insert(k.into(), v);
+                }
+            };
+            set("name", c["name"].clone());
+            set("mac", json!(mac));
+            set("ip", c["ipAddress"].clone());
+            set("type", json!(c["type"].as_str().map(str::to_lowercase)));
+            set("connected_at", c["connectedAt"].clone());
+            set("uplink_mac", json!(uplink));
+            let up = obj.get("uplink_mac").and_then(Value::as_str).and_then(|m| name_of.get(m)).cloned();
+            obj.insert("uplink_name".into(), json!(up));
+            obj.insert("site".into(), json!(site_name));
+            clients.push(entry);
         }
         out_sites.push(json!({ "name": site_name, "devices": site_devices.len(), "clients": total }));
     }
@@ -269,7 +318,69 @@ async fn integration(http: &Client, base: &str, key: &str) -> Result<Value> {
         "devices": devices,
         "clients": clients,
         "clients_total": clients_total,
+        // Datenraten/Signal je Client verfügbar? Sonst der Grund
+        "client_details": if details_ok { json!({ "ok": true }) } else { json!({ "ok": false, "reason": details_error }) },
     })))
+}
+
+/// Klassische Client-Liste (`stat/sta`) mit dem API-Schlüssel – liefert Datenraten, Signal, SSID …
+async fn classic_clients_with_key(http: &Client, base: &str, key: &str, site: &str) -> Result<Vec<Value>> {
+    let url = format!("{base}/proxy/network/api/s/{site}/stat/sta");
+    let response = http.get(&url).header("X-API-KEY", key).header(header::ACCEPT, "application/json").send().await?;
+    let status = response.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        bail!("Der Controller gibt Datenraten je Client nicht mit dem API-Schlüssel heraus");
+    }
+    if !status.is_success() {
+        bail!("Client-Details: Controller antwortete mit {status}");
+    }
+    let body: Value = response.json().await.context("Client-Details nicht lesbar")?;
+    Ok(body["data"].as_array().map(|list| list.iter().map(client_details).collect()).unwrap_or_default())
+}
+
+/// Einheitliche Client-Daten aus der klassischen API.
+/// Richtung: UniFi zählt aus Sicht des Access Points/Switches – „tx“ geht zum Client (= dessen Download).
+fn client_details(c: &Value) -> Value {
+    let num = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()));
+    let wired = c["is_wired"].as_bool() == Some(true);
+    let rate = |key: &str| num(&c[format!("{key}-r")]).or_else(|| num(&c[format!("wired-{key}-r")])).map(|b| b * 8.0);
+    let total = |key: &str| num(&c[key]).or_else(|| num(&c[format!("wired-{key}")]));
+    let band = match c["radio"].as_str() {
+        Some("ng") => Some("2,4 GHz"),
+        Some("na") => Some("5 GHz"),
+        Some("6e") => Some("6 GHz"),
+        _ => None,
+    };
+    let uptime = num(&c["uptime"]);
+    json!({
+        "name": c["name"].as_str().filter(|s| !s.is_empty()).or(c["hostname"].as_str()),
+        "hostname": c["hostname"],
+        "mac": c["mac"].as_str().map(str::to_lowercase),
+        "ip": c["ip"],
+        "vendor": c["oui"].as_str().filter(|s| !s.is_empty()),
+        "type": if wired { "wired" } else { "wireless" },
+        "uplink_mac": c["ap_mac"].as_str().or(c["sw_mac"].as_str()).map(str::to_lowercase),
+        "switch_port": c["sw_port"],
+        "ssid": c["essid"],
+        "band": band,
+        "wifi_standard": c["radio_proto"].as_str().map(|p| format!("Wi-Fi {}", match p {
+            "be" => "7", "ax" => "6", "ac" => "5", "n" => "4", other => other,
+        })),
+        "channel": c["channel"],
+        "signal_dbm": num(&c["signal"]).or_else(|| num(&c["rssi"]).map(|r| r - 95.0)),
+        "satisfaction": num(&c["satisfaction"]),
+        "link_down_kbps": num(&c["tx_rate"]),
+        "link_up_kbps": num(&c["rx_rate"]),
+        "down_bps": rate("tx_bytes"),
+        "up_bps": rate("rx_bytes"),
+        "down_bytes": total("tx_bytes"),
+        "up_bytes": total("rx_bytes"),
+        "uptime_s": uptime,
+        "connected_at": uptime.map(|u| chrono::Utc::now() - chrono::Duration::seconds(u as i64)),
+        "network": c["network"],
+        "vlan": c["vlan"],
+        "guest": c["is_guest"],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -346,14 +457,16 @@ async fn classic(http: &Client, base: &str, user: &str, password: &str) -> Resul
                 "clients": d["num_sta"],
             }));
         }
+        let name_of: HashMap<String, String> = list
+            .iter()
+            .filter_map(|d| Some((d["mac"].as_str()?.to_lowercase(), d["name"].as_str().or(d["hostname"].as_str())?.to_string())))
+            .collect();
         for c in &sta {
-            clients.push(json!({
-                "name": c["name"].as_str().or(c["hostname"].as_str()),
-                "mac": c["mac"].as_str().map(str::to_lowercase),
-                "ip": c["ip"],
-                "type": if c["is_wired"].as_bool() == Some(true) { "wired" } else { "wireless" },
-                "uplink_mac": c["ap_mac"].as_str().or(c["sw_mac"].as_str()).map(str::to_lowercase),
-            }));
+            let mut entry = client_details(c);
+            let up = entry["uplink_mac"].as_str().and_then(|m| name_of.get(m)).cloned();
+            entry["uplink_name"] = json!(up);
+            entry["site"] = json!(label);
+            clients.push(entry);
         }
         out_sites.push(json!({ "name": label, "devices": list.len(), "clients": sta.len() }));
     }
@@ -366,6 +479,7 @@ async fn classic(http: &Client, base: &str, user: &str, password: &str) -> Resul
         "devices": devices,
         "clients": clients,
         "clients_total": clients_total,
+        "client_details": { "ok": true },
     })))
 }
 
@@ -380,14 +494,20 @@ fn summarize(mut data: Value) -> Value {
     data
 }
 
-/// Gerätetyp aus dem UniFi-Modellkürzel
+/// Gerätetyp aus dem UniFi-Modell – Kürzel (klassische API, z. B. „U7PG2“) oder Verkaufsname
+/// (Integration-API, z. B. „AC Mesh“, „US 24 PoE 250W“, „Dream Machine Pro“)
 pub fn device_type(model: &str) -> Option<&'static str> {
     let m = model.to_uppercase();
-    if ["UDM", "UDR", "UCG", "UXG", "USG", "UDW", "UX", "EFG"].iter().any(|p| m.starts_with(p)) {
+    let has = |words: &[&str]| words.iter().any(|w| m.contains(w));
+    if ["UDM", "UDR", "UCG", "UXG", "USG", "UDW", "UX", "EFG"].iter().any(|p| m.starts_with(p))
+        || has(&["DREAM MACHINE", "DREAM ROUTER", "CLOUD GATEWAY", "GATEWAY", "SECURITY GATEWAY", "EXPRESS"])
+    {
         Some("router")
-    } else if m.starts_with("USW") || (m.starts_with("US") && !m.starts_with("USP")) || m.starts_with("ECS") {
+    } else if m.starts_with("USW") || (m.starts_with("US") && !m.starts_with("USP")) || m.starts_with("ECS") || has(&["SWITCH"]) {
         Some("switch")
-    } else if ["U6", "U7", "UAP", "UAL", "UK", "UWB", "E7", "U5", "UBB"].iter().any(|p| m.starts_with(p)) {
+    } else if ["U6", "U7", "UAP", "UAL", "UK", "UWB", "E7", "U5", "UBB", "AC ", "NANOHD", "FLEXHD", "BEACONHD"].iter().any(|p| m.starts_with(p))
+        || has(&["MESH", "IN-WALL", "ACCESS POINT", "LITE AP", "LR AP", "PRO AP"])
+    {
         Some("access_point")
     } else if m.starts_with("UVC") || m.starts_with("G4") || m.starts_with("G5") || m.starts_with("G6") {
         Some("camera")
@@ -407,6 +527,28 @@ mod tests {
         assert_eq!(device_type("UDM-Pro"), Some("router"));
         assert_eq!(device_type("UCG-Ultra"), Some("router"));
         assert_eq!(device_type("Foo"), None);
+        // Verkaufsnamen aus der Integration-API
+        assert_eq!(device_type("AC Mesh"), Some("access_point"));
+        assert_eq!(device_type("US 24 PoE 250W"), Some("switch"));
+        assert_eq!(device_type("USW Lite 8 PoE"), Some("switch"));
+        assert_eq!(device_type("Dream Machine Pro"), Some("router"));
+        assert_eq!(device_type("U6 Long-Range"), Some("access_point"));
+    }
+
+    #[test]
+    fn client_details_aus_klassischer_api() {
+        let c = json!({ "mac": "AA:BB:CC:00:00:01", "hostname": "handy", "essid": "Heim", "radio": "na", "radio_proto": "ax",
+            "signal": -61, "tx_bytes-r": 1000, "rx_bytes-r": 250, "tx_bytes": 5_000_000, "ap_mac": "11:22:33:44:55:66", "uptime": 120 });
+        let d = client_details(&c);
+        assert_eq!(d["name"], "handy");
+        assert_eq!(d["mac"], "aa:bb:cc:00:00:01");
+        assert_eq!(d["band"], "5 GHz");
+        assert_eq!(d["wifi_standard"], "Wi-Fi 6");
+        assert_eq!(d["signal_dbm"], -61.0);
+        assert_eq!(d["down_bps"], 8000.0);
+        assert_eq!(d["up_bps"], 2000.0);
+        assert_eq!(d["uplink_mac"], "11:22:33:44:55:66");
+        assert_eq!(d["type"], "wireless");
     }
 
     fn cred(port: Option<i32>) -> Credential {

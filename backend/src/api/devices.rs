@@ -186,6 +186,7 @@ struct StatPoint {
     tx_bps: Option<f64>,
     clients: Option<f32>,
     power_w: Option<f32>,
+    wifi_signal: Option<f32>,
 }
 
 pub async fn detail(
@@ -224,7 +225,7 @@ pub async fn detail(
         "SELECT time_bucket(make_interval(mins => $2), time) AS bucket,
                 avg(cpu_pct)::real AS cpu_pct, avg(mem_pct)::real AS mem_pct, avg(disk_pct)::real AS disk_pct,
                 avg(temp_c)::real AS temp_c, avg(rx_bps) AS rx_bps, avg(tx_bps) AS tx_bps,
-                avg(clients)::real AS clients, avg(power_w)::real AS power_w
+                avg(clients)::real AS clients, avg(power_w)::real AS power_w, avg(wifi_signal)::real AS wifi_signal
            FROM device_stats
           WHERE device_id = $1 AND time > now() - make_interval(hours => $3)
           GROUP BY bucket
@@ -236,8 +237,8 @@ pub async fn detail(
     .fetch_all(&st.db)
     .await?;
 
-    let (inventory, ssh_host_key): (Option<Value>, Option<String>) =
-        sqlx::query_as("SELECT inventory, ssh_host_key FROM devices WHERE id = $1")
+    let (inventory, ssh_host_key, tls_pin): (Option<Value>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT inventory, ssh_host_key, tls_pin FROM devices WHERE id = $1")
             .bind(id)
             .fetch_one(&st.db)
             .await?;
@@ -259,7 +260,16 @@ pub async fn detail(
             };
             let dev: Option<(Value,)> = sqlx::query_as(&find("devices")).bind(mac).fetch_optional(&st.db).await?;
             let cli: Option<(Value,)> = sqlx::query_as(&find("clients")).bind(mac).fetch_optional(&st.db).await?;
-            (dev.map(|v| v.0), cli.map(|v| v.0))
+            let mut cli = cli.map(|v| v.0);
+            // Access Point/Switch, an dem der Client hängt, als Link auf das NetPulse-Gerät
+            if let Some(c) = cli.as_mut() {
+                if let Some(up) = c["uplink_mac"].as_str() {
+                    let parent: Option<(i64,)> =
+                        sqlx::query_as("SELECT id FROM devices WHERE lower(mac) = lower($1) LIMIT 1").bind(up).fetch_optional(&st.db).await?;
+                    c["uplink_device_id"] = json!(parent.map(|p| p.0));
+                }
+            }
+            (dev.map(|v| v.0), cli)
         }
         None => (None, None),
     };
@@ -273,6 +283,8 @@ pub async fn detail(
         "stats": stats,
         "inventory": inventory,
         "ssh_host_key": ssh_host_key,
+        // Fingerabdruck des gemerkten TLS-Zertifikats (UniFi-Controller) – öffentlich, kein Geheimnis
+        "tls_pin": tls_pin,
         "credential_ids": credential_ids.into_iter().map(|c| c.0).collect::<Vec<_>>(),
         "events": events,
         "bucket_minutes": bucket_minutes,
@@ -727,4 +739,44 @@ pub async fn create(
         let _ = state.poll_tx.send(id);
     });
     Ok(Json(json!({ "ok": true, "id": id, "ip": ip.to_string() })))
+}
+
+/// Alle Clients aus den UniFi-Controllern, mit Verweis auf das passende NetPulse-Gerät
+pub async fn unifi_clients(State(st): State<AppState>, _user: CurrentUser) -> ApiResult<Json<Value>> {
+    let controllers: Vec<(i64, String, Value, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, COALESCE(name, reported_name, hostname, host(ip)), inventory->'unifi', inventory_at
+           FROM devices WHERE inventory ? 'unifi'",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let known: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, lower(mac), COALESCE(name, reported_name, hostname, host(ip)) FROM devices WHERE mac IS NOT NULL",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let by_mac: std::collections::HashMap<&str, (i64, &str)> = known.iter().map(|(id, mac, label)| (mac.as_str(), (*id, label.as_str()))).collect();
+    let mut clients = Vec::new();
+    let mut details = Vec::new();
+    for (cid, clabel, data, _) in &controllers {
+        details.push(json!({ "controller_id": cid, "controller": clabel, "client_details": data["client_details"], "api": data["api"] }));
+        for c in data["clients"].as_array().into_iter().flatten() {
+            let lookup = |key: &str| c[key].as_str().and_then(|m| by_mac.get(m.to_lowercase().as_str())).copied();
+            let (own, uplink) = (lookup("mac"), lookup("uplink_mac"));
+            let mut c = c.clone();
+            if let Some((id, label)) = own {
+                c["device_id"] = json!(id);
+                c["device_label"] = json!(label);
+            }
+            if let Some((id, _)) = uplink {
+                c["uplink_device_id"] = json!(id);
+            }
+            c["controller_id"] = json!(cid);
+            clients.push(c);
+        }
+    }
+    Ok(Json(json!({
+        "clients": clients,
+        "controllers": details,
+        "updated_at": controllers.iter().filter_map(|c| c.3).max(),
+    })))
 }

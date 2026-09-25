@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.1#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.3#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -251,18 +251,22 @@ function lineChart(points, { series, format = (v) => String(Math.round(v)), heig
   const fmtT = (t) => new Date(t).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   let svg = '';
-  for (let i = 0; i <= 3; i += 1) {
-    const v = (max / 3) * i;
-    svg += `<line class="grid-line" x1="${P.l}" x2="${W - P.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
-      <text class="lbl" x="${P.l - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${esc(format(v))}</text>`;
-  }
+  // Ausfälle zuerst (liegen unter Gitter, Beschriftung und Linie) und nur innerhalb der Zeichenfläche
   if (outages) {
     const slot = Math.max(3, (W - P.l - P.r) / points.length);
     points.forEach((p, i) => {
       if (p.availability != null && p.availability < 1) {
-        svg += `<rect class="outage" x="${(x(times[i]) - slot / 2).toFixed(1)}" y="${P.t}" width="${slot.toFixed(1)}" height="${H - P.t - P.b}" opacity="${(0.2 + 0.6 * (1 - p.availability)).toFixed(2)}"><title>Ausfall ${Math.round((1 - p.availability) * 100)} %</title></rect>`;
+        const x0 = Math.max(P.l, x(times[i]) - slot / 2);
+        const x1 = Math.min(W - P.r, x(times[i]) + slot / 2);
+        if (x1 <= x0) return;
+        svg += `<rect class="outage" x="${x0.toFixed(1)}" y="${P.t}" width="${(x1 - x0).toFixed(1)}" height="${H - P.t - P.b}" opacity="${(0.12 + 0.3 * (1 - p.availability)).toFixed(2)}"><title>Ausfall ${Math.round((1 - p.availability) * 100)} %</title></rect>`;
       }
     });
+  }
+  for (let i = 0; i <= 3; i += 1) {
+    const v = (max / 3) * i;
+    svg += `<line class="grid-line" x1="${P.l}" x2="${W - P.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
+      <text class="lbl" x="${P.l - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${esc(format(v))}</text>`;
   }
   series.forEach((s, si) => {
     let path = '';
@@ -271,6 +275,12 @@ function lineChart(points, { series, format = (v) => String(Math.round(v)), heig
       const v = p[s.key];
       if (v == null) { pen = false; return; }
       path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(1)},${y(v).toFixed(1)} `;
+      // Einzelner Messwert ohne Nachbarn: als Punkt zeigen (eine Linie braucht zwei Punkte)
+      const prev = i > 0 ? points[i - 1][s.key] : null;
+      const next = i < points.length - 1 ? points[i + 1][s.key] : null;
+      if (prev == null && next == null) {
+        svg += `<circle class="dot c${si}" cx="${x(times[i]).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3"><title>${esc(format(v))}</title></circle>`;
+      }
       pen = true;
     });
     svg += `<path class="line c${si}" d="${path}"/>`;
@@ -282,6 +292,23 @@ function lineChart(points, { series, format = (v) => String(Math.round(v)), heig
     ? `<div class="legend">${series.map((s, i) => `<span><i class="bgc${i}"></i>${esc(s.label)}</span>`).join('')}</div>`
     : '';
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${svg}</svg>${legend}`;
+}
+
+/** WLAN-Signal in dBm → Qualität */
+function signalQuality(dbm) {
+  if (dbm == null) return null;
+  if (dbm >= -60) return { label: 'sehr gut', cls: 'up', bars: 4 };
+  if (dbm >= -67) return { label: 'gut', cls: 'up', bars: 3 };
+  if (dbm >= -75) return { label: 'mäßig', cls: 'warn', bars: 2 };
+  return { label: 'schwach', cls: 'down', bars: 1 };
+}
+
+/** Signal-Anzeige: vier Balken + dBm (+ Qualität als Text, nicht nur Farbe) */
+function signalBadge(dbm, withLabel = false) {
+  const q = signalQuality(dbm);
+  if (!q) return '<span class="muted">–</span>';
+  const bars = [1, 2, 3, 4].map((i) => `<i class="${i <= q.bars ? 'on' : ''}"></i>`).join('');
+  return `<span class="sig sig-${q.cls}" title="${esc(q.label)}"><span class="sig-bars">${bars}</span>${esc(Math.round(dbm))} dBm${withLabel ? ` · ${esc(q.label)}` : ''}</span>`;
 }
 
 function availability(points) {
@@ -541,6 +568,8 @@ const WIDGETS = {
   services: { title: 'Dienste im Netz', icon: 'plug-connected', render: wServices },
   new: { title: 'Neu entdeckt (7 Tage)', icon: 'radar', render: wNew },
   slowest: { title: 'Langsamste Antwortzeiten', icon: 'clock', render: wSlowest },
+  top_clients: { title: 'Top-Verbraucher im Netz (UniFi)', icon: 'arrows-exchange', render: wTopClients },
+  weak_wifi: { title: 'Schwaches WLAN (UniFi)', icon: 'wifi', render: wWeakWifi },
   device: { title: 'Gerät', icon: 'activity', render: wDevice, perDevice: true },
 };
 
@@ -949,6 +978,40 @@ function wSlowest({ devices }) {
     .sort((a, b) => b.last_rtt_ms - a.last_rtt_ms).slice(0, 8);
   if (!slow.length) return empty('Keine Messwerte', 'clock');
   return `<ul class="list">${slow.map((d) => deviceRow(d, esc(fmtMs(d.last_rtt_ms)))).join('')}</ul>`;
+}
+
+/** Name eines UniFi-Clients mit Link zum NetPulse-Gerät (falls bekannt) */
+function clientName(c) {
+  const name = esc(c.device_label || c.name || c.hostname || c.mac || '?');
+  return c.device_id ? `<a href="#/device/${c.device_id}">${name}</a>` : name;
+}
+
+async function wTopClients() {
+  const r = await api('/unifi/clients');
+  if (!r.controllers.length) return empty('Kein UniFi-Controller eingebunden', 'access-point');
+  const rate = (c) => (c.down_bps || 0) + (c.up_bps || 0);
+  const top = r.clients.filter((c) => rate(c) > 0).sort((a, b) => rate(b) - rate(a)).slice(0, 8);
+  if (!top.length) {
+    const ok = r.controllers.some((x) => x.client_details && x.client_details.ok);
+    return empty(ok ? 'Gerade überträgt kein Client nennenswert Daten' : 'Datenraten je Client liefert der Controller nicht – siehe Controller → Reiter „Clients“', 'arrows-exchange');
+  }
+  const max = Math.max(...top.map(rate));
+  return `<ul class="list">${top.map((c) => `<li><div class="grow ellipsis">${clientName(c)}
+      <div class="muted small">${esc(c.uplink_name || '')}${c.ssid ? ` · ${esc(c.ssid)}` : ''}</div>
+      <span class="bar" data-w="${pct(rate(c), max)}"></span></div>
+      <span class="num small">↓ ${esc(fmtBps(c.down_bps))}<br>↑ ${esc(fmtBps(c.up_bps))}</span></li>`).join('')}</ul>`;
+}
+
+async function wWeakWifi() {
+  const r = await api('/unifi/clients');
+  if (!r.controllers.length) return empty('Kein UniFi-Controller eingebunden', 'access-point');
+  const weak = r.clients.filter((c) => c.signal_dbm != null && c.signal_dbm < -70).sort((a, b) => a.signal_dbm - b.signal_dbm).slice(0, 8);
+  if (!weak.length) {
+    const any = r.clients.some((c) => c.signal_dbm != null);
+    return empty(any ? 'Alle WLAN-Clients haben guten Empfang' : 'Signalstärken liefert der Controller nicht – siehe Controller → Reiter „Clients“', 'wifi');
+  }
+  return `<ul class="list">${weak.map((c) => `<li><div class="grow ellipsis">${clientName(c)}
+      <div class="muted small">${esc(c.uplink_name || '')}${c.band ? ` · ${esc(c.band)}` : ''}</div></div>${signalBadge(c.signal_dbm)}</li>`).join('')}</ul>`;
 }
 
 /** Was das Geräte-Widget anzeigen kann (mehrere gleichzeitig wählbar) */

@@ -596,6 +596,35 @@ async fn apply_unifi(state: &AppState, unifi: &Value) -> Result<()> {
         .execute(&state.db)
         .await?;
     }
+    // Datenraten und WLAN-Signal je Client in den Verlauf des passenden Geräts
+    // (aus Sicht des Geräts: empfangen = Download, gesendet = Upload)
+    let mut c_macs = Vec::new();
+    let (mut c_rx, mut c_tx, mut c_sig) = (Vec::new(), Vec::new(), Vec::new());
+    for c in unifi["clients"].as_array().into_iter().flatten() {
+        let Some(mac) = c["mac"].as_str() else { continue };
+        let (down, up, sig) = (c["down_bps"].as_f64(), c["up_bps"].as_f64(), c["signal_dbm"].as_f64());
+        if down.is_none() && up.is_none() && sig.is_none() {
+            continue;
+        }
+        c_macs.push(mac.to_lowercase());
+        c_rx.push(down);
+        c_tx.push(up);
+        c_sig.push(sig.map(|v| v as f32));
+    }
+    if !c_macs.is_empty() {
+        sqlx::query(
+            "INSERT INTO device_stats (time, device_id, rx_bps, tx_bps, wifi_signal)
+             SELECT now(), d.id, u.rx, u.tx, u.sig
+               FROM UNNEST($1::text[], $2::float8[], $3::float8[], $4::real[]) AS u(mac, rx, tx, sig)
+               JOIN devices d ON lower(d.mac) = u.mac",
+        )
+        .bind(&c_macs)
+        .bind(&c_rx)
+        .bind(&c_tx)
+        .bind(&c_sig)
+        .execute(&state.db)
+        .await?;
+    }
     // Client-Namen aus dem Controller für Geräte ohne eigenen Namen
     let (client_macs, client_names): (Vec<String>, Vec<String>) = unifi["clients"]
         .as_array()
@@ -615,6 +644,63 @@ async fn apply_unifi(state: &AppState, unifi: &Value) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+/// UniFi-Controller jede Minute abfragen (Client-Datenraten, Auslastung der Access Points),
+/// unabhängig vom 5-Minuten-Takt der übrigen Inventar-Abfragen.
+pub async fn unifi_loop(state: AppState) {
+    tokio::time::sleep(Duration::from_secs(45)).await;
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let controllers: Vec<(i64, String, Option<String>)> = match sqlx::query_as(
+            "SELECT d.id, host(d.ip), d.tls_pin FROM devices d
+              WHERE d.status = 'up' AND d.inventory ? 'unifi'
+                AND d.inventory_at < now() - interval '50 seconds'
+                AND EXISTS (SELECT 1 FROM device_credentials dc JOIN credentials c ON c.id = dc.credential_id
+                             WHERE dc.device_id = d.id AND c.kind = 'unifi')",
+        )
+        .fetch_all(&state.db)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("UniFi: Controller-Liste nicht ladbar: {e}");
+                continue;
+            }
+        };
+        for (id, ip, pin) in controllers {
+            let Ok(addr) = ip.parse::<Ipv4Addr>() else { continue };
+            let _perf = crate::perf::Timer::new("UniFi-Abfrage (je Minute)");
+            let Ok(creds) = load_credentials(&state, id).await else { continue };
+            let Some(cred) = creds.iter().find(|c| c.kind == "unifi" && c.linked) else { continue };
+            match unifi::collect(addr, cred, pin.as_deref()).await {
+                Ok((data, _)) => {
+                    // Nur den UniFi-Teil ersetzen – SNMP/SSH-Daten des Controllers bleiben; inventory_at bleibt,
+                    // damit die vollständige Abfrage im normalen Takt weiterläuft
+                    let saved = sqlx::query(
+                        "UPDATE devices SET inventory = jsonb_set(COALESCE(inventory, '{}'), '{unifi}', $2)
+                          WHERE id = $1",
+                    )
+                    .bind(id)
+                    .bind(&data)
+                    .execute(&state.db)
+                    .await;
+                    if let Err(e) = saved {
+                        tracing::warn!("UniFi-Daten von {ip} nicht gespeichert: {e}");
+                        continue;
+                    }
+                    if let Err(e) = apply_unifi(&state, &data).await {
+                        tracing::warn!("UniFi-Daten konnten nicht übernommen werden: {e:#}");
+                    }
+                    state.hub.publish(&serde_json::json!({ "type": "unifi", "controller": id, "time": chrono::Utc::now() }));
+                }
+                // Fehler meldet die reguläre Abfrage im Reiter „Diagnose“ – hier nur protokollieren
+                Err(e) => tracing::debug!("UniFi-Minutenabfrage {ip}: {e:#}"),
+            }
+        }
+    }
 }
 
 /// Erfolgreiche automatische Zugangsdaten fest zuordnen

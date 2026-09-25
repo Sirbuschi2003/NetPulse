@@ -136,8 +136,19 @@ Namen, Modell, Gerätetyp und Verlaufsdiagramme, Clients ohne eigenen Namen beko
 „Nur anzeigen“ anlegen (ohne Zwei-Faktor, *Restrict to local access only*). In NetPulse Benutzername + Passwort eintragen.
 Ist beim Konto 2FA aktiv, meldet NetPulse das ausdrücklich – ein 2FA-Code kann nicht automatisch eingegeben werden.
 
-Ports: UniFi OS Server **11443**, UniFi-OS-Konsolen **443**, ältere Network Application **8443** – ohne Angabe probiert
-NetPulse alle drei. Der Controller nutzt meist ein selbst signiertes Zertifikat; NetPulse prüft es deshalb nicht.
+**Clients im Detail:** Beim Controller gibt es die Reiter **„UniFi“** (Access Points/Switches) und **„Clients“**:
+Name, IP/MAC, Hersteller, an welchem Access Point bzw. Switch-Port, SSID, Band, Kanal, WLAN-Standard, **Signal (dBm)**,
+**Download/Upload gerade**, übertragene Datenmenge und Verbindungsdauer – durchsuch- und sortierbar, jede Minute neu.
+Jedes Client-Gerät zeigt in seiner Übersicht die WLAN-Verbindung; Datenraten und Signal landen im **Verlauf**.
+Für das Dashboard gibt es die Kacheln **„Top-Verbraucher im Netz“** und **„Schwaches WLAN“**.
+Datenraten und Signal je Client liefert UniFi nur über die klassische Schnittstelle. NetPulse versucht sie mit dem
+API-Schlüssel; nimmt der Controller ihn dort nicht an, steht im Reiter „Clients“ ein Hinweis – dann das lokale
+Nur-Lese-Konto (siehe oben) statt des Schlüssels verwenden.
+
+Ports: UniFi OS Server **11443**, UniFi-OS-Konsolen **443**, ältere Network Application **8443** – NetPulse probiert
+zuerst den eingetragenen Port und danach die übrigen. Das (meist selbst signierte) Zertifikat des Controllers wird beim
+ersten Kontakt gemerkt; ändert es sich, sendet NetPulse nichts mehr und meldet es („Zertifikat geändert“). Nach einer
+Neuinstallation des Controllers beim Gerät unter „Einstellungen“ den gespeicherten Schlüssel zurücksetzen.
 Die Zugangsdaten werden nie automatisch ausprobiert, sondern nur an das fest zugeordnete Gerät gesendet.
 
 ## Protokolle: Syslog und SNMP-Traps

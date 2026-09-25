@@ -700,3 +700,22 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .sl-recv-lines { display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; font-size: 13.5px; }
 .sl-recv-lines #sl-test { margin-left: auto; }
 .sl-receiver .notice { margin: 10px 0 0; }
+
+/* WLAN-Signal: Balken + dBm (Qualität zusätzlich als Text im title/Label) */
+.sig { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sig-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.sig-bars i { display: block; width: 3px; border-radius: 1px; background: var(--border-strong); }
+.sig-bars i:nth-child(1) { height: 4px; } .sig-bars i:nth-child(2) { height: 6px; } .sig-bars i:nth-child(3) { height: 9px; } .sig-bars i:nth-child(4) { height: 12px; }
+.sig-up .sig-bars i.on { background: var(--up); } .sig-warn .sig-bars i.on { background: var(--warn); } .sig-down .sig-bars i.on { background: var(--down); }
+/* UniFi-Clients */
+.uc-tools { margin: 14px 0 8px; }
+.uc-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.uc-table th.sorted { color: var(--accent); }
+.uc-table td { vertical-align: top; }
+td.uc-meter { min-width: 90px; }
+td.uc-meter .meter { margin-bottom: 3px; }
+.kpi-value.small-val { font-size: 15px; line-height: 1.3; }
+.uc-overview { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: var(--surface-2); }
+.uc-overview header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.uc-overview h2 { font-size: 14px; display: flex; gap: 8px; align-items: center; margin: 0; }
+.wrap-any { word-break: break-all; }
