@@ -72,6 +72,10 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-${SITE_ADDRESS:-}}
       # true = alle Benutzer müssen 2FA nutzen (in der Oberfläche nicht abschaltbar); sonst unter Benutzer einstellbar
       REQUIRE_TOTP: ${REQUIRE_TOTP:-false}
+      # Gültigkeit einer Anmeldung in Stunden
+      SESSION_HOURS: ${SESSION_HOURS:-12}
+      # Tresor-Schlüssel fest vorgeben (64 Hex-Zeichen); leer = /data/secret.key
+      SECRET_KEY: ${SECRET_KEY:-}
       RUST_LOG: ${RUST_LOG:-info}
     # Minimale Rechte: nur NET_RAW für ICMP-Ping, Dateisystem schreibgeschützt
     volumes:

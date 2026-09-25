@@ -11,6 +11,8 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
 | Weboberfläche | HTML/CSS/JavaScript ohne Build-Schritt und ohne externe Abhängigkeiten |
 | HTTPS | Caddy mit eigener lokaler Zertifizierungsstelle |
 
+📖 **[Handbuch](docs/HANDBUCH.md)** – Installation, alle Funktionen und Einstellungen, Sicherheit, Sicherung, Fehlersuche.
+
 ## Funktionen
 
 - **Geräteerkennung:** Ping, TCP, ARP, Reverse-DNS, 28 typische Ports, **Hersteller aus der MAC-Adresse**
@@ -51,7 +53,7 @@ installiert** werden. Alles läuft in Docker, z. B. auf einem NAS oder Raspberry
   den eigenen Reverse-Proxy (z. B. Nginx Proxy Manager) – siehe unten.
 - **Sicherheit:** Rollen (Admin / Nur lesen), **Zwei-Faktor-Anmeldung (TOTP)**, Audit-Log, Zugangsdaten AES-256-verschlüsselt, siehe unten.
 
-Aufbau und Roadmap: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) · Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md)
+Handbuch: [docs/HANDBUCH.md](docs/HANDBUCH.md) · Aufbau und Roadmap: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) · Datenschutz und Recht: [docs/DATENSCHUTZ.md](docs/DATENSCHUTZ.md)
 
 ---
 
