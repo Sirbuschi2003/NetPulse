@@ -93,7 +93,7 @@ function connSummary(c, compact = false) {
 }
 
 async function viewDevices(_arg, params) {
-  let [devices, uc] = await Promise.all([api('/devices'), loadUnifiClients()]);
+  let [devices, uc, pulse] = await Promise.all([api('/devices'), loadUnifiClients(), api('/pulse').catch(() => null)]);
   const filters = { q: (params.get('q') || '').toLowerCase(), status: params.get('status') || '', type: params.get('type') || '', conn: params.get('conn') || '' };
   let mode = readPref('np-dev-view', 'cards');
 
@@ -236,15 +236,29 @@ async function viewDevices(_arg, params) {
     return hay.includes(filters.q);
   };
 
-  const card = (d) => `
-    <a class="dev-card${d.monitored ? '' : ' off'}" href="#/device/${d.id}">
+  const card = (d) => {
+    const p = (pulse && pulse.devices && pulse.devices[d.id]) || {};
+    const ports = d.open_ports || [];
+    const st = !d.monitored ? 'off' : d.paused ? 'paused' : d.status;
+    return `
+    <a class="dev-card st-${esc(st)}" href="#/device/${d.id}">
       <div class="top">${devIcon(d)}<div class="ellipsis"><div class="name">${esc(deviceLabel(d))}${inventoryWarn(d)}</div>
-        <div class="sub mono">${esc(d.ip)}</div></div></div>
-      <div class="sub">${esc([d.vendor, d.os || d.model].filter(Boolean).join(' · ') || typeInfo(d.device_type).label)}</div>
+        <div class="sub mono">${esc(d.ip)}</div></div><span class="led ${esc(st)}" title="${esc(STATUS_LABEL[d.status] || d.status)}"></span></div>
+      <div class="dc-facts">
+        <span title="MAC-Adresse">${icon('binary-tree', 'i-sm')}<span class="mono">${esc(d.mac || '–')}</span></span>
+        <span title="Hersteller / System">${icon('cpu', 'i-sm')}<span>${esc([d.vendor, d.os || d.model].filter(Boolean).join(' · ') || typeInfo(d.device_type).label)}</span></span>
+        ${ports.length ? `<span title="Offene Ports">${icon('plug-connected', 'i-sm')}<span class="mono">${esc(ports.slice(0, 5).join(' · '))}${ports.length > 5 ? ` +${ports.length - 5}` : ''}</span></span>` : ''}
+      </div>
       ${connSummary(uc.byDevice.get(d.id), true)}
-      <div class="meta">${statusBadge(d)}${liveWatt(d)}<span>${esc(fmtMs(d.last_rtt_ms))}</span>
-        <span>${d.has_credentials ? icon('key', 'i-sm') : ''} ${(d.open_ports || []).length === 1 ? '1 Dienst' : `${(d.open_ports || []).length} Dienste`}</span></div>
+      <div class="dc-stats">
+        <div><label>RTT</label><b class="mono">${esc(fmtMs(d.last_rtt_ms))}</b></div>
+        <div><label>24 h</label><b class="mono av-${availTone(p.avail_24h)}">${p.avail_24h != null ? `${Number(p.avail_24h).toFixed(1)} %` : '–'}</b></div>
+        <div><label>${d.status === 'down' ? 'offline' : d.status === 'up' ? 'online' : 'Status'}</label><b class="mono">${esc(d.monitored ? fmtSince(d.status_since) : '–')}</b></div>
+      </div>
+      <div class="dc-spark" title="Antwortzeit der letzten 2 Stunden">${spark(p.rtt, { tone: d.status === 'down' ? 'down' : 'accent', min: 0 })}</div>
+      <div class="meta">${statusBadge(d)}${liveWatt(d)}<span>${d.has_credentials ? `${icon('key', 'i-sm')} ` : ''}${typeInfo(d.device_type).label}</span></div>
     </a>`;
+  };
 
   const row = (d) => `
     <tr class="clickable${d.monitored ? '' : ' unmonitored'}" data-id="${d.id}">
@@ -398,6 +412,17 @@ async function viewDevice(id) {
               ${d.model ? `<span class="badge plain">${esc(d.model)}</span>` : ''}</div></div>
           <div class="actions"><a href="#/devices" class="btn ghost">${icon('chevron-left', 'i-sm')} Alle Geräte</a>
             ${isAdmin() ? `<button type="button" id="poll-now" class="ghost">${icon('refresh')}Jetzt abfragen</button>` : ''}</div>
+        </div>
+        <div class="fact-strip">
+          ${[
+    ['world', 'IP-Adresse', d.ip],
+    ['binary-tree', 'MAC', d.mac || '–'],
+    ['activity', 'Antwortzeit', fmtMs(d.last_rtt_ms)],
+    ['clock', d.status === 'down' ? 'Offline seit' : 'Online seit', d.monitored ? fmtSince(d.status_since) : '–'],
+    ['radar', 'Zuletzt gesehen', fmtAgo(d.last_seen)],
+    ['plug-connected', 'Offene Ports', String((d.open_ports || []).length)],
+    ['key', 'Zugang', d.has_credentials ? 'SNMP/SSH/API' : 'nur Ping'],
+  ].map(([ic, label, val]) => `<div class="fact">${icon(ic, 'i-sm')}<span><label>${esc(label)}</label><b class="mono">${esc(val)}</b></span></div>`).join('')}
         </div>
         <div class="tabs">${tabs().map(([k, label]) => `<button type="button" data-tab="${k}" class="${k === tab ? 'active' : ''}">${esc(label)}</button>`).join('')}</div>
         <div id="tab-body"></div>
@@ -1419,7 +1444,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.9.15#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.9.16#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

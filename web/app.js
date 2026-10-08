@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.15#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.16#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -125,6 +125,47 @@ function openModal(title, bodyHtml) {
 // ---------------------------------------------------------------------------
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('de-DE') : '–');
+/** Kurze Dauer seit einem Zeitpunkt: „42 s“, „17 min“, „3 h 05“, „4 T“ */
+function fmtSince(iso) {
+  if (!iso) return '–';
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
+  return `${Math.floor(s / 86400)} T`;
+}
+
+/** Mini-Verlauf als SVG (ohne Inline-Styles – CSP); Lücken (null) werden übersprungen */
+function spark(values, { tone = 'accent', height = 30, min = null } = {}) {
+  const pts = (values || []).map((v, i) => [i, v]).filter(([, v]) => v != null && Number.isFinite(Number(v)));
+  if (pts.length < 2) return '';
+  const n = values.length - 1 || 1;
+  const vs = pts.map(([, v]) => Number(v));
+  const lo = min != null ? Math.min(min, ...vs) : Math.min(...vs);
+  const hi = Math.max(...vs);
+  const span = hi - lo || 1;
+  const xy = pts.map(([i, v]) => [(i / n) * 100, height - 2 - ((Number(v) - lo) / span) * (height - 5)]);
+  const line = xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+  const area = `${xy[0][0].toFixed(1)},${height} ${line} ${xy[xy.length - 1][0].toFixed(1)},${height}`;
+  const [lx, ly] = xy[xy.length - 1];
+  return `<svg class="spark t-${tone}" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <polygon class="spark-area" points="${area}"/><polyline class="spark-line" points="${line}" vector-effect="non-scaling-stroke"/>
+    <circle class="spark-end" cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="1.6" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+/** Ring-Anzeige 0–100 % */
+function ring(pct, { tone = 'up', label = '' } = {}) {
+  const v = pct == null ? null : Math.max(0, Math.min(100, Number(pct)));
+  const c = 2 * Math.PI * 16;
+  const len = v == null ? 0 : (v / 100) * c;
+  return `<span class="ring t-${tone}"><svg viewBox="0 0 40 40" aria-hidden="true"><circle class="ring-bg" cx="20" cy="20" r="16"/>
+    <circle class="ring-fg" cx="20" cy="20" r="16" stroke-dasharray="${len.toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 20 20)"/></svg>
+    <span class="ring-val">${v == null ? '–' : v >= 99.95 ? '100' : v.toFixed(v >= 99 ? 1 : 0)}<small>%</small></span>${label ? `<span class="ring-label">${esc(label)}</span>` : ''}</span>`;
+}
+
+/** Ton für eine Verfügbarkeit */
+const availTone = (v) => (v == null ? 'muted' : v >= 99 ? 'up' : v >= 95 ? 'warn' : 'down');
+
 function fmtAgo(iso) {
   if (!iso) return '–';
   const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
@@ -692,19 +733,34 @@ const WIDGETS = {
   device: { title: 'Gerät', icon: 'activity', render: wDevice, perDevice: true },
 };
 
-function kpi(label, value, iconName, tone, href) {
-  return `<a class="kpi" href="${href}"><span class="kpi-icon ${tone}">${icon(iconName)}</span>
-    <span><div class="kpi-value">${esc(value)}</div><div class="kpi-label">${esc(label)}</div></span></a>`;
+function kpi(label, value, iconName, tone, href, extra = {}) {
+  const sparkTone = (tone || '').replace('tone-', '') || 'accent';
+  const sparkSvg = extra.spark ? spark(extra.spark, { tone: sparkTone, min: extra.sparkMin }) : '';
+  return `<a class="kpi ${tone}-k${sparkSvg ? ' has-spark' : ''}" href="${href}">
+    <span class="kpi-icon ${tone}">${icon(iconName)}</span>
+    <span class="kpi-body"><span class="kpi-label">${esc(label)}</span>
+      <span class="kpi-value">${esc(value)}${extra.unit ? `<small>${esc(extra.unit)}</small>` : ''}</span>
+      ${extra.sub ? `<span class="kpi-sub">${extra.sub}</span>` : ''}</span>
+    ${sparkSvg ? `<span class="kpi-spark">${sparkSvg}</span>` : ''}</a>`;
 }
 
-function wSummary({ summary }) {
+function wSummary({ summary, pulse }) {
   const s = summary.devices;
-  return `<div class="kpis">
-    ${kpi('Geräte', s.total, 'devices', 'tone-accent', '#/devices')}
-    ${kpi('Online', s.up, 'circle-check', 'tone-up', '#/devices?status=up')}
-    ${kpi('Offline', s.down, 'circle-x', 'tone-down', '#/devices?status=down')}
-    ${kpi('Offene Alarme', summary.open_alerts, 'bell', summary.open_alerts ? 'tone-warn' : 'tone-muted', '#/alerts')}
-    ${kpi('Neu (24 h)', s.new_24h, 'radar', 'tone-info', '#/devices?status=new')}
+  const net = (pulse && pulse.network) || { hours: [] };
+  const chk = (pulse && pulse.checks) || null;
+  const lastRtt = [...net.hours].reverse().find((h) => h.rtt_ms != null);
+  const monitored = s.total - (s.unmonitored || 0);
+  return `<div class="kpis kpis-noc">
+    ${kpi('Geräte', s.total, 'devices', 'tone-accent', '#/devices', { sub: `${monitored} überwacht · <b>${s.new_24h}</b> neu (24 h)` })}
+    ${kpi('Online', s.up, 'circle-check', 'tone-up', '#/devices?status=up', {
+    sub: `Verfügbarkeit 24 h <b>${net.avail_24h != null ? `${net.avail_24h.toFixed(1)} %` : '–'}</b>`, spark: net.hours.map((h) => h.up_pct) })}
+    ${kpi('Offline', s.down, 'circle-x', s.down ? 'tone-down' : 'tone-muted', '#/devices?status=down', { sub: `${s.unknown || 0} unbekannt · ${s.unmonitored || 0} ohne Überwachung` })}
+    ${kpi('Ø Antwortzeit', lastRtt ? fmtMs(lastRtt.rtt_ms).replace(' ms', '') : '–', 'activity', 'tone-info', '#/devices', {
+    unit: lastRtt ? 'ms' : '', sub: 'letzte Stunde · Verlauf 24 h', spark: net.hours.map((h) => h.rtt_ms), sparkMin: 0 })}
+    ${kpi('Dienste', chk ? `${chk.up}/${chk.total}` : '–', 'world-www', chk && chk.down ? 'tone-down' : 'tone-up', '#/checks', {
+    sub: chk ? `${chk.down ? `<b>${chk.down}</b> ausgefallen` : 'alle in Ordnung'}${chk.warn ? ` · ${chk.warn} Warnung` : ''}` : '' })}
+    ${kpi('Offene Alarme', summary.open_alerts, 'bell', summary.open_alerts ? 'tone-warn' : 'tone-muted', '#/alerts', {
+    sub: `${pulse ? pulse.events_24h : '–'} Ereignisse (24 h)` })}
   </div>`;
 }
 
@@ -1286,10 +1342,10 @@ async function viewDashboard() {
   const liveHistories = {};
 
   const load = async () => {
-    const [summary, devices, events, alerts] = await Promise.all([
-      api('/summary'), api('/devices'), api('/events?limit=15'), api('/alerts?open=true&limit=20'),
+    const [summary, devices, events, alerts, pulse] = await Promise.all([
+      api('/summary'), api('/devices'), api('/events?limit=15'), api('/alerts?open=true&limit=20'), api('/pulse').catch(() => null),
     ]);
-    ctx = { summary, devices, events, alerts };
+    ctx = { summary, devices, events, alerts, pulse };
   };
 
   const render = async () => {
@@ -1517,10 +1573,27 @@ async function route() {
 }
 
 /** Alarm-Zähler und Scan-Fortschritt in der Seitenleiste aktualisieren */
+/** Kopfzeile: Netzstatus als LEDs und Uhrzeit */
+function renderSysStrip(summary) {
+  const el = $('#sys-strip');
+  if (!el || !summary) return;
+  const s = summary.devices;
+  const led = (cls, n, label, href) => `<a class="sys-led ${cls}${n ? '' : ' zero'}" href="${href}" title="${esc(label)}"><i></i><b>${esc(n)}</b><span>${esc(label)}</span></a>`;
+  el.innerHTML = `${led('up', s.up, 'online', '#/devices?status=up')}${led('down', s.down, 'offline', '#/devices?status=down')}
+    ${led('warn', summary.open_alerts, 'Alarme', '#/alerts')}<span class="sys-clock" id="sys-clock"></span>`;
+  tickClock();
+}
+function tickClock() {
+  const c = $('#sys-clock');
+  if (c) c.textContent = new Date().toLocaleTimeString('de-DE');
+}
+setInterval(tickClock, 1000);
+
 async function refreshShell() {
   try {
     const summary = await api('/summary');
     state.summary = summary;
+    renderSysStrip(summary);
     const badge = $('#alert-badge');
     badge.hidden = !summary.open_alerts;
     badge.textContent = summary.open_alerts;

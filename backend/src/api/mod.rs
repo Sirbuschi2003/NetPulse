@@ -74,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts", get(alerts::list_alerts))
         // Dashboard (pro Benutzer)
         .route("/dashboard", get(dashboard::load).put(dashboard::save))
+        .route("/pulse", get(dashboard::pulse))
         // Netze & Scans
         .route("/networks", get(admin::list_networks).post(admin::add_network))
         .route("/networks/{id}", delete(admin::delete_network))

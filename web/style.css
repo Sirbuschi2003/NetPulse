@@ -755,3 +755,193 @@ pre.code { background: var(--surface-3); border-radius: 8px; padding: 10px 12px;
 details.sub > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 details.card.sub { margin-top: 16px; }
 .badge.paused { background: var(--info-soft); color: var(--info); }
+
+/* =====================================================================================
+   Leitstand-Design (NOC): technischer Look – Raster, leuchtende LEDs, Monospace-Messwerte,
+   Mini-Verläufe. Steht am Ende, damit es die Grundgestaltung überschreibt.
+   ===================================================================================== */
+:root {
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
+  --accent: #0e7490; --accent-2: #7c3aed; --accent-soft: #e0f7fb;
+  --grid-line: rgb(14 116 144 / 0.06);
+  --glow: 0 0 0 transparent;
+  --radius: 10px; --radius-sm: 7px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #05090f; --bg-2: #08101b; --surface: #0a121f; --surface-2: #0e1828; --surface-3: #132036;
+    --border: #16253b; --border-strong: #22385a; --text: #e4ecf7; --text-2: #b4c3da; --muted: #6f84a3;
+    --accent: #22d3ee; --accent-2: #a78bfa; --accent-soft: #072a33; --accent-text: #031216;
+    --up: #2ee59d; --up-soft: #062b1f; --down: #ff4d6a; --down-soft: #330c15; --warn: #ffb224; --warn-soft: #33240a;
+    --info: #4ea8ff; --info-soft: #0b2440; --unknown: #7d8da6; --unknown-soft: #141f31;
+    --grid-line: rgb(34 211 238 / 0.045);
+    --glow: 0 0 18px rgb(34 211 238 / 0.08);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #05090f; --bg-2: #08101b; --surface: #0a121f; --surface-2: #0e1828; --surface-3: #132036;
+  --border: #16253b; --border-strong: #22385a; --text: #e4ecf7; --text-2: #b4c3da; --muted: #6f84a3;
+  --accent: #22d3ee; --accent-2: #a78bfa; --accent-soft: #072a33; --accent-text: #031216;
+  --up: #2ee59d; --up-soft: #062b1f; --down: #ff4d6a; --down-soft: #330c15; --warn: #ffb224; --warn-soft: #33240a;
+  --info: #4ea8ff; --info-soft: #0b2440; --unknown: #7d8da6; --unknown-soft: #141f31;
+  --grid-line: rgb(34 211 238 / 0.045);
+  --glow: 0 0 18px rgb(34 211 238 / 0.08);
+}
+
+/* Hintergrund: feines Messraster + Lichtschein oben */
+body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(1200px 500px at 70% -10%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: auto, 28px 28px, 28px 28px;
+  background-attachment: fixed;
+}
+code, .mono, .kpi-value, .dc-stats b, .fact b, .sys-strip, th { font-family: var(--mono); }
+.mono, td.mono { font-variant-numeric: tabular-nums; }
+
+/* Seitenleiste */
+.sidebar { background: color-mix(in srgb, var(--surface) 88%, transparent); backdrop-filter: blur(8px); }
+.brand span { font-weight: 700; letter-spacing: 0.01em; }
+.nav-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; color: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
+.nav-label::before { content: "// "; opacity: 0.6; }
+#nav a { position: relative; border: 1px solid transparent; }
+#nav a.active { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
+#nav a.active::before { content: ""; position: absolute; left: -15px; top: 7px; bottom: 7px; width: 3px; border-radius: 0 3px 3px 0;
+  background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.nav-badge { font-family: var(--mono); box-shadow: 0 0 10px color-mix(in srgb, var(--down) 60%, transparent); }
+
+/* Kopfzeile mit Statusleiste */
+.topbar { background: color-mix(in srgb, var(--bg) 78%, transparent); }
+.topbar h1 { font-size: 17px; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; }
+.topbar h1::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.sys-strip { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.sys-led { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); }
+.sys-led:hover { text-decoration: none; border-color: var(--border-strong); }
+.sys-led i { width: 8px; height: 8px; border-radius: 50%; background: var(--unknown); }
+.sys-led b { color: var(--text); font-weight: 700; }
+.sys-led span { color: var(--muted); }
+.sys-led.up i { background: var(--up); box-shadow: 0 0 8px var(--up); }
+.sys-led.down i { background: var(--down); box-shadow: 0 0 8px var(--down); animation: led-blink 1.2s steps(2, start) infinite; }
+.sys-led.warn i { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+.sys-led.zero i { background: var(--unknown); box-shadow: none; animation: none; }
+.sys-clock { margin-left: 4px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--accent);
+  background: var(--surface); letter-spacing: 0.06em; min-width: 76px; text-align: center; }
+@keyframes led-blink { to { opacity: 0.25; } }
+@media (max-width: 1250px) { .sys-led span { display: none; } }
+@media (max-width: 960px) { .sys-clock { display: none; } }
+@media (max-width: 560px) { .sys-strip { display: none; } }
+
+/* Karten: Akzentlinie oben, Ecken-Markierung, Titel als Kennung */
+.card { position: relative; background: linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 70%, var(--surface)), var(--surface));
+  box-shadow: var(--shadow), var(--glow); }
+.card::before { content: ""; position: absolute; left: 14px; right: 14px; top: -1px; height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 70%, transparent), transparent); opacity: 0.7; }
+.card::after { content: ""; position: absolute; right: 7px; top: 7px; width: 9px; height: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); border-right: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  pointer-events: none; }
+.card > header h2 { font-family: var(--mono); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-2); }
+.card > header h2 svg { color: var(--accent); width: 16px; height: 16px; padding: 4px; box-sizing: content-box; border-radius: 6px;
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+
+/* Kennzahlen mit Verlauf */
+.kpis-noc { grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); }
+.kpis-noc .kpi { display: block; }
+.kpis-noc .kpi-icon { position: absolute; right: 12px; top: 12px; width: 30px; height: 30px; border-radius: 8px; }
+.kpis-noc .kpi-icon svg { width: 16px; height: 16px; }
+.kpis-noc .kpi-sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; margin-top: 2px; }
+.kpi { position: relative; overflow: hidden; align-items: flex-start; background: var(--surface-2); padding: 14px 14px 12px; min-height: 104px; }
+.kpi-icon { width: 38px; height: 38px; border-radius: 9px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+.kpi-icon svg { width: 19px; height: 19px; }
+.kpi-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; position: relative; z-index: 1; }
+.kpi-label { order: -1; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em; }
+.kpi-value { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; }
+.kpi-value small { font-size: 13px; font-weight: 600; color: var(--muted); margin-left: 3px; letter-spacing: 0; }
+.kpi-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-sub b { color: var(--text-2); font-family: var(--mono); }
+.kpi-spark:empty { display: none; }
+.kpi-spark { position: absolute; left: 0; right: 0; bottom: 0; height: 28px; opacity: 0.9; pointer-events: none; }
+.kpi.has-spark { padding-bottom: 36px; }
+.tone-up-k .kpi-value { color: var(--up); text-shadow: 0 0 18px color-mix(in srgb, var(--up) 35%, transparent); }
+.tone-down-k .kpi-value { color: var(--down); text-shadow: 0 0 18px color-mix(in srgb, var(--down) 35%, transparent); }
+.tone-warn-k .kpi-value { color: var(--warn); }
+
+/* Mini-Verlauf */
+svg.spark { display: block; width: 100%; height: 100%; overflow: visible; color: var(--accent); }
+svg.spark .spark-line { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+svg.spark .spark-area { fill: currentColor; opacity: 0.12; stroke: none; }
+svg.spark .spark-end { fill: currentColor; stroke: none; }
+svg.spark.t-up { color: var(--up); } svg.spark.t-down { color: var(--down); } svg.spark.t-warn { color: var(--warn); }
+svg.spark.t-info { color: var(--info); } svg.spark.t-muted { color: var(--unknown); }
+
+/* Ring-Anzeige */
+.ring { position: relative; display: inline-grid; place-items: center; width: 54px; height: 54px; color: var(--up); }
+.ring svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ring-bg { fill: none; stroke: var(--surface-3); stroke-width: 4; }
+.ring-fg { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; filter: drop-shadow(0 0 3px currentColor); }
+.ring-val { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+.ring-val small { font-size: 9px; color: var(--muted); }
+.ring.t-warn { color: var(--warn); } .ring.t-down { color: var(--down); } .ring.t-muted { color: var(--unknown); }
+
+/* Status-Punkte und Plaketten */
+.dot.up { box-shadow: 0 0 0 3px var(--up-soft), 0 0 8px var(--up); }
+.dot.down { box-shadow: 0 0 0 3px var(--down-soft), 0 0 8px var(--down); }
+.badge { border-radius: 5px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent); padding: 1px 7px; }
+.chip { font-family: var(--mono); border-radius: 4px; border: 1px solid var(--border); }
+
+/* Gerätekarten: Kennwerte, Verlauf, Status-LED */
+.dev-grid { grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); }
+.dev-card { position: relative; gap: 9px; padding: 14px 14px 12px; overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 75%, var(--surface)), var(--surface)); }
+.dev-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--unknown); opacity: 0.8; }
+.dev-card.st-up::before { background: var(--up); box-shadow: 0 0 12px var(--up); }
+.dev-card.st-down::before { background: var(--down); box-shadow: 0 0 12px var(--down); }
+.dev-card.st-paused::before { background: var(--info); }
+.dev-card.st-off { opacity: 0.55; }
+.dev-card:hover { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: var(--shadow), 0 0 22px color-mix(in srgb, var(--accent) 12%, transparent); }
+.dev-card .top .ellipsis { flex: 1; }
+.led { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--unknown); border: 1px solid rgb(0 0 0 / 0.3); }
+.led.up { background: var(--up); box-shadow: 0 0 6px var(--up), 0 0 14px color-mix(in srgb, var(--up) 50%, transparent); }
+.led.down { background: var(--down); box-shadow: 0 0 6px var(--down); animation: led-blink 1s steps(2, start) infinite; }
+.led.paused { background: var(--info); box-shadow: 0 0 6px var(--info); }
+.dc-facts { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.dc-facts > span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dc-facts > span > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-facts svg { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.dc-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(60px, 1fr)); gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.dc-stats > div { background: var(--surface-2); padding: 5px 8px; min-width: 0; }
+.dc-stats label { display: block; font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
+.dc-stats b { font-size: 12.5px; color: var(--text); white-space: nowrap; }
+.av-up { color: var(--up) !important; } .av-warn { color: var(--warn) !important; } .av-down { color: var(--down) !important; }
+.dc-spark { height: 26px; margin: 0 -2px; }
+.dev-card .meta { margin-top: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.dc-spark:empty { display: none; }
+
+/* Gerätekopf: Kennzahlenleiste */
+.dev-hero h1 { font-size: 22px; letter-spacing: 0; }
+.dev-icon.lg { box-shadow: 0 0 24px color-mix(in srgb, currentColor 25%, transparent); border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+.fact-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; margin-top: 16px;
+  background: var(--border); border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.fact { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--surface-2); min-width: 0; }
+.fact > svg { color: var(--accent); flex: none; }
+.fact > span { min-width: 0; }
+.fact label { display: block; font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
+.fact b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Reiter, Tabellen, Listen */
+.tabs button { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+.tabs button.active { text-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent); }
+th { font-size: 10.5px; letter-spacing: 0.12em; background: color-mix(in srgb, var(--surface-3) 60%, transparent); }
+tbody tr.clickable:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.list li { border-bottom-style: dashed; }
+
+/* Hinweise und Leerzustände */
+.notice { border-left: 3px solid var(--accent); }
+.empty svg { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 40%, transparent)); }
+
+@media (prefers-reduced-motion: reduce) { .led.down, .sys-led.down i { animation: none; } }
