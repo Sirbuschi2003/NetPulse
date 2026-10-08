@@ -15,6 +15,8 @@ const RULE_KINDS = {
   temperature: { label: 'Temperatur hoch', icon: 'temperature', unit: '°C', hint: 'Höchste gemeldete Temperatur (SSH/Synology-SNMP).' },
   syslog_match: { label: 'Protokollmeldung (Syslog/Trap)', icon: 'file-text', unit: null, syslog: true, hint: 'Alarm bei neuen Syslog-Meldungen oder SNMP-Traps, die den Suchtext enthalten und mindestens die gewählte Stufe haben (z. B. „Failed password“, „linkDown“). Mehrere Treffer werden je Gerät zusammengefasst.' },
   check_down: { label: 'Dienst ausgefallen', icon: 'world-www', unit: null, check: true, hint: 'Webseite, Port, DNS oder Zertifikat-Check schlägt fehl (unter „Dienste“ angelegt).' },
+  job_failed: { label: 'Backup fehlgeschlagen', icon: 'database', unit: null, job: true, hint: 'Ein verbundenes Programm (z. B. Docker Backup Manager) meldet ein fehlgeschlagenes Backup. Optional nur für Container, deren Name den Suchtext enthält.' },
+  job_missing: { label: 'Backup überfällig', icon: 'clock', unit: 'Stunden', job: true, hint: 'Ein regelmäßig gesicherter Container hatte seit X Stunden kein erfolgreiches Backup (z. B. 26 bei täglichen Backups). Optional nur für Container, deren Name den Suchtext enthält.' },
   cert_expiry: { label: 'Zertifikat läuft ab', icon: 'shield-lock', unit: 'Tage', check: true, hint: 'Alarm, wenn ein überwachtes Zertifikat in weniger als X Tagen abläuft.' },
 };
 
@@ -23,6 +25,7 @@ const RULE_GROUPS = [
   ['Geräte', ['device_down', 'cpu_usage', 'mem_usage', 'disk_usage', 'temperature']],
   ['Dienste (Webseiten, Ports, Zertifikate)', ['check_down', 'cert_expiry']],
   ['Protokolle', ['syslog_match']],
+  ['Backups (verbundene Programme)', ['job_failed', 'job_missing']],
   ['Sicherheit & Netz', ['new_device', 'mac_changed']],
 ];
 
@@ -108,6 +111,7 @@ async function viewAlerts(_arg, params) {
       <label>Name<input name="name" value="${esc(r.name || '')}" placeholder="z. B. NAS offline"></label>
       <div id="f-syslog" class="form-row"><label>Suchtext (leer = alle)<input name="pattern" value="${esc(r.pattern || '')}" placeholder="z. B. Failed password"></label>
         <label>Mindestens Stufe<select name="syslog_sev">${SYSLOG_SEV.map((s, i) => `<option value="${i}"${i === (r.threshold ?? 4) ? ' selected' : ''}>${esc(s)}${i ? ' oder schlimmer' : ''}</option>`).join('')}</select></label></div>
+      <label id="f-job">Nur Container, deren Name dies enthält (leer = alle)<input name="job_pattern" value="${esc(r.pattern || '')}" placeholder="z. B. nextcloud"></label>
       <div id="f-check" class="form">${checkList.length ? `<label>Dienst<select name="check_id"><option value="">Alle Dienste</option>
         ${checkList.map((c) => `<option value="${c.id}"${c.id === r.check_id ? ' selected' : ''}>${esc(c.name)} – ${esc(c.target)}</option>`).join('')}</select></label>`
         : `<input type="hidden" name="check_id" value=""><div class="notice info">${icon('world-www')}<span>Noch keine Dienste angelegt. Unter
@@ -135,13 +139,14 @@ async function viewAlerts(_arg, params) {
       $('#kind-hint', dlg).textContent = def.hint;
       $('#f-threshold', dlg).hidden = !def.unit;
       $('#unit', dlg).textContent = def.unit ? `(${def.unit})` : '';
-      $('#f-duration', dlg).hidden = !(k === 'device_down' || k === 'check_down' || (def.unit && k !== 'cert_expiry'));
+      $('#f-duration', dlg).hidden = !(k === 'device_down' || k === 'check_down' || (def.unit && k !== 'cert_expiry' && !def.job));
+      $('#f-job', dlg).hidden = !def.job;
       $('#f-check', dlg).hidden = !def.check;
       $('#f-syslog', dlg).hidden = !def.syslog;
-      $('#f-device', dlg).hidden = !!def.check;
+      $('#f-device', dlg).hidden = !!def.check || !!def.job;
       $('#f-recovery', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
       $('#f-repeat', dlg).hidden = !(k === 'device_down' || k === 'check_down' || def.unit);
-      if (!rule && def.unit && !form.threshold.value) form.threshold.value = k === 'temperature' ? 70 : k === 'cert_expiry' ? 14 : 90;
+      if (!rule && def.unit && !form.threshold.value) form.threshold.value = k === 'temperature' ? 70 : k === 'cert_expiry' ? 14 : k === 'job_missing' ? 26 : 90;
     };
     form.kind.addEventListener('change', update);
     update();
@@ -150,10 +155,10 @@ async function viewAlerts(_arg, params) {
       const body = {
         name: form.elements.name.value.trim() || RULE_KINDS[form.kind.value].label,
         kind: form.kind.value,
-        device_id: !RULE_KINDS[form.kind.value].check && form.device_id.value ? Number(form.device_id.value) : null,
+        device_id: !RULE_KINDS[form.kind.value].check && !RULE_KINDS[form.kind.value].job && form.device_id.value ? Number(form.device_id.value) : null,
         check_id: RULE_KINDS[form.kind.value].check && form.check_id.value ? Number(form.check_id.value) : null,
         threshold: RULE_KINDS[form.kind.value].syslog ? Number(form.syslog_sev.value) : form.threshold.value === '' ? null : Number(form.threshold.value),
-        pattern: RULE_KINDS[form.kind.value].syslog ? form.pattern.value.trim() : null,
+        pattern: RULE_KINDS[form.kind.value].syslog ? form.pattern.value.trim() : RULE_KINDS[form.kind.value].job ? form.job_pattern.value.trim() : null,
         duration_min: Number(form.duration_min.value || 0),
         channel_ids: $$('input[name="ch"]:checked', form).map((c) => Number(c.value)),
         notify_recovery: form.notify_recovery.checked,

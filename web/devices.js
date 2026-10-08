@@ -1192,7 +1192,7 @@ const CHECK_KINDS = {
   tls: { label: 'TLS-Zertifikat', icon: 'shield-lock', target: 'Host:Port', placeholder: 'mail.example.de:993' },
 };
 const CHECK_STATUS = { up: ['ok', 'st-up'], down: ['Ausfall', 'st-down'], warn: ['Warnung', 'warn'], pending: ['prüft …', 'plain'], unknown: ['neu', 'plain'] };
-const checkBadge = (c) => { const [label, cls] = CHECK_STATUS[c.status] || CHECK_STATUS.unknown; return `<span class="badge ${cls}">${esc(label)}</span>`; };
+const checkBadge = (c) => { if (c.paused) return `<span class="badge paused" title="Überwachung pausiert – ${esc(c.paused)}">pausiert</span>`; const [label, cls] = CHECK_STATUS[c.status] || CHECK_STATUS.unknown; return `<span class="badge ${cls}">${esc(label)}</span>`; };
 
 function beats(list, count = 40) {
   const items = (list || []).slice(-count);
@@ -1218,6 +1218,7 @@ function checkRow(c) {
 
 async function viewChecks() {
   let checks = await api('/checks');
+  const paused = await pauseNotice();
   const render = () => {
     const count = (s) => checks.filter((c) => c.status === s).length;
     view().innerHTML = `
@@ -1227,6 +1228,7 @@ async function viewChecks() {
           ${kpi('Warnung', count('warn'), 'alert-triangle', count('warn') ? 'tone-warn' : 'tone-muted', '#/checks')}
           ${kpi('Ausfall', count('down'), 'circle-x', count('down') ? 'tone-down' : 'tone-muted', '#/checks')}</div>
         <div class="actions">${isAdmin() ? `<button type="button" id="check-add">${icon('plus')}Dienst hinzufügen</button>` : ''}</div></div>
+      ${paused}
       <div class="card">${checks.length ? `<div class="check-list">${checks.map(checkRow).join('')}</div>`
         : empty('Noch keine Dienste. Beispiele: eigene Webseite (mit Suchwort), Zertifikat des Mailservers, DNS des Routers, SSH-Port des NAS.', 'world-www')}</div>`;
     $('#check-add')?.addEventListener('click', () => checkDialog(null));
@@ -1417,7 +1419,7 @@ async function viewMap() {
         const hit = filter && String(n.label).toLowerCase().includes(filter) || (filter && String(n.ip).includes(filter));
         const iconName = n.device_type === 'cloud' ? 'cloud' : n.summary ? 'devices' : typeInfo(n.device_type).icon;
         const inner = `<g class="node st-${esc(statusCls(n))}${hit ? ' hit' : ''}" transform="translate(${n.x},${n.y})">
-          <circle r="12"/><use href="icons.svg?v=0.9.14#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
+          <circle r="12"/><use href="icons.svg?v=0.9.15#i-${esc(iconName)}" x="-7" y="-7" width="14" height="14"/>
           <text x="18" y="4">${esc(n.label)}</text>${n.ip ? `<text class="ip" x="18" y="15">${esc(n.ip)}</text>` : ''}</g>`;
         return typeof n.id === 'number' && n.id > 0 ? `<a href="#/device/${n.id}">${inner}</a>` : inner;
       }).join('')}</svg>`;

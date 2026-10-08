@@ -39,6 +39,8 @@ pub struct CheckRow {
     uptime_24h: Option<f64>,
     /// Die letzten 40 Ergebnisse (ältestes zuerst) für die Heartbeat-Anzeige
     beats: Option<Vec<bool>>,
+    /// Gerade pausiert (z. B. Backup läuft) – Grund
+    paused: Option<String>,
 }
 
 const SELECT: &str = "SELECT c.id, c.name, c.kind, c.target, c.config, c.interval_s, c.timeout_s, c.device_id,
@@ -47,7 +49,9 @@ const SELECT: &str = "SELECT c.id, c.name, c.kind, c.target, c.config, c.interva
         (SELECT round(100.0 * avg(CASE WHEN ok THEN 1 ELSE 0 END), 2)::float8 FROM check_results r
           WHERE r.check_id = c.id AND r.time > now() - interval '24 hours') AS uptime_24h,
         (SELECT array_agg(ok ORDER BY time) FROM (SELECT ok, time FROM check_results r WHERE r.check_id = c.id
-          ORDER BY time DESC LIMIT 40) x) AS beats
+          ORDER BY time DESC LIMIT 40) x) AS beats,
+        (SELECT p.reason || ': ' || array_to_string(p.subjects, ', ') FROM integration_pauses p
+          WHERE p.until > now() AND c.id = ANY(p.check_ids) ORDER BY p.started_at LIMIT 1) AS paused
    FROM checks c LEFT JOIN devices d ON d.id = c.device_id";
 
 pub async fn list(State(st): State<AppState>, _user: CurrentUser) -> ApiResult<Json<Vec<CheckRow>>> {

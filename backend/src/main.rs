@@ -22,6 +22,7 @@ mod collect;
 mod config;
 mod energy;
 mod error;
+mod integration;
 mod logbuf;
 mod maintenance;
 mod mib;
@@ -130,6 +131,7 @@ async fn main() -> Result<()> {
     tokio::spawn(checks::run(state.clone()));
     tokio::spawn(energy::run(state.clone()));
     tokio::spawn(backup::run(state.clone()));
+    tokio::spawn(integration::run(state.clone()));
     syslog::start(&state);
     tokio::spawn(mib::load(state.db.clone()));
     tokio::spawn(maintenance(state.clone()));

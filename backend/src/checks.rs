@@ -75,10 +75,12 @@ pub async fn run(state: AppState) {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tick.tick().await;
-        let due: Vec<Check> = match sqlx::query_as(
+        // Von verbundenen Programmen pausierte Dienste (z. B. Container im Backup) gar nicht prüfen
+        let due: Vec<Check> = match sqlx::query_as(&format!(
             "SELECT id, name, kind, target, config, timeout_s, status, fail_count FROM checks
-              WHERE enabled AND (last_check IS NULL OR last_check + make_interval(secs => interval_s) <= now())",
-        )
+              WHERE enabled AND (last_check IS NULL OR last_check + make_interval(secs => interval_s) <= now()) AND {}",
+            crate::integration::CHECK_NOT_PAUSED
+        ))
         .fetch_all(&state.db)
         .await
         {
