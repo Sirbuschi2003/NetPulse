@@ -23,7 +23,7 @@ const DEVICE_COLUMNS: &str = "id, host(ip) AS ip, mac, hostname, name, notes, op
                               COALESCE(device_type, 'unknown') AS device_type, device_type_manual, os, model, \
                               inventory_at, inventory_error, wan_interface, wan_interface_manual, reported_name, integration, \
                               EXISTS (SELECT 1 FROM device_credentials dc WHERE dc.device_id = devices.id) AS has_credentials, \
-                              parent_id, parent_manual, energy_role";
+                              parent_id, parent_manual, energy_role,                               (SELECT p.reason || ': ' || array_to_string(p.subjects, ', ') FROM integration_pauses p                                 WHERE p.until > now() AND devices.id = ANY(p.device_ids) ORDER BY p.started_at LIMIT 1) AS paused";
 
 const EVENT_SELECT: &str = "SELECT e.id, e.time, e.device_id, \
                             COALESCE(d.name, d.reported_name, d.hostname, host(d.ip)) AS device_label, e.kind, e.message \
@@ -60,6 +60,8 @@ pub struct Device {
     parent_id: Option<i64>,
     parent_manual: bool,
     energy_role: Option<String>,
+    /// Gerade pausiert (z. B. Backup läuft) – Grund
+    paused: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]

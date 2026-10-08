@@ -692,6 +692,83 @@ durch häufige Aufrufe abzufangen.
 Dazu die betroffenen **Geräte** und/oder **Dienste** (leer = alle). Während eines aktiven Fensters werden für diese keine
 Alarme verschickt; Messungen laufen weiter. Fenster lassen sich deaktivieren, ohne sie zu löschen.
 
+### 20.1 Verbundene Programme (z. B. Docker Backup Manager)
+
+Andere Programme im Heimnetz können wie Zahnräder in NetPulse eingreifen. Wichtigster Fall: Der **Docker Backup
+Manager** stoppt für ein konsistentes Backup Container wie Nextcloud oder Immich. Ohne Kopplung meldet NetPulse dann
+„Dienst ausgefallen“, verschickt Alarme und zeigt den Ausfall im Verlauf. Mit Kopplung passiert Folgendes:
+
+1. **Vor dem Stoppen** bittet der Backup Manager NetPulse um eine **Pause** für die betroffenen Container.
+2. NetPulse prüft die zugehörigen **Dienste und Geräte gar nicht** mehr. Es gibt also keine Messwerte, keine Ereignisse
+   und keine Alarme, und die Zeit zählt nicht gegen die Verfügbarkeit. In den Listen steht dort „pausiert“, auf der Seite
+   *Dienste* oben ein Hinweis.
+3. **Nach dem Neustart** meldet der Backup Manager „fertig“. NetPulse wartet noch die **Nachlaufzeit** (Standard 3 Minuten,
+   damit die Container hochfahren können) und überwacht dann wieder normal. Läuft ein Container danach nicht, kommt der
+   Alarm ganz normal.
+4. **Sicherheitsnetz:** Jede Pause hat ein spätestes Ende (Standard 4 Stunden, höchstens 12). Stürzt der Backup Manager ab
+   oder ist er nicht erreichbar, überwacht NetPulse danach von selbst weiter.
+5. Zusätzlich meldet der Backup Manager **jedes Backup-Ergebnis**. Dafür gibt es zwei Alarm-Regeln (*Alarme → Regeln →
+   Backups*):
+   - **Backup fehlgeschlagen**: sofort, optional nur für Container mit einem bestimmten Namen.
+   - **Backup überfällig**: Ein regelmäßig gesicherter Container (einer, der in einem aktiven Zeitplan steckt) hatte seit X
+     Stunden kein erfolgreiches Backup, z. B. 26 bei täglichen Backups. Das fällt auch auf, wenn der Backup Manager gar
+     nicht mehr läuft.
+
+Fehlgeschlagene Backups erscheinen außerdem unter *Ereignisse*. Erfolgreiche Backups landen nur in der Liste beim
+verbundenen Programm.
+
+**Einrichten**
+
+1. In NetPulse: *Verwaltung → Verbundene Programme → Programm verbinden*.
+   - Art „Docker Backup Manager“ wählen.
+   - Als **Docker-Host** das NAS auswählen, auf dem die Container laufen.
+   - *Schlüssel erzeugen* klicken und den Schlüssel (`npi_…`) kopieren. Er wird nur einmal angezeigt; NetPulse speichert nur
+     einen Hash davon.
+2. Im Docker Backup Manager: *Einstellungen → NetPulse-Überwachung*.
+   - Adresse eintragen, z. B. `http://10.10.10.15:18081` (Eingang für den Reverse-Proxy im LAN) oder
+     `https://monitoring.example.de`.
+   - Den Schlüssel einfügen.
+   - *Kopplung eingeschaltet* anhaken und *Verbindung testen* klicken.
+   - Bei `https://…:8443` mit dem eigenen NetPulse-Zertifikat zusätzlich „Zertifikat prüfen“ ausschalten.
+3. Der Test zeigt, welche Dienste und Geräte NetPulse welchem Container zuordnet. Dieselbe Liste steht in NetPulse unter
+   *Verbundene Programme*.
+
+**Zuordnung Container → Dienste/Geräte**
+
+NetPulse erkennt die Zuordnung automatisch. Fährt man mit der Maus über einen Eintrag, steht der Grund dabei. Erkannt wird:
+
+| Merkmal | Beispiel |
+|---|---|
+| Eigene IP-Adresse des Containers (macvlan) | UniFi OS Server mit 10.10.10.6 → Gerät 10.10.10.6 und dessen Dienste |
+| Veröffentlichter Port auf dem Docker-Host | Container veröffentlicht Port 2283 → Dienst `http://NAS:2283` |
+| Passender Name (Container, Compose-Projekt, Hostname der Adresse) | `nextcloud-aio-database` → Dienst „Nextcloud“ (`https://cloud.example.de`) |
+
+Allerweltswörter wie *server*, *web* oder *db* zählen nicht. Mit dem Stift-Symbol lässt sich die Zuordnung je Container
+von Hand ergänzen oder die automatische Erkennung abschalten.
+
+Wird eine ganze Gruppe gesichert (Landscape, z. B. alle Nextcloud-Container), pausiert der Backup Manager die **gesamte
+Gruppe** für die Dauer des Laufs. Grund: Nextcloud ist auch dann gestört, wenn gerade nur seine Datenbank gesichert wird.
+Gepaust wird nur, wenn Container wirklich gestoppt werden („Container stoppen“ im Zeitplan). Auch Wiederherstellungen
+pausieren den Container.
+
+**Für eigene Skripte**
+
+Die Schnittstelle ist allgemein gehalten. Jedes Skript, z. B. ein eigener Cron-Job, kann sie mit einem eigenen Schlüssel
+(Art „Anderes Programm“) nutzen. Die Aufrufe stehen unten auf der Seite *Verbundene Programme*, zum Beispiel:
+
+```bash
+KEY=npi_...
+NP=http://10.10.10.15:18081
+ID=$(curl -s -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"subjects":["nextcloud"],"minutes":60,"reason":"Update"}' $NP/api/integration/v1/pause | jq .id)
+# … Arbeiten …
+curl -s -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"grace_s":120}' $NP/api/integration/v1/pause/$ID/end
+```
+
+Der Schlüssel erlaubt nur diese Aufrufe, also Pausen, Meldungen und die Containerliste. Er gibt keinen Zugriff auf Geräte,
+Zugangsdaten oder Einstellungen. Unter *Einstellungen* des Programms lässt er sich jederzeit erneuern oder sperren.
+Die Kopplung gehört nicht zur NetPulse-Sicherung (Kapitel 24). Nach einer Wiederherstellung auf einem neuen System
+verbindest du das Programm einfach neu.
+
 ---
 
 ## 21. Ereignisse, Audit-Log und System-Log
@@ -1003,6 +1080,8 @@ NetPulse selbst verbindet sich zu den Geräten über: ICMP (Ping), TCP (Ports), 
 | Audit-Log | `RETENTION_AUDIT_DAYS` (365 Tage) |
 | Sitzungen | bis zum Ablauf (`SESSION_HOURS`) |
 | Automatische Sicherungen | die eingestellte Anzahl |
+| Pausen verbundener Programme | 90 Tage |
+| Backup-Meldungen verbundener Programme | 400 Tage |
 
 ### 29.4 Begriffe
 

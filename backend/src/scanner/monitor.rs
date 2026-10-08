@@ -44,10 +44,12 @@ pub async fn run(state: AppState, pinger: Arc<Pinger>) {
 
 async fn check_all(state: &AppState, pinger: &Arc<Pinger>) -> Result<()> {
     let _perf = crate::perf::Timer::new("Erreichbarkeit (Runde über alle Geräte)");
-    let targets: Vec<Target> = sqlx::query_as(
+    // Von verbundenen Programmen pausierte Geräte (z. B. Container im Backup) gar nicht prüfen
+    let targets: Vec<Target> = sqlx::query_as(&format!(
         "SELECT id, host(ip) AS ip, status, open_ports, COALESCE(name, hostname) AS label
-           FROM devices WHERE monitored AND family(ip) = 4",
-    )
+           FROM devices WHERE monitored AND family(ip) = 4 AND {}",
+        crate::integration::DEVICE_NOT_PAUSED
+    ))
     .fetch_all(&state.db)
     .await?;
     if targets.is_empty() {

@@ -19,7 +19,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
-const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.14#i-${name}"/></svg>`;
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="icons.svg?v=0.9.15#i-${name}"/></svg>`;
 
 const state = { user: null, refreshTimer: null, globalTimer: null, summary: null, liveStops: [] };
 
@@ -206,9 +206,10 @@ const STATUS_LABEL = { up: 'online', down: 'offline', unknown: 'unbekannt' };
 const statusBadge = (d) =>
   d.monitored === false
     ? '<span class="badge plain">nicht überwacht</span>'
+    : d.paused ? `<span class="badge paused" title="Überwachung pausiert – ${esc(d.paused)}"><span class="dot unknown"></span>pausiert</span>`
     : `<span class="badge st-${esc(d.status)}"><span class="dot ${esc(d.status)}"></span>${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
 const EVENT_LABEL = { up: 'online', down: 'offline', discovered: 'neu', added: 'angelegt', mac_changed: 'MAC geändert', ssh_key_changed: 'SSH-Schlüssel',
-  check_down: 'Dienst aus', check_up: 'Dienst ok', check_warn: 'Dienst-Warnung' };
+  check_down: 'Dienst aus', check_up: 'Dienst ok', check_warn: 'Dienst-Warnung', job_failed: 'Backup-Fehler' };
 const eventBadge = (kind) => `<span class="badge ev-${esc(kind)}">${esc(EVENT_LABEL[kind] || kind)}</span>`;
 const deviceLabel = (d) => d.name || d.reported_name || d.hostname || d.ip;
 
@@ -1468,6 +1469,7 @@ const ROUTES = {
   audit: { title: 'Audit-Log', view: () => viewAudit(), admin: true },
   logs: { title: 'System-Log', view: () => viewLogs(), admin: true },
   maintenance: { title: 'Wartung', view: () => viewMaintenance(), admin: true },
+  integrations: { title: 'Verbundene Programme', view: () => viewIntegrations(), admin: true },
   backup: { title: 'Sicherung', view: () => viewBackup(), admin: true },
   account: { title: 'Mein Konto', view: () => viewAccount() },
 };

@@ -5,6 +5,8 @@
 //! - `new_device`   : neues Gerät im Netz
 //! - `mac_changed`  : MAC-Adresse einer IP hat sich geändert (möglicher Angriff)
 //! - `disk_usage`, `cpu_usage`, `mem_usage`, `temperature`: Schwellwert aus SNMP/SSH-Messwerten
+//! - `job_failed`   : ein verbundenes Programm meldet eine fehlgeschlagene Aufgabe (z. B. Backup)
+//! - `job_missing`  : regelmäßig gesicherter Container hat seit `threshold` Stunden kein erfolgreiches Backup
 //!
 //! Solange ein Alarm offen ist, erinnert NetPulse auf Wunsch alle `repeat_min` Minuten daran.
 
@@ -70,6 +72,7 @@ async fn evaluate(state: &AppState, cursor: i64) -> Result<i64> {
             "check_down" => check_down(state, rule).await,
             "cert_expiry" => cert_expiry(state, rule).await,
             "syslog_match" => syslog_match(state, rule).await,
+            "job_missing" => job_missing(state, rule).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -90,7 +93,7 @@ fn device_link(state: &AppState, device_id: i64) -> Option<String> {
 async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i64> {
     let events: Vec<(i64, Option<i64>, String, String)> = sqlx::query_as(
         "SELECT id, device_id, kind, message FROM events
-          WHERE id > $1 AND kind IN ('discovered', 'mac_changed', 'ssh_key_changed') ORDER BY id LIMIT 500",
+          WHERE id > $1 AND kind IN ('discovered', 'mac_changed', 'ssh_key_changed', 'job_failed') ORDER BY id LIMIT 500",
     )
     .bind(cursor)
     .fetch_all(&state.db)
@@ -100,10 +103,15 @@ async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i6
         last = event_id;
         let rule_kind = match kind.as_str() {
             "discovered" => "new_device",
+            "job_failed" => "job_failed",
             _ => "mac_changed", // auch geänderte SSH-Host-Schlüssel sind sicherheitsrelevant
         };
         for rule in rules.iter().filter(|r| r.kind == rule_kind) {
             if rule.device_id.is_some() && rule.device_id != device_id {
+                continue;
+            }
+            // Aufgaben-Regeln: optional nur für Container, deren Name den Suchtext enthält
+            if rule_kind == "job_failed" && !matches_pattern(rule, &message) {
                 continue;
             }
             sqlx::query("INSERT INTO alerts (rule_id, device_id, message, resolved_at) VALUES ($1, $2, $3, now())")
@@ -113,7 +121,12 @@ async fn event_rules(state: &AppState, rules: &[Rule], cursor: i64) -> Result<i6
                 .execute(&state.db)
                 .await?;
             let severity = if rule_kind == "new_device" { Severity::Info } else { Severity::Warning };
-            let title = if rule_kind == "new_device" { "Neues Gerät im Netz" } else { "Sicherheitshinweis" };
+            let title = match rule_kind {
+                "new_device" => "Neues Gerät im Netz",
+                "job_failed" if message.starts_with("Backup") => "Backup fehlgeschlagen",
+                "job_failed" => "Aufgabe fehlgeschlagen",
+                _ => "Sicherheitshinweis",
+            };
             let mut n = Notification::new(title, message.clone(), severity, device_id.and_then(|id| device_link(state, id)));
             n.device_id = device_id;
             dispatch(state, rule, n).await;
@@ -369,6 +382,53 @@ async fn open_check_alert(state: &AppState, rule: &Rule, check_id: i64, device_i
     .await?;
     let _ = device_id;
     Ok(inserted.is_some())
+}
+
+fn matches_pattern(rule: &Rule, text: &str) -> bool {
+    rule.pattern.as_deref().map(str::trim).filter(|p| !p.is_empty()).is_none_or(|p| text.to_lowercase().contains(&p.to_lowercase()))
+}
+
+/// Regelmäßig gesicherte Container ohne erfolgreiches Backup in den letzten `threshold` Stunden
+/// (ein Sammelalarm je Regel; Entwarnung, sobald alle wieder aktuell sind)
+async fn job_missing(state: &AppState, rule: &Rule) -> Result<()> {
+    let hours = f64::from(rule.threshold.unwrap_or(26.0)).max(1.0);
+    type Row = (String, String, Option<chrono::DateTime<chrono::Utc>>, chrono::DateTime<chrono::Utc>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT i.name, s->>'name',
+                (SELECT max(r.time) FROM integration_reports r
+                  WHERE r.integration_id = i.id AND r.subject = s->>'name' AND r.kind = 'backup' AND r.status = 'ok'),
+                i.created_at
+           FROM integrations i CROSS JOIN LATERAL jsonb_array_elements(i.inventory) s
+          WHERE i.enabled AND COALESCE((s->>'scheduled')::boolean, false)",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let limit = chrono::Utc::now() - chrono::Duration::minutes((hours * 60.0) as i64);
+    let stale: Vec<String> = rows
+        .into_iter()
+        .filter(|(_, subject, last, since)| last.unwrap_or(*since) < limit && matches_pattern(rule, subject))
+        .map(|(_, subject, last, _)| match last {
+            Some(t) => format!("{subject} (zuletzt vor {} h)", (chrono::Utc::now() - t).num_hours()),
+            None => format!("{subject} (noch nie)"),
+        })
+        .collect();
+    if !stale.is_empty() {
+        let message = format!("Kein erfolgreiches Backup in den letzten {hours:.0} Stunden: {}", stale.join(", "));
+        if open_alert(state, rule, None, &message, Some(stale.len() as f32)).await? {
+            let n = Notification::new("Backup überfällig", message, Severity::Warning, None).var("wert", format!("{} Container", stale.len()));
+            dispatch(state, rule, n).await;
+        }
+        return Ok(());
+    }
+    let resolved: Vec<(i64,)> = sqlx::query_as("UPDATE alerts SET resolved_at = now() WHERE rule_id = $1 AND resolved_at IS NULL RETURNING id")
+        .bind(rule.id)
+        .fetch_all(&state.db)
+        .await?;
+    if rule.notify_recovery && !resolved.is_empty() {
+        let n = Notification::new("Backups wieder aktuell", "Alle regelmäßig gesicherten Container haben ein aktuelles Backup", Severity::Resolved, None);
+        dispatch(state, rule, n).await;
+    }
+    Ok(())
 }
 
 /// Bis wann Protokollmeldungen je Regel schon geprüft wurden (beim Start: ab jetzt)

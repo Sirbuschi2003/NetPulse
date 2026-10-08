@@ -8,6 +8,7 @@ mod credentials;
 mod dashboard;
 mod devices;
 mod energy;
+mod integrations;
 mod public;
 mod session;
 mod stream;
@@ -116,7 +117,21 @@ pub fn router(state: AppState) -> Router {
         .route("/backup/files/{name}", get(backup::get_file).delete(backup::delete_file))
         .route("/maintenance", get(admin::list_maintenance).post(admin::create_maintenance))
         .route("/maintenance/{id}", axum::routing::patch(admin::update_maintenance).delete(admin::delete_maintenance))
-        .layer(middleware::from_fn(auth::csrf_guard));
+        // Verbundene Programme (Verwaltung)
+        .route("/integrations", get(integrations::list).post(integrations::create))
+        .route("/integrations/{id}", axum::routing::patch(integrations::update).delete(integrations::remove))
+        .route("/integrations/{id}/token", post(integrations::new_token))
+        .route("/integrations/{id}/links", put(integrations::set_link))
+        .route("/pauses", get(integrations::active_pauses))
+        .route("/pauses/{id}/end", post(integrations::stop_pause))
+        .layer(middleware::from_fn(auth::csrf_guard))
+        // Schnittstelle für verbundene Programme: Anmeldung per Schlüssel im Authorization-Header
+        // (kein Cookie – deshalb ohne CSRF-Header; fremde Webseiten kennen den Schlüssel nicht)
+        .route("/integration/v1/hello", get(integrations::hello))
+        .route("/integration/v1/inventory", put(integrations::put_inventory))
+        .route("/integration/v1/pause", post(integrations::pause))
+        .route("/integration/v1/pause/{id}/end", post(integrations::end_pause))
+        .route("/integration/v1/report", post(integrations::report));
 
     Router::new()
         .nest("/api", api)
